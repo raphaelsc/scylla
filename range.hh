@@ -96,6 +96,34 @@ public:
         }
         return false;
     }
+    // check if two ranges overlap.
+    template<typename Comparator>
+    bool overlap(const range& other, Comparator&& cmp) const {
+        bool this_wraps = is_wrap_around(cmp);
+        bool other_wraps = other.is_wrap_around(cmp);
+
+        if (this_wraps && other_wraps) {
+            return true;
+        } else if (this_wraps) {
+            auto unwrapped = unwrap();
+            return other.overlap(unwrapped.first, cmp) || other.overlap(unwrapped.second, cmp);
+        } else if (other_wraps) {
+            auto unwrapped = other.unwrap();
+            return overlap(unwrapped.first, cmp) || overlap(unwrapped.second, cmp);
+        }
+
+        // if both this and other have an open start, the two ranges will overlap.
+        // if only range A has an open start, range A and B will overlap if A contains B.
+        if (!start() && !other.start()) {
+            return true;
+        } else if (!start()) {
+            return contains(other.start()->value(), cmp);
+        } else if (!other.start()) {
+            return other.contains(start()->value(), cmp);
+        }
+        // else, the two ranges will overlap if either contain the start of the other.
+        return contains(other.start()->value(), cmp) || other.contains(start()->value(), cmp);
+    }
     static range make(bound start, bound end) {
         return range({std::move(start)}, {std::move(end)});
     }
