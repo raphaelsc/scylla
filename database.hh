@@ -175,7 +175,7 @@ private:
 private:
     void update_stats_for_new_sstable(uint64_t new_sstable_data_size);
     void add_sstable(sstables::sstable&& sstable);
-    void add_sstable(lw_shared_ptr<sstables::sstable> sstable);
+    void add_sstable(lw_shared_ptr<sstables::sstable> sstable, bool sstable_shard_check = true);
     void add_memtable();
     future<stop_iteration> try_flush_memtable_to_sstable(lw_shared_ptr<memtable> memt);
     future<> update_cache(memtable&, lw_shared_ptr<sstable_list> old_sstables);
@@ -701,5 +701,8 @@ column_family::apply(const frozen_mutation& m, const db::replay_position& rp) {
 }
 
 future<> update_schema_version_and_announce(distributed<service::storage_proxy>& proxy);
+
+// Returns true if sstable belongs to this shard. False otherwise.
+bool sstable_belongs_to_this_shard(const schema& s, sstables::sstable& sstable);
 
 #endif /* DATABASE_HH_ */

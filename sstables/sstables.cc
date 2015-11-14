@@ -46,6 +46,8 @@
 #include <regex>
 #include <core/align.hh>
 
+extern bool sstable_belongs_to_this_shard(const schema& s, sstables::sstable& sstable);
+
 namespace sstables {
 
 logging::logger sstlog("sstable");
@@ -1756,6 +1758,15 @@ sstable::remove_sstable_with_temp_toc(sstring ks, sstring cf, sstring dir, int64
         remove_file(filename(dir, ks, cf, v, generation, f, component_type::TemporaryTOC)).get();
         // Fsync'ing column family dir to guarantee that deletion completed.
         fsync_directory(dir).get();
+    });
+}
+
+future<bool>
+sstable::belongs_to_current_shard(const schema& s, sstring ks, sstring cf, sstring dir, int64_t generation, version_types v, format_types f) {
+    auto sst = std::make_unique<sstable>(ks, cf, dir, generation, v, f);
+    auto fut = sst->read_summary();
+    return std::move(fut).then([sst = std::move(sst), &s] () mutable {
+        return make_ready_future<bool>(::sstable_belongs_to_this_shard(s, *sst));
     });
 }
 

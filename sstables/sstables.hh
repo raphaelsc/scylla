@@ -507,6 +507,11 @@ public:
 
     future<> mutate_sstable_level(uint32_t);
 
+    // Function created to read the minimum amount of data from disk and determine
+    // whether or not a sstable belongs to the current shard.
+    static future<bool> belongs_to_current_shard(const schema& s, sstring ks, sstring cf, sstring dir, int64_t generation,
+                                                 version_types v, format_types f);
+
     // Allow the test cases from sstable_test.cc to test private methods. We use
     // a placeholder to avoid cluttering this class too much. The sstable_test class
     // will then re-export as public every method it needs.
