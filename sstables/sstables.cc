@@ -818,12 +818,12 @@ future<index_list> sstable::read_indexes(uint64_t summary_idx) {
 }
 
 template <sstable::component_type Type, typename T>
-future<> sstable::read_simple(T& component) {
+future<> sstable::read_simple(T& component, size_t buffer_size) {
 
     auto file_path = filename(Type);
     sstlog.debug(("Reading " + _component_map[Type] + " file {} ").c_str(), file_path);
-    return engine().open_file_dma(file_path, open_flags::ro).then([this, &component] (file f) {
-        auto r = make_lw_shared<file_random_access_reader>(std::move(f), 4096);
+    return engine().open_file_dma(file_path, open_flags::ro).then([this, &component, buffer_size] (file f) {
+        auto r = make_lw_shared<file_random_access_reader>(std::move(f), buffer_size);
         auto fut = parse(*r, component);
         return fut.finally([r = std::move(r)] {
             return r->close();
@@ -851,7 +851,7 @@ void sstable::write_simple(T& component) {
     w.close().get();
 }
 
-template future<> sstable::read_simple<sstable::component_type::Filter>(sstables::filter& f);
+template future<> sstable::read_simple<sstable::component_type::Filter>(sstables::filter& f, size_t buffer_size);
 template void sstable::write_simple<sstable::component_type::Filter>(sstables::filter& f);
 
 future<> sstable::read_compression() {

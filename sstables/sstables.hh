@@ -370,7 +370,7 @@ private:
     const sstring filename(component_type f) const;
 
     template <sstable::component_type Type, typename T>
-    future<> read_simple(T& comp);
+    future<> read_simple(T& comp, size_t buffer_size = 4096);
 
     template <sstable::component_type Type, typename T>
     void write_simple(T& comp);

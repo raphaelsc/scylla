@@ -38,7 +38,7 @@ future<> sstable::read_filter() {
     }
 
     return do_with(sstables::filter(), [this] (auto& filter) {
-        return this->read_simple<sstable::component_type::Filter>(filter).then([this, &filter] {
+        return this->read_simple<sstable::component_type::Filter>(filter, this->sstable_buffer_size).then([this, &filter] {
             large_bitset bs(filter.buckets.elements.size() * 64);
             bs.load(filter.buckets.elements.begin(), filter.buckets.elements.end());
             _filter = utils::filter::create_filter(filter.hashes, std::move(bs));
