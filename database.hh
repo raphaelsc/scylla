@@ -174,6 +174,9 @@ private:
     std::unique_ptr<memtable_flush_queue> _flush_queue;
 private:
     void update_stats_for_new_sstable(uint64_t new_sstable_data_size);
+    // add_sstable only adds a sstable to the column family. It's up to the
+    // caller to verify that the sstable is relevant to the current shard,
+    // if needed.
     void add_sstable(sstables::sstable&& sstable);
     void add_sstable(lw_shared_ptr<sstables::sstable> sstable);
     void add_memtable();
