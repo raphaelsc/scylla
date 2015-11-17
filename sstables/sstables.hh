@@ -507,6 +507,13 @@ public:
 
     future<> mutate_sstable_level(uint32_t);
 
+    // Consists of reading the minimum amount of data from disk and determining
+    // whether or not a sstable belongs to the current shard.
+    // The ignore part is about telling the deletion manager that a sstable
+    // is irrelevant for the current shard.
+    static future<bool> ignore_if_irrelevant(const schema& s, sstring ks, sstring cf, sstring dir, int64_t generation,
+                                             version_types v, format_types f);
+
     // Allow the test cases from sstable_test.cc to test private methods. We use
     // a placeholder to avoid cluttering this class too much. The sstable_test class
     // will then re-export as public every method it needs.

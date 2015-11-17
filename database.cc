@@ -457,6 +457,23 @@ void column_family::update_stats_for_new_sstable(uint64_t new_sstable_data_size)
     _stats.live_sstable_count++;
 }
 
+bool ignore_sstable_if_irrelevant(const schema& s, sstables::sstable& sstable) {
+    auto key_shard = [&s] (const partition_key& pk) {
+        auto token = dht::global_partitioner().get_token(s, pk);
+        return dht::shard_of(token);
+    };
+    auto s1 = key_shard(sstable.get_first_partition_key(s));
+    auto s2 = key_shard(sstable.get_last_partition_key(s));
+    auto me = engine().cpu_id();
+    auto included = (s1 <= me) && (me <= s2);
+    if (!included) {
+        dblog.info("sstable {} not relevant for this shard, ignoring", sstable.get_filename());
+        sstable.mark_for_deletion();
+        return false;
+    }
+    return true;
+}
+
 void column_family::add_sstable(sstables::sstable&& sstable) {
     add_sstable(make_lw_shared(std::move(sstable)));
 }
