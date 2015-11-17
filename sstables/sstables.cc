@@ -823,11 +823,15 @@ future<> sstable::read_simple(T& component) {
     auto file_path = filename(Type);
     sstlog.debug(("Reading " + _component_map[Type] + " file {} ").c_str(), file_path);
     return engine().open_file_dma(file_path, open_flags::ro).then([this, &component] (file f) {
-        auto r = make_lw_shared<file_random_access_reader>(std::move(f), 4096);
-        auto fut = parse(*r, component);
-        return fut.finally([r = std::move(r)] {
-            return r->close();
-        }).then([r] {});
+        auto fut = f.size();
+        return fut.then([this, &component, f] (uint64_t size) {
+            auto buf_size = std::min(uint64_t(sstable_buffer_size), align_up(size, f.disk_read_dma_alignment()));
+            auto r = make_lw_shared<file_random_access_reader>(std::move(f), buf_size);
+            auto fut = parse(*r, component);
+            return fut.finally([r = std::move(r)] {
+                return r->close();
+            }).then([r] {});
+        });
     }).then_wrapped([this, file_path] (future<> f) {
         try {
             f.get();
