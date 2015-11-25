@@ -258,13 +258,19 @@ enum class bootstrap_state {
         compactionLog.truncateBlocking();
     }
 
-    public static TabularData getCompactionHistory() throws OpenDataException
-    {
-        UntypedResultSet queryResultSet = executeInternal(String.format("SELECT * from system.%s", COMPACTION_HISTORY));
-        return CompactionHistoryTabularData.from(queryResultSet);
-    }
 #endif
+    struct compaction_history_entry {
+        utils::UUID id;
+        sstring ks;
+        sstring cf;
+        long compacted_at;
+        long bytes_in;
+        long bytes_out;
+        std::unordered_map<int32_t, long> rows_merged;
+    };
+
     future<> update_compaction_history(sstring ksname, sstring cfname, long compacted_at, long bytes_in, long bytes_out, std::map<int32_t, long> rows_merged);
+    future<std::vector<compaction_history_entry>> get_compaction_history();
 
     typedef std::vector<db::replay_position> replay_positions;
 
