@@ -258,26 +258,14 @@ enum class bootstrap_state {
         compactionLog.truncateBlocking();
     }
 
-    public static void updateCompactionHistory(String ksname,
-                                               String cfname,
-                                               long compactedAt,
-                                               long bytesIn,
-                                               long bytesOut,
-                                               Map<Integer, Long> rowsMerged)
-    {
-        // don't write anything when the history table itself is compacted, since that would in turn cause new compactions
-        if (ksname.equals("system") && cfname.equals(COMPACTION_HISTORY))
-            return;
-        String req = "INSERT INTO system.%s (id, keyspace_name, columnfamily_name, compacted_at, bytes_in, bytes_out, rows_merged) VALUES (?, ?, ?, ?, ?, ?, ?)";
-        executeInternal(String.format(req, COMPACTION_HISTORY), UUIDGen.getTimeUUID(), ksname, cfname, ByteBufferUtil.bytes(compactedAt), bytesIn, bytesOut, rowsMerged);
-    }
-
     public static TabularData getCompactionHistory() throws OpenDataException
     {
         UntypedResultSet queryResultSet = executeInternal(String.format("SELECT * from system.%s", COMPACTION_HISTORY));
         return CompactionHistoryTabularData.from(queryResultSet);
     }
 #endif
+    future<> update_compaction_history(sstring ksname, sstring cfname, long compacted_at, long bytes_in, long bytes_out, std::unordered_map<int32_t, long> rows_merged);
+
     typedef std::vector<db::replay_position> replay_positions;
 
     future<> save_truncation_record(const column_family&, db_clock::time_point truncated_at, db::replay_position);
