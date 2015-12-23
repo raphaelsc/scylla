@@ -2052,3 +2052,79 @@ SEASTAR_TEST_CASE(check_read_indexes) {
         });
     });
 }
+
+static std::vector<std::pair<sstring, dht::token>> token_generation_for_other_shard(unsigned tokens_to_generate) {
+    unsigned tokens = 0;
+    unsigned key_id = 0;
+    std::vector<std::pair<sstring, dht::token>> key_and_token_pair;
+
+    key_and_token_pair.reserve(tokens_to_generate);
+    dht::set_global_partitioner(to_sstring("org.apache.cassandra.dht.Murmur3Partitioner"));
+
+    while (tokens < tokens_to_generate) {
+        sstring key = to_sstring(key_id++);
+        dht::token token = create_token_from_key(key);
+        if (engine().cpu_id() == dht::global_partitioner().shard_of(token)) {
+            continue;
+        }
+        tokens++;
+        key_and_token_pair.emplace_back(key, token);
+    }
+    assert(key_and_token_pair.size() == tokens_to_generate);
+
+    std::sort(key_and_token_pair.begin(),key_and_token_pair.end(), [] (auto& i, auto& j) {
+        return i.second < j.second;
+    });
+
+    return key_and_token_pair;
+}
+
+SEASTAR_TEST_CASE(sstable_rewrite) {
+    // Check that rewrite works and that it will discard keys that are no longer relevant.
+
+    return test_setup::do_with_test_directory([] {
+        auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
+            {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", utf8_type}}, {}, utf8_type));
+
+        auto mt = make_lw_shared<memtable>(s);
+
+        const column_definition& r1_col = *s->get_column_definition("r1");
+
+        auto key_for_this_shard = token_generation_for_current_shard(1);
+        auto key_for_other_shard = token_generation_for_other_shard(1);
+
+        auto apply_key = [mt, s, &r1_col] (sstring key_to_write) {
+            auto key = partition_key::from_exploded(*s, {to_bytes(key_to_write)});
+            auto c_key = clustering_key::from_exploded(*s, {to_bytes("c1")});
+            mutation m(key, s);
+            m.set_clustered_cell(c_key, r1_col, make_atomic_cell(bytes("a")));
+            mt->apply(std::move(m));
+        };
+
+        apply_key(key_for_other_shard[0].first);
+        apply_key(key_for_this_shard[0].first);
+
+        auto sst = make_lw_shared<sstable>("ks", "cf", "tests/sstables/tests-temporary", 51, la, big);
+        return sst->write_components(*mt).then([s, sst] {
+            return reusable_sst("tests/sstables/tests-temporary", 51);
+        }).then([s, key = key_for_this_shard[0].first] (auto sstp) mutable {
+            auto creator = [] {
+                auto sst = make_lw_shared<sstables::sstable>("ks", "cf", "tests/sstables/tests-temporary", 52, la, big);
+                sst->set_unshared();
+                return sst;
+            };
+            return sstables::sstable::rewrite(sstp, creator, s).then([s, key] (auto newsst) {
+                BOOST_REQUIRE(newsst->generation() == 52);
+                auto reader = make_lw_shared(sstable_reader(newsst, s));
+                return (*reader)().then([reader, key] (mutation_opt m) {
+                    BOOST_REQUIRE(m);
+                    bytes stored_key = to_bytes(m->key().representation());
+                    BOOST_REQUIRE(stored_key == to_bytes(key));
+                    return (*reader)();
+                }).then([reader] (mutation_opt m) {
+                    BOOST_REQUIRE(!m);
+                });
+            }).then([sstp] {});
+        }).then([sst, mt, s] {});
+    });
+}
