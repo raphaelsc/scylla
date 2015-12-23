@@ -30,6 +30,7 @@
 #include "core/shared_ptr.hh"
 #include "core/do_with.hh"
 #include "core/thread.hh"
+#include "core/pipe.hh"
 #include <iterator>
 
 #include "types.hh"
@@ -41,6 +42,7 @@
 #include "memtable.hh"
 #include "range.hh"
 #include "downsampling.hh"
+#include "service/storage_service.hh"
 #include <boost/filesystem/operations.hpp>
 #include <boost/algorithm/string.hpp>
 #include <boost/range/adaptor/map.hpp>
@@ -1757,6 +1759,112 @@ void sstable::mark_sstable_for_deletion(sstring ks, sstring cf, sstring dir, int
     auto sst = sstable(ks, cf, dir, generation, v, f);
     sstlog.info("sstable {} not relevant for this shard, ignoring", sst.get_filename());
     sst.mark_for_deletion();
+}
+
+static bool belongs_to_current_node(const dht::token& t, const std::vector<range<dht::token>>& owned_ranges) {
+    for (auto& r : owned_ranges) {
+        if (r.contains(t, dht::token_comparator())) {
+            return true;
+        }
+    }
+    return false;
+}
+
+future<shared_sstable> sstable::rewrite(const shared_sstable& sst, std::function<shared_sstable()> creator, schema_ptr schema) {
+
+    class sstable_reader final : public ::mutation_reader::impl {
+        const shared_sstable& _sst;
+        mutation_reader _reader;
+        std::vector<range<dht::token>> _owned_ranges;
+        bool _storage_service_present = true; // For testing purposes.
+    public:
+        sstable_reader(const shared_sstable& sst, schema_ptr schema)
+                : _sst(sst)
+                , _reader(_sst->read_rows(schema)) {
+            if (service::get_storage_service().local_is_initialized()) {
+                _owned_ranges = service::get_local_storage_service().get_local_ranges(schema->ks_name());
+            } else {
+                _storage_service_present = false;
+            }
+        }
+
+        virtual future<mutation_opt> operator()() override {
+            return _reader.read().then([this] (mutation_opt m) {
+                if (!bool(m)) {
+                    return make_ready_future<mutation_opt>(std::move(m));
+                }
+
+                if (dht::shard_of(m->token()) != engine().cpu_id()) {
+                    return operator()();
+                }
+
+                if (_storage_service_present && !belongs_to_current_node(m->token(), _owned_ranges)) {
+                    return operator()();
+                }
+
+                return make_ready_future<mutation_opt>(std::move(m));
+            });
+        }
+    };
+    auto reader = make_mutation_reader<sstable_reader>(sst, schema);
+
+    seastar::pipe<mutation> output{16}; // TODO: tune buffer size of pipe.
+    auto output_reader = make_lw_shared<seastar::pipe_reader<mutation>>(std::move(output.reader));
+    auto output_writer = make_lw_shared<seastar::pipe_writer<mutation>>(std::move(output.writer));
+
+    future<> read_done = repeat([output_writer, reader = std::move(reader)] () mutable {
+        return reader().then([output_writer] (auto mopt) {
+            if (mopt) {
+                return output_writer->write(std::move(*mopt)).then([] {
+                    return make_ready_future<stop_iteration>(stop_iteration::no);
+                });
+            } else {
+                return make_ready_future<stop_iteration>(stop_iteration::yes);
+            }
+        });
+    }).then([output_writer] {});
+
+    struct queue_reader final : public ::mutation_reader::impl {
+        lw_shared_ptr<seastar::pipe_reader<mutation>> pr;
+        queue_reader(lw_shared_ptr<seastar::pipe_reader<mutation>> pr) : pr(std::move(pr)) {}
+        virtual future<mutation_opt> operator()() override {
+            return pr->read().then([] (std::experimental::optional<mutation> m) mutable {
+                return make_ready_future<mutation_opt>(std::move(m));
+            });
+        }
+    };
+    ::mutation_reader mutation_queue_reader = make_mutation_reader<queue_reader>(output_reader);
+
+    auto newtab = creator();
+    newtab->get_metadata_collector().set_replay_position(sst->get_stats_metadata().position);
+    newtab->get_metadata_collector().sstable_level(sst->get_sstable_level());
+    auto estimated_partitions = sst->get_estimated_key_count();
+    auto max_sstable_size = std::numeric_limits<uint64_t>::max();
+
+    future<> write_done = newtab->write_components(std::move(mutation_queue_reader), estimated_partitions, schema, max_sstable_size).then([newtab] {
+        return newtab->open_data().then([newtab] {});
+    });
+
+    return when_all(std::move(read_done), std::move(write_done)).then([] (std::tuple<future<>, future<>> t) {
+        sstring ex;
+        try {
+            std::get<0>(t).get();
+        } catch(...) {
+            ex += sprint("read exception: %s", std::current_exception());
+        }
+
+        try {
+            std::get<1>(t).get();
+        } catch(...) {
+            ex += sprint("%swrite_exception: %s", (ex.size() ? ", " : ""), std::current_exception());
+        }
+
+        if (ex.size()) {
+            throw std::runtime_error(ex);
+        }
+    }).then([newtab] {
+        return std::move(newtab);
+    });
 }
 
 }

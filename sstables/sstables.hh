@@ -523,6 +523,11 @@ public:
     // relevant to the current shard, thus can be deleted by the deletion manager.
     static void mark_sstable_for_deletion(sstring ks, sstring cf, sstring dir, int64_t generation, version_types v, format_types f);
 
+    // Rewrite a sstable discarding irrelevant keys, i.e. those ones that don't belong
+    // to current shard or/and node. New sstable is returned to the caller.
+    static future<lw_shared_ptr<sstable>>
+    rewrite(const lw_shared_ptr<sstable>& sst, std::function<lw_shared_ptr<sstable>()> creator, schema_ptr schema);
+
     // Allow the test cases from sstable_test.cc to test private methods. We use
     // a placeholder to avoid cluttering this class too much. The sstable_test class
     // will then re-export as public every method it needs.
