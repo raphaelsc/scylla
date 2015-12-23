@@ -265,15 +265,22 @@ void set_storage_service(http_context& ctx, routes& r) {
     });
 
     ss::force_keyspace_cleanup.set(r, [&ctx](std::unique_ptr<request> req) {
-        //TBD
-        // FIXME
-        // the nodetool clean up is used in many tests
-        // this workaround willl let it work until
-        // a cleanup is implemented
-        warn(unimplemented::cause::API);
         auto keyspace = validate_keyspace(ctx, req->param);
-        auto column_family = req->get_query_param("cf");
-        return make_ready_future<json::json_return_type>(0);
+        auto column_families = split_cf(req->get_query_param("cf"));
+        if (column_families.empty()) {
+            column_families = map_keys(ctx.db.local().find_keyspace(keyspace).metadata().get()->cf_meta_data());
+        }
+        return ctx.db.invoke_on_all([keyspace, column_families] (database& db) {
+            std::vector<column_family*> column_families_vec;
+            for (auto cf : column_families) {
+                column_families_vec.push_back(&db.find_column_family(keyspace, cf));
+            }
+            return parallel_for_each(column_families_vec, [] (column_family* cf) {
+                return cf->perform_cleanup_on_sstables();
+            });
+        }).then([]{
+            return make_ready_future<json::json_return_type>(0);
+        });
     });
 
     ss::scrub.set(r, [&ctx](std::unique_ptr<request> req) {
