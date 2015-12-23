@@ -2128,3 +2128,73 @@ SEASTAR_TEST_CASE(sstable_rewrite) {
         }).then([sst, mt, s] {});
     });
 }
+
+SEASTAR_TEST_CASE(sstable_cleanup_test) {
+    auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
+        {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", int32_type}}, {}, utf8_type));
+
+    auto tmp = make_lw_shared<tmpdir>();
+
+    column_family::config cfg;
+    cfg.datadir = tmp->path;
+    cfg.enable_commitlog = false;
+    cfg.enable_incremental_backups = false;
+    auto cm = make_lw_shared<compaction_manager>();
+    cm->start(1);
+    auto cf = make_lw_shared<column_family>(s, cfg, column_family::no_commitlog(), *cm);
+    cf->start();
+
+    auto generations = make_lw_shared<std::vector<unsigned long>>({1, 2, 3, 4});
+    auto this_shard_keys = token_generation_for_current_shard(1);
+    auto other_shard_keys = token_generation_for_other_shard(1);
+
+    return do_for_each(*generations, [cf, s, tmp, this_shard_keys, other_shard_keys] (unsigned long generation) {
+        auto mt = make_lw_shared<memtable>(s);
+        const column_definition& r1_col = *s->get_column_definition("r1");
+
+        auto apply_key = [mt, s, &r1_col] (sstring key_to_write) {
+            auto key = partition_key::from_exploded(*s, {to_bytes(key_to_write)});
+            auto c_key = clustering_key::from_exploded(*s, {to_bytes("abc")});
+            mutation m(key, s);
+            m.set_clustered_cell(c_key, r1_col, make_atomic_cell(int32_type->decompose(1)));
+            mt->apply(std::move(m));
+        };
+
+        apply_key(this_shard_keys[0].first);
+        apply_key(other_shard_keys[0].first);
+
+        auto sst = make_lw_shared<sstable>("ks", "cf", tmp->path, generation, la, big);
+
+        return sst->write_components(*mt).then([mt, sst, cf] {
+            return sst->load().then([sst, cf] {
+                column_family_test(cf).add_sstable(std::move(*sst));
+                return make_ready_future<>();
+            });
+        });
+    }).then([cf, generations] {
+        BOOST_REQUIRE(cf->sstables_count() == generations->size());
+        return cf->perform_cleanup_on_sstables();
+    }).then([cf, s, generations, this_shard_keys] {
+        BOOST_REQUIRE(cf->sstables_count() == generations->size());
+        auto sstables = cf->get_sstables();
+
+        return do_for_each(*sstables, [s, sstables, this_shard_keys] (auto& e) {
+            auto& sst = e.second;
+            auto key = this_shard_keys[0].first;
+
+            auto reader = make_lw_shared(sstable_reader(sst, s));
+            return (*reader)().then([reader, key] (mutation_opt m) {
+                BOOST_REQUIRE(m);
+                bytes stored_key = to_bytes(m->key().representation());
+                BOOST_REQUIRE(stored_key == to_bytes(key));
+                return (*reader)();
+            }).then([reader] (mutation_opt m) {
+                BOOST_REQUIRE(!m);
+            });
+        });
+    }).then([s, tmp, cm, cf] {
+        return cm->stop().then([cf, cm, tmp] {
+            return make_ready_future<>();
+        });
+    });
+}
