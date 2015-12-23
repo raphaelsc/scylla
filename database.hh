@@ -169,6 +169,8 @@ private:
     compaction_manager& _compaction_manager;
     // Whether or not a cf is queued by its compaction manager.
     bool _compaction_manager_queued = false;
+    // Used to avoid concurrent cleanup on the same cf.
+    bool _cleaning_up = false;
     int _compaction_disabled = 0;
     class memtable_flush_queue;
     std::unique_ptr<memtable_flush_queue> _flush_queue;
@@ -342,6 +344,11 @@ public:
             }
         });
     }
+
+    // Performs a cleanup on each sstable of this column family. Cleanup is about
+    // discarding keys that are no longer relevant for a given sstable, e.g. after
+    // node loses part of its token range because of a newly added node.
+    future<> perform_cleanup_on_sstables();
 private:
     // One does not need to wait on this future if all we are interested in, is
     // initiating the write.  The writes initiated here will eventually
