@@ -757,6 +757,89 @@ column_family::compact_sstables(sstables::compaction_descriptor descriptor) {
     });
 }
 
+static bool needs_cleanup(const lw_shared_ptr<sstables::sstable>& sst,
+                   const lw_shared_ptr<std::vector<range<dht::token>>>& owned_ranges,
+                   schema_ptr s) {
+    auto first = sst->get_first_partition_key(*s);
+    auto last = sst->get_last_partition_key(*s);
+    auto first_token = dht::global_partitioner().get_token(*s, first);
+    auto last_token = dht::global_partitioner().get_token(*s, last);
+    range<dht::token> sst_token_range = range<dht::token>::make(first_token, last_token);
+
+    // return true iff sst partition range isn't fully contained in any of the owned ranges.
+    for (auto& r : *owned_ranges) {
+        if (r.contains(sst_token_range, dht::token_comparator())) {
+            return false;
+        }
+    }
+    return true;
+}
+
+future<> column_family::perform_cleanup_on_sstables() {
+    if (_cleaning_up) {
+        return make_ready_future<>();
+    }
+    _cleaning_up = true;
+
+    return with_lock(_sstables_lock.for_read(), [this] {
+        auto current_sstables = _sstables;
+        auto cleaned_tables = make_lw_shared<std::vector<sstables::shared_sstable>>();
+        auto new_tables = make_lw_shared<std::vector<sstables::shared_sstable>>();
+
+        auto create_sstable = [this] {
+            auto gen = this->calculate_generation_for_new_table();
+            auto sst = make_lw_shared<sstables::sstable>(_schema->ks_name(), _schema->cf_name(), _config.datadir, gen,
+                    sstables::sstable::version_types::ka,
+                    sstables::sstable::format_types::big);
+            sst->set_unshared();
+            return sst;
+        };
+
+        std::vector<range<dht::token>> r;
+        // Check that local storage service is initialized before getting local ranges
+        // because this code may be running on behalf of a testcase.
+        if (service::get_storage_service().local_is_initialized()) {
+            r = service::get_local_storage_service().get_local_ranges(_schema->ks_name());
+        }
+        auto owned_ranges = make_lw_shared<std::vector<range<dht::token>>>(std::move(r));
+
+        return parallel_for_each(*current_sstables, [this, cleaned_tables, new_tables, create_sstable, owned_ranges] (auto& entry) {
+            auto sst = entry.second;
+
+            if (!owned_ranges->empty() && !needs_cleanup(sst, owned_ranges, _schema)) {
+                return make_ready_future<>();
+            }
+
+            return sstables::sstable::rewrite(sst, create_sstable, this->schema()).then([sst, cleaned_tables, new_tables] (auto newsst) {
+                cleaned_tables->push_back(sst);
+                new_tables->push_back(newsst);
+                return make_ready_future<>();
+            }).then_wrapped([sst] (future<> f) {
+                // If cleanup fail in the middle, we have two options:
+                // 1) Delete all sstables created up to this point.
+                // 2) Start using the sstables created up to this point.
+                // The second option is plausible because cleanup is performed
+                // individually on each sstable. In addition, it saves work.
+
+                try {
+                    f.get();
+                } catch (std::exception& e) {
+                    dblog.error("Exception occurred when cleaning up sstable {}: {}", sst->get_filename(), e.what());
+                    throw;
+                } catch(...) {
+                    dblog.error("Unrecognized exception occurred when cleaning up sstable {}", sst->get_filename());
+                    throw;
+                }
+            });
+        }).finally([this, current_sstables, new_tables, cleaned_tables] () mutable {
+            this->rebuild_sstable_list(*new_tables, *cleaned_tables);
+            return make_ready_future<>();
+        });
+    }).finally([this] () mutable {
+        _cleaning_up = false;
+    });
+}
+
 future<>
 column_family::load_new_sstables(std::vector<sstables::entry_descriptor> new_tables) {
     return parallel_for_each(new_tables, [this] (auto comps) {
