@@ -481,6 +481,9 @@ public:
     void apply(tombstone t) {
         _row.apply(t);
     }
+    bool empty() const {
+        return _row.empty();
+    }
     struct compare {
         clustering_key::less_compare _c;
         compare(const schema& s) : _c(s) {}

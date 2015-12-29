@@ -801,6 +801,17 @@ uint32_t mutation_partition::do_compact(const schema& s,
         _tombstone = tombstone();
     }
 
+    auto rows_it = _rows.begin();
+    auto rows_end = _rows.end();
+    while (rows_it != rows_end) {
+        rows_entry& row = *rows_it;
+        if (row.empty()) {
+            rows_it = _rows.erase(rows_it);
+        } else {
+            ++rows_it;
+        }
+    }
+
     // FIXME: purge unneeded prefix tombstones based on row_ranges
 
     return row_count;
