@@ -721,11 +721,17 @@ void mutation_partition::trim_rows(const schema& s,
 
         while (last != it_range.end()) {
             rows_entry& e = *last;
-            if (func(e) == stop_iteration::yes) {
+            auto stop_it = func(e);
+            if (e.empty()) {
+                last = reversal_traits<reversed>::erase_and_dispose(_rows, last, std::next(last, 1), deleter);
+            } else {
+                ++last;
+            }
+
+            if (stop_it == stop_iteration::yes) {
                 stop = true;
                 break;
             }
-            ++last;
         }
     }
 
