@@ -243,6 +243,18 @@ public:
         return _marked_for_deletion;
     }
 
+    void mark_for_compaction() {
+        _marked_for_compaction = true;
+    }
+
+    void unmark_for_compaction() {
+        _marked_for_compaction = false;
+    }
+
+    bool marked_for_compaction() const {
+        return _marked_for_compaction;
+    }
+
     void add_ancestor(int64_t generation) {
         _collector.add_ancestor(generation);
     }
@@ -365,6 +377,7 @@ private:
     filter_tracker _filter_tracker;
 
     bool _marked_for_deletion = false;
+    bool _marked_for_compaction = false;
 
     gc_clock::time_point _now;
 

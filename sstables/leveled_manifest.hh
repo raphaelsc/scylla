@@ -106,7 +106,7 @@ public:
         leveled_manifest manifest = leveled_manifest(cfs, max_sstable_size_in_mb);
 
         // ensure all SSTables are in the manifest
-        auto sstables = cfs.get_sstables();
+        auto sstables = cfs.get_uncompacting_sstables();
         for (auto& map_entry : *sstables) {
             auto& sstable = map_entry.second;
             manifest.add(sstable);

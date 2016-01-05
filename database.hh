@@ -309,6 +309,8 @@ public:
     }
 
     lw_shared_ptr<sstable_list> get_sstables();
+    // Return sstables after filtering out the ones that are being compacted.
+    lw_shared_ptr<sstable_list> get_uncompacting_sstables();
     size_t sstables_count();
     int64_t get_unleveled_sstables() const;
 

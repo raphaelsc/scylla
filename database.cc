@@ -730,12 +730,28 @@ column_family::rebuild_sstable_list(const std::vector<sstables::shared_sstable>&
     }
 }
 
+static void mark_for_compaction(std::vector<sstables::shared_sstable>& sstables) {
+    // Mark all sstables that will be compacted as compacting to prevent
+    // a sstable from being compacted twice or more.
+    for (auto& sst : sstables) {
+        sst->mark_for_compaction();
+    }
+}
+
+static void unmark_for_compaction(std::vector<sstables::shared_sstable>& sstables) {
+    for (auto& sst : sstables) {
+        sst->unmark_for_compaction();
+    }
+}
+
 future<>
 column_family::compact_sstables(sstables::compaction_descriptor descriptor) {
     if (!descriptor.sstables.size()) {
         // if there is nothing to compact, just return.
         return make_ready_future<>();
     }
+
+    mark_for_compaction(descriptor.sstables);
 
     return with_lock(_sstables_lock.for_read(), [this, descriptor = std::move(descriptor)] {
         auto sstables_to_compact = make_lw_shared<std::vector<sstables::shared_sstable>>(std::move(descriptor.sstables));
@@ -754,6 +770,8 @@ column_family::compact_sstables(sstables::compaction_descriptor descriptor) {
         return sstables::compact_sstables(*sstables_to_compact, *this,
                 create_sstable, descriptor.max_sstable_bytes, descriptor.level).then([this, new_tables, sstables_to_compact] {
             this->rebuild_sstable_list(*new_tables, *sstables_to_compact);
+        }).finally([sstables_to_compact] {
+            unmark_for_compaction(*sstables_to_compact);
         });
     });
 }
@@ -841,6 +859,18 @@ int64_t column_family::get_unleveled_sstables() const {
 
 lw_shared_ptr<sstable_list> column_family::get_sstables() {
     return _sstables;
+}
+
+lw_shared_ptr<sstable_list> column_family::get_uncompacting_sstables() {
+    auto sstables_for_compaction = make_lw_shared<sstable_list>();
+    for (auto& e : *_sstables) {
+        auto& sstable = e.second;
+        if (sstable->marked_for_compaction()) {
+            continue;
+        }
+        sstables_for_compaction->emplace(sstable->generation(), sstable);
+    }
+    return sstables_for_compaction;
 }
 
 future<> column_family::populate(sstring sstdir) {

@@ -626,7 +626,7 @@ future<> size_tiered_compaction_strategy::compact(column_family& cfs) {
     int min_threshold = cfs.schema()->min_compaction_threshold();
     int max_threshold = cfs.schema()->max_compaction_threshold();
 
-    auto candidates = cfs.get_sstables();
+    auto candidates = cfs.get_uncompacting_sstables();
 
     // TODO: Add support to filter cold sstables (for reference: SizeTieredCompactionStrategy::filterColdSSTables).
 
