@@ -59,6 +59,7 @@
 #include "leveled_manifest.hh"
 #include "db/system_keyspace.hh"
 #include "db/query_context.hh"
+#include "service/storage_service.hh"
 
 namespace sstables {
 
@@ -87,11 +88,23 @@ static api::timestamp_type get_max_purgeable_timestamp(schema_ptr schema,
     return timestamp;
 }
 
+static bool belongs_to_current_node(const dht::token& t, const std::vector<range<dht::token>>& owned_ranges) {
+    if (dht::shard_of(t) != engine().cpu_id()) {
+        return false;
+    }
+    for (auto& r : owned_ranges) {
+        if (r.contains(t, dht::token_comparator())) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // compact_sstables compacts the given list of sstables creating one
 // (currently) or more (in the future) new sstables. The new sstables
 // are created using the "sstable_creator" object passed by the caller.
-future<> compact_sstables(std::vector<shared_sstable> sstables,
-        column_family& cf, std::function<shared_sstable()> creator, uint64_t max_sstable_size, uint32_t sstable_level) {
+future<> compact_sstables(std::vector<shared_sstable> sstables, column_family& cf, std::function<shared_sstable()> creator,
+                          uint64_t max_sstable_size, uint32_t sstable_level, bool cleanup) {
     std::vector<::mutation_reader> readers;
     uint64_t estimated_partitions = 0;
     auto ancestors = make_lw_shared<std::vector<unsigned long>>();
@@ -126,7 +139,10 @@ future<> compact_sstables(std::vector<shared_sstable> sstables,
         estimated_partitions += sst->get_estimated_key_count();
         stats->total_partitions += sst->get_estimated_key_count();
         // Compacted sstable keeps track of its ancestors.
-        ancestors->push_back(sst->generation());
+        // If cleaning up, generated sstable will have no ancestor.
+        if (!cleanup) {
+            ancestors->push_back(sst->generation());
+        }
         sstable_logger_msg += sprint("%s:level=%d, ", sst->get_filename(), sst->get_sstable_level());
         stats->start_size += sst->data_size();
         // TODO:
@@ -146,7 +162,7 @@ future<> compact_sstables(std::vector<shared_sstable> sstables,
     stats->sstables = sstables.size();
     stats->ks = schema->ks_name();
     stats->cf = schema->cf_name();
-    logger.info("Compacting {}", sstable_logger_msg);
+    logger.info("{} {}", (!cleanup) ? "Compacting" : "Cleaning", sstable_logger_msg);
 
     class compacting_reader final : public ::mutation_reader::impl {
     private:
@@ -154,18 +170,29 @@ future<> compact_sstables(std::vector<shared_sstable> sstables,
         ::mutation_reader _reader;
         std::vector<shared_sstable> _not_compacted_sstables;
         gc_clock::time_point _now;
+        std::vector<range<dht::token>> _owned_ranges;
+        bool _storage_service_present = true;
     public:
         compacting_reader(schema_ptr schema, std::vector<::mutation_reader> readers, std::vector<shared_sstable> not_compacted_sstables)
             : _schema(std::move(schema))
             , _reader(make_combined_reader(std::move(readers)))
             , _not_compacted_sstables(std::move(not_compacted_sstables))
             , _now(gc_clock::now())
-        { }
+        {
+            if (service::get_storage_service().local_is_initialized()) {
+                _owned_ranges = service::get_local_storage_service().get_local_ranges(_schema->ks_name());
+            } else {
+                _storage_service_present = false;
+            }
+        }
 
         virtual future<mutation_opt> operator()() override {
             return _reader().then([this] (mutation_opt m) {
                 if (!bool(m)) {
                     return make_ready_future<mutation_opt>(std::move(m));
+                }
+                if (_storage_service_present && !belongs_to_current_node(m->token(), _owned_ranges)) {
+                    return operator()();
                 }
                 auto max_purgeable = get_max_purgeable_timestamp(_schema, _not_compacted_sstables, m->decorated_key());
                 m->partition().compact_for_compaction(*_schema, max_purgeable, _now);
@@ -268,7 +295,7 @@ future<> compact_sstables(std::vector<shared_sstable> sstables,
         if (ex.size()) {
             throw std::runtime_error(ex);
         }
-    }).then([start_time, stats] {
+    }).then([start_time, stats, cleanup] {
         double ratio = double(stats->end_size) / double(stats->start_size);
         auto end_time = std::chrono::steady_clock::now();
         // time taken by compaction in seconds.
@@ -285,8 +312,9 @@ future<> compact_sstables(std::vector<shared_sstable> sstables,
         // - add support to merge summary (message: Partition merge counts were {%s}.).
         // - there is no easy way, currently, to know the exact number of total partitions.
         // By the time being, using estimated key count.
-        logger.info("Compacted {} sstables to [{}]. {} bytes to {} (~{}% of original) in {}ms = {}MB/s. " \
+        logger.info("{} {} sstables to [{}]. {} bytes to {} (~{}% of original) in {}ms = {}MB/s. " \
             "~{} total partitions merged to {}.",
+            (!cleanup) ? "Compacted" : "Cleaned",
             stats->sstables, new_sstables_msg, stats->start_size, stats->end_size, (int) (ratio * 100),
             std::chrono::duration_cast<std::chrono::milliseconds>(duration).count(), throughput,
             stats->total_partitions, stats->total_keys_written);
@@ -294,6 +322,11 @@ future<> compact_sstables(std::vector<shared_sstable> sstables,
         // If compaction is running for testing purposes, detect that there is
         // no query context and skip code that updates compaction history.
         if (!db::qctx) {
+            return make_ready_future<>();
+        }
+
+        // Skip code that updates compaction history if running on behalf of a cleanup job.
+        if (cleanup) {
             return make_ready_future<>();
         }
 
