@@ -235,3 +235,14 @@ future<> compaction_manager::remove(column_family* cf) {
         });
     }).then([tasks_to_stop] {});
 }
+
+void compaction_manager::stop_compaction(sstring type) {
+    // FIXME: this method only works for compaction of type compaction.
+    // Other types are: validation, cleanup, scrub, index_build.
+    if (type != "COMPACTION") {
+        return;
+    }
+    for (auto& info : _compactions) {
+        info->stop();
+    }
+}

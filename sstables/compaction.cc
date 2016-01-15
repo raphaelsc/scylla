@@ -194,6 +194,10 @@ future<> compact_sstables(std::vector<shared_sstable> sstables,
     auto output_writer = make_lw_shared<seastar::pipe_writer<mutation>>(std::move(output.writer));
 
     future<> read_done = repeat([output_writer, reader = std::move(reader), info] () mutable {
+        if (info->is_stop_requested()) {
+            // Compaction manager will catch this exception and re-schedule the compaction.
+            throw std::runtime_error(sprint("Compaction for %s/%s was deliberately stopped.", info->ks, info->cf));
+        }
         return reader().then([output_writer, info] (auto mopt) {
             if (mopt) {
                 info->total_keys_written++;
