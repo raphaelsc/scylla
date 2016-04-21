@@ -910,6 +910,8 @@ SEASTAR_TEST_CASE(reshuffle) {
                     test_sstable_exists("tests/sstables/generation", 10, false)
                 ).discard_result().then([cm] {
                     return cm->stop();
+                }).then([cf] {
+                    return cf->stop();
                 });
             }).then([cm, cf] {});
         });

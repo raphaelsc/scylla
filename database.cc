@@ -154,6 +154,7 @@ column_family::sstables_as_mutation_source() {
 
 // define in .cc, since sstable is forward-declared in .hh
 column_family::~column_family() {
+    assert(_stopped);
 }
 
 
@@ -762,6 +763,7 @@ void
 column_family::start() {
     // FIXME: add option to disable automatic compaction.
     start_compaction();
+    _stopped = false;
 }
 
 future<>
@@ -774,7 +776,9 @@ column_family::stop() {
             return _streaming_flush_gate.close();
         });
     }).then([this] {
-        return _sstable_deletion_gate.close();
+        return _sstable_deletion_gate.close().then([this] {
+            _stopped = true;
+        });
     });
 }
 

@@ -335,6 +335,7 @@ private:
     // Last but not least, we seldom need to guarantee any ordering here: as long
     // as all data is waited for, we're good.
     seastar::gate _streaming_flush_gate;
+    bool _stopped = true;
 private:
     void update_stats_for_new_sstable(uint64_t disk_space_used_by_sstable);
     void add_sstable(sstables::sstable&& sstable);
