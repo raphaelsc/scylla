@@ -339,12 +339,14 @@ compaction_descriptor size_tiered_compaction_strategy::get_sstables_for_compacti
     // TODO: Add support to filter cold sstables (for reference: SizeTieredCompactionStrategy::filterColdSSTables).
 
     auto buckets = get_buckets(candidates, max_threshold);
+    auto& cm = cfs.get_compaction_manager();
 
     std::vector<sstables::shared_sstable> most_interesting = most_interesting_bucket(std::move(buckets), min_threshold, max_threshold);
     if (most_interesting.empty()) {
         // nothing to do
         return sstables::compaction_descriptor();
     }
+    cm.trim_to_compact(&cfs, most_interesting);
 
     return sstables::compaction_descriptor(std::move(most_interesting));
 }
