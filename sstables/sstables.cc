@@ -962,6 +962,22 @@ void sstable::write_statistics(const io_priority_class& pc) {
     write_simple<component_type::Statistics>(_statistics, pc);
 }
 
+void sstable::rewrite_statistics(const io_priority_class& pc) {
+    auto file_path = filename(component_type::Statistics) + ".tmp";
+    sstlog.debug("Rewriting statistics component of sstable {}", get_filename());
+    file f = new_sstable_component_file(sstable_write_error, file_path, open_flags::wo | open_flags::create | open_flags::truncate).get0();
+
+    file_output_stream_options options;
+    options.buffer_size = sstable_buffer_size;
+    options.io_priority_class = pc;
+    auto w = file_writer(std::move(f), std::move(options));
+    write(w, _statistics);
+    w.flush().get();
+    w.close().get();
+    // rename() guarantees atomicity when renaming a file into place.
+    sstable_write_io_check(rename_file, file_path, filename(component_type::Statistics)).get();
+}
+
 future<> sstable::read_summary(const io_priority_class& pc) {
     if (_summary) {
         return make_ready_future<>();
@@ -1838,7 +1854,7 @@ future<> sstable::mutate_sstable_level(uint32_t new_level) {
         // which comprises mostly hard link creation and this operation at the end + this operation,
         // and also (eventually) by some compaction strategy. In any of the cases, it won't be high
         // priority enough so we will use the default priority
-        write_statistics(default_priority_class());
+        rewrite_statistics(default_priority_class());
     });
 }
 
