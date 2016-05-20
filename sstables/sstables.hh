@@ -124,6 +124,7 @@ public:
         Filter,
         Statistics,
         TemporaryTOC,
+        TemporaryStatistics,
     };
     enum class version_types { ka, la };
     enum class format_types { big };

@@ -163,6 +163,7 @@ std::unordered_map<sstable::component_type, sstring, enum_hash<sstable::componen
     { component_type::Filter, "Filter.db" },
     { component_type::Statistics, "Statistics.db" },
     { component_type::TemporaryTOC, TEMPORARY_TOC_SUFFIX },
+    { component_type::TemporaryStatistics, "Statistics.db.tmp" },
 };
 
 // This assumes that the mappings are small enough, and called unfrequent
@@ -963,7 +964,7 @@ void sstable::write_statistics(const io_priority_class& pc) {
 }
 
 void sstable::rewrite_statistics(const io_priority_class& pc) {
-    auto file_path = filename(component_type::Statistics) + ".tmp";
+    auto file_path = filename(component_type::TemporaryStatistics);
     sstlog.debug("Rewriting statistics component of sstable {}", get_filename());
     file f = new_sstable_component_file(sstable_write_error, file_path, open_flags::wo | open_flags::create | open_flags::truncate).get0();
 
