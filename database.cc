@@ -1087,12 +1087,13 @@ void column_family::do_trigger_compaction() {
 }
 
 future<> column_family::run_compaction(sstables::compaction_descriptor descriptor) {
-    assert(_stats.pending_compactions > 0);
     return compact_sstables(std::move(descriptor)).then([this] {
         // only do this on success. (no exceptions)
-        // in that case, we rely on it being still set
-        // for reqeueuing
-        _stats.pending_compactions--;
+        // Compaction is retried until strategy says there's nothing left to compact,
+        // so run_compaction() may be called when _stats.pending_compactions == 0.
+        if (_stats.pending_compactions > 0) {
+            _stats.pending_compactions--;
+        }
     });
 }
 

@@ -168,7 +168,9 @@ lw_shared_ptr<compaction_manager::task> compaction_manager::task_start(column_fa
                 sstables::compaction_strategy cs = cf.get_compaction_strategy();
                 descriptor = cs.get_sstables_for_compaction(cf, std::move(candidates));
                 weight = trim_to_compact(&cf, descriptor);
-                if (!try_to_register_weight(&cf, weight, cs.parallel_compaction())) {
+                // We will stop compaction task if strategy said that there's nothing to compact or
+                // compaction job cannot be run in parallel.
+                if (descriptor.sstables.empty() || !try_to_register_weight(&cf, weight, cs.parallel_compaction())) {
                     task->stopping = true;
                     _stats.pending_tasks--;
                     cmlog.debug("Refused compaction job ({} sstable(s)) of weight {} for {}.{}",
@@ -229,7 +231,7 @@ lw_shared_ptr<compaction_manager::task> compaction_manager::task_start(column_fa
                     return task->compaction_retry.retry().then([this, task] {
                         return make_ready_future<stop_iteration>(stop_iteration::no);
                     });
-                } else if (!task->cleanup && task->compacting_cf->pending_compactions()) {
+                } else if (!task->cleanup) {
                     _stats.pending_tasks++;
                     return make_ready_future<stop_iteration>(stop_iteration::no);
                 }
