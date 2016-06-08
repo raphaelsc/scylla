@@ -73,12 +73,7 @@ private:
     // That's used to allow parallel compaction on the same column family.
     std::unordered_map<column_family*, std::unordered_set<int>> _weight_tracker;
 private:
-    lw_shared_ptr<task> task_start(column_family* cf, bool cleanup);
     future<> task_stop(lw_shared_ptr<task> task);
-
-    // Returns if this compaction manager is accepting new requests.
-    // It will not accept new requests in case the manager was stopped.
-    bool can_submit();
 
     // Return true if weight is not registered. If parallel_compaction is not
     // true, only one weight is allowed to be registered.
@@ -97,6 +92,19 @@ private:
     void register_compacting_sstables(const sstables::compaction_descriptor& descriptor,
         std::vector<sstables::shared_sstable>& sstables_to_compact);
     void deregister_compacting_sstables(const std::vector<sstables::shared_sstable>& sstables_to_compact);
+
+    // Return true if compaction manager and task weren't asked to stop.
+    inline bool can_proceed(const lw_shared_ptr<task>& task);
+
+    // Check if cf is being cleaned up.
+    inline bool check_for_cleanup(column_family *cf);
+
+    inline future<> put_task_to_sleep(lw_shared_ptr<task>& task);
+
+    // If either manager or task was asked to stop, return stop_iteration::yes.
+    // If future is exceptional, return stop_iteration::no.
+    // Or return stop if neither of the conditions above are true.
+    future<stop_iteration> handle_compaction_completion(future<> f, lw_shared_ptr<task>& task, stop_iteration stop);
 public:
     compaction_manager();
     ~compaction_manager();
