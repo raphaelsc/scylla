@@ -93,6 +93,10 @@ private:
 
     // Get candidates for compaction strategy, which are all sstables but the ones being compacted.
     std::vector<sstables::shared_sstable> get_candidates(column_family& cf);
+
+    void register_compacting_sstables(const sstables::compaction_descriptor& descriptor,
+        std::vector<sstables::shared_sstable>& sstables_to_compact);
+    void deregister_compacting_sstables(const std::vector<sstables::shared_sstable>& sstables_to_compact);
 public:
     compaction_manager();
     ~compaction_manager();
