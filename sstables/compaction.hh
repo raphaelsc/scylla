@@ -110,4 +110,8 @@ namespace sstables {
 
     std::vector<sstables::shared_sstable>
     size_tiered_most_interesting_bucket(const std::list<sstables::shared_sstable>& candidates);
+
+    // Return list of expired sstables for column family cfs.
+    std::vector<sstables::shared_sstable>
+    get_fully_expired_sstables(column_family& cfs, std::vector<sstables::shared_sstable>& compacting, int32_t gc_before);
 }
