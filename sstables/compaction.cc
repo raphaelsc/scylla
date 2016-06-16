@@ -119,6 +119,19 @@ static void delete_sstables_for_interrupted_compaction(std::vector<shared_sstabl
     }
 }
 
+static std::vector<shared_sstable> get_uncompacting_sstables(column_family& cf, std::vector<shared_sstable>& sstables) {
+    auto all_sstables = cf.get_sstables_including_compacted_undeleted();
+    std::sort(sstables.begin(), sstables.end(), [] (const shared_sstable& x, const shared_sstable& y) {
+        return x->generation() < y->generation();
+    });
+    std::vector<shared_sstable> not_compacted_sstables;
+    boost::set_difference(*all_sstables | boost::adaptors::map_values, sstables,
+        std::back_inserter(not_compacted_sstables), [] (const shared_sstable& x, const shared_sstable& y) {
+            return x->generation() < y->generation();
+        });
+    return not_compacted_sstables;
+}
+
 // compact_sstables compacts the given list of sstables creating one
 // (currently) or more (in the future) new sstables. The new sstables
 // are created using the "sstable_creator" object passed by the caller.
@@ -140,15 +153,7 @@ compact_sstables(std::vector<shared_sstable> sstables, column_family& cf, std::f
 
     db::replay_position rp;
 
-    auto all_sstables = cf.get_sstables_including_compacted_undeleted();
-    std::sort(sstables.begin(), sstables.end(), [] (const shared_sstable& x, const shared_sstable& y) {
-        return x->generation() < y->generation();
-    });
-    std::vector<shared_sstable> not_compacted_sstables;
-    boost::set_difference(*all_sstables | boost::adaptors::map_values, sstables,
-        std::back_inserter(not_compacted_sstables), [] (const shared_sstable& x, const shared_sstable& y) {
-            return x->generation() < y->generation();
-        });
+    std::vector<shared_sstable> not_compacted_sstables = get_uncompacting_sstables(cf, sstables);
 
     auto schema = cf.schema();
     for (auto sst : sstables) {
