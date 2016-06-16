@@ -2368,3 +2368,27 @@ SEASTAR_TEST_CASE(sstable_rewrite) {
         }).then([sst, mt, s] {});
     });
 }
+
+SEASTAR_TEST_CASE(test_sstable_max_local_deletion_time) {
+    return test_setup::do_with_test_directory([] {
+        auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
+            {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", utf8_type}}, {}, utf8_type));
+        auto mt = make_lw_shared<memtable>(s);
+        int32_t last_expiry = 0;
+
+        for (auto i = 0; i < 10; i++) {
+            auto key = partition_key::from_exploded(*s, {to_bytes("key" + to_sstring(i))});
+            mutation m(key, s);
+            auto c_key = clustering_key::from_exploded(*s, {to_bytes("c1")});
+            last_expiry = (gc_clock::now() + gc_clock::duration(3600)).time_since_epoch().count();
+            m.set_clustered_cell(c_key, *s->get_column_definition("r1"), make_atomic_cell(bytes("a"), 3600, last_expiry));
+            mt->apply(std::move(m));
+        }
+        auto sst = make_lw_shared<sstable>("ks", "cf", "tests/sstables/tests-temporary", 53, la, big);
+        return sst->write_components(*mt).then([s, sst] {
+            return reusable_sst("tests/sstables/tests-temporary", 53);
+        }).then([s, last_expiry] (auto sstp) mutable {
+            BOOST_REQUIRE(last_expiry == sstp->get_stats_metadata().max_local_deletion_time);
+        }).then([sst, mt, s] {});
+    });
+}
