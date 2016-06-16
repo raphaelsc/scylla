@@ -40,6 +40,10 @@ public:
         auto generation = sstable.generation();
         _cf->_sstables->emplace(generation, make_lw_shared(std::move(sstable)));
     }
+
+    void add_sstable(lw_shared_ptr<sstables::sstable> sstable) {
+        _cf->_sstables->emplace(sstable->generation(), sstable);
+    }
 };
 
 namespace sstables {
