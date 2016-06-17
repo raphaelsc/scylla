@@ -38,6 +38,7 @@
  */
 
 #include <vector>
+#include <chrono>
 
 #include "sstables.hh"
 #include "compaction.hh"
@@ -46,6 +47,7 @@
 #include "schema.hh"
 #include "cql3/statements/property_definitions.hh"
 #include "leveled_manifest.hh"
+#include "date_tiered_compaction_strategy.hh"
 
 namespace sstables {
 
@@ -432,6 +434,28 @@ compaction_descriptor leveled_compaction_strategy::get_sstables_for_compaction(c
     return std::move(candidate);
 }
 
+class date_tiered_compaction_strategy : public compaction_strategy_impl {
+    date_tiered_manifest _manifest;
+public:
+    date_tiered_compaction_strategy() = delete;
+    date_tiered_compaction_strategy(const std::map<sstring, sstring>& options)
+        : _manifest(options) {}
+
+    virtual compaction_descriptor get_sstables_for_compaction(column_family& cfs, std::vector<sstables::shared_sstable> candidates) override {
+        auto gc_before = gc_clock::now() - cfs.schema()->gc_grace_seconds();
+        auto sstables = _manifest.get_next_sstables(cfs, candidates, gc_before.time_since_epoch().count());
+        logger.debug("datetiered: Compacting {} out of {} sstables", sstables.size(), candidates.size());
+        if (sstables.empty()) {
+            return sstables::compaction_descriptor();
+        }
+        return sstables::compaction_descriptor(std::move(sstables));
+    }
+
+    virtual compaction_strategy_type type() const {
+        return compaction_strategy_type::date_tiered;
+    }
+};
+
 compaction_strategy::compaction_strategy(::shared_ptr<compaction_strategy_impl> impl)
     : _compaction_strategy_impl(std::move(impl)) {}
 compaction_strategy::compaction_strategy() = default;
@@ -465,6 +489,9 @@ compaction_strategy make_compaction_strategy(compaction_strategy_type strategy, 
         break;
     case compaction_strategy_type::leveled:
         impl = make_shared<leveled_compaction_strategy>(leveled_compaction_strategy(options));
+        break;
+    case compaction_strategy_type::date_tiered:
+        impl = make_shared<date_tiered_compaction_strategy>(date_tiered_compaction_strategy(options));
         break;
     default:
         throw std::runtime_error("strategy not supported");
