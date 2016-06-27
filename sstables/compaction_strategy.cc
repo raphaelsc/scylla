@@ -59,6 +59,7 @@ public:
     virtual bool parallel_compaction() const {
         return true;
     }
+    virtual int64_t estimated_pending_compaction() const = 0;
 };
 
 //
@@ -71,6 +72,10 @@ public:
         return sstables::compaction_descriptor();
     }
 
+    virtual int64_t estimated_pending_compaction() const {
+        return 0;
+    }
+
     virtual compaction_strategy_type type() const {
         return compaction_strategy_type::null;
     }
@@ -80,16 +85,22 @@ public:
 // Major compaction strategy is about compacting all available sstables into one.
 //
 class major_compaction_strategy : public compaction_strategy_impl {
+    int64_t _estimated_pending_compaction = 0;
 public:
     virtual compaction_descriptor get_sstables_for_compaction(column_family& cfs, std::vector<sstables::shared_sstable> candidates) override {
         static constexpr size_t min_compact_threshold = 2;
 
         // At least, two sstables must be available for compaction to take place.
         if (cfs.sstables_count() < min_compact_threshold) {
+            _estimated_pending_compaction = 0;
             return sstables::compaction_descriptor();
         }
-
+        _estimated_pending_compaction = 1;
         return sstables::compaction_descriptor(std::move(candidates));
+    }
+
+    virtual int64_t estimated_pending_compaction() const {
+        return _estimated_pending_compaction;
     }
 
     virtual compaction_strategy_type type() const {
@@ -189,6 +200,7 @@ public:
 
 class size_tiered_compaction_strategy : public compaction_strategy_impl {
     size_tiered_compaction_strategy_options _options;
+    int64_t _estimated_pending_compaction = 0;
 
     // Return a list of pair of shared_sstable and its respective size.
     std::vector<std::pair<sstables::shared_sstable, uint64_t>> create_sstable_and_length_pairs(const std::vector<sstables::shared_sstable>& sstables);
@@ -212,6 +224,17 @@ class size_tiered_compaction_strategy : public compaction_strategy_impl {
 
         return n / sstables.size();
     }
+
+    void update_estimated_pending_compaction(column_family& cf, std::vector<std::vector<sstables::shared_sstable>> tasks,
+            int min_threshold, int max_threshold) {
+        int64_t n = 0;
+        for (auto& bucket : tasks) {
+            if (bucket.size() >= size_t(min_threshold)) {
+                n += std::ceil(double(bucket.size()) / max_threshold);
+            }
+        }
+        _estimated_pending_compaction = n;
+    }
 public:
     size_tiered_compaction_strategy() = default;
     size_tiered_compaction_strategy(const std::map<sstring, sstring>& options) :
@@ -221,6 +244,10 @@ public:
 
     friend std::vector<sstables::shared_sstable> size_tiered_most_interesting_bucket(lw_shared_ptr<sstable_list>);
     friend std::vector<sstables::shared_sstable> size_tiered_most_interesting_bucket(const std::list<sstables::shared_sstable>&);
+
+    virtual int64_t estimated_pending_compaction() const {
+        return _estimated_pending_compaction;
+    }
 
     virtual compaction_strategy_type type() const {
         return compaction_strategy_type::size_tiered;
@@ -342,6 +369,7 @@ compaction_descriptor size_tiered_compaction_strategy::get_sstables_for_compacti
     // TODO: Add support to filter cold sstables (for reference: SizeTieredCompactionStrategy::filterColdSSTables).
 
     auto buckets = get_buckets(candidates, max_threshold);
+    update_estimated_pending_compaction(cfs, buckets, min_threshold, max_threshold);
 
     std::vector<sstables::shared_sstable> most_interesting = most_interesting_bucket(std::move(buckets), min_threshold, max_threshold);
     if (most_interesting.empty()) {
@@ -388,6 +416,7 @@ class leveled_compaction_strategy : public compaction_strategy_impl {
     const sstring SSTABLE_SIZE_OPTION = "sstable_size_in_mb";
 
     int32_t _max_sstable_size_in_mb = DEFAULT_MAX_SSTABLE_SIZE_IN_MB;
+    int64_t _estimated_pending_compaction = 0;
 public:
     leveled_compaction_strategy(const std::map<sstring, sstring>& options) {
         using namespace cql3::statements;
@@ -409,6 +438,10 @@ public:
         return false;
     }
 
+    virtual int64_t estimated_pending_compaction() const {
+        return _estimated_pending_compaction;
+    }
+
     virtual compaction_strategy_type type() const {
         return compaction_strategy_type::leveled;
     }
@@ -422,6 +455,7 @@ compaction_descriptor leveled_compaction_strategy::get_sstables_for_compaction(c
     // Currently, we create a new manifest whenever it's time for compaction.
     leveled_manifest manifest = leveled_manifest::create(cfs, candidates, _max_sstable_size_in_mb);
     auto candidate = manifest.get_compaction_candidates();
+    _estimated_pending_compaction = manifest.get_estimated_tasks();
 
     if (candidate.sstables.empty()) {
         return sstables::compaction_descriptor();
@@ -448,6 +482,9 @@ compaction_descriptor compaction_strategy::get_sstables_for_compaction(column_fa
 }
 bool compaction_strategy::parallel_compaction() const {
     return _compaction_strategy_impl->parallel_compaction();
+}
+int64_t compaction_strategy::estimated_pending_compaction() const {
+    return _compaction_strategy_impl->estimated_pending_compaction();
 }
 
 compaction_strategy make_compaction_strategy(compaction_strategy_type strategy, const std::map<sstring, sstring>& options) {
