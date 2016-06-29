@@ -105,21 +105,36 @@ public:
     }
 
     future<> store() {
+        auto writer = make_lw_shared<sstable_writer>("ks", "cf", _sst->_dir, _sst->_generation, la, big);
         _sst->_components.erase(sstable::component_type::Index);
         _sst->_components.erase(sstable::component_type::Data);
-        return seastar::async([sst = _sst] {
-            sst->write_toc(default_priority_class());
-            sst->write_statistics(default_priority_class());
-            sst->write_compression(default_priority_class());
-            sst->write_filter(default_priority_class());
-            sst->write_summary(default_priority_class());
-            sst->seal_sstable();
+        writer->_components = _sst->_components;
+        writer->_statistics = std::move(_sst->_statistics);
+        writer->_filter = std::move(_sst->_filter);
+        writer->_summary = _sst->_summary;
+
+        return seastar::async([this, writer] {
+            writer->write_toc(default_priority_class());
+            writer->write_statistics(default_priority_class());
+            writer->write_compression(default_priority_class());
+            writer->write_filter(default_priority_class());
+            writer->write_summary(default_priority_class());
+            writer->seal_sstable();
+            // restore sst metadata.
+            _sst->_filter = std::move(writer->_filter);
+            _sst->_statistics = std::move(writer->_statistics);
         });
     }
 
     static sstable_ptr make_test_sstable(size_t buffer_size, sstring ks, sstring cf, sstring dir, unsigned long generation, sstable::version_types v, sstable::format_types f, gc_clock::time_point now = gc_clock::now()) {
         auto sst = sstable(buffer_size, ks, cf, dir, generation, v, f, now);
         return make_lw_shared<sstable>(std::move(sst));
+    }
+
+    static shared_sstable_writer make_test_sstable_writer(size_t buffer_size, sstring ks, sstring cf, sstring dir, unsigned long generation, sstable::version_types v, sstable::format_types f, gc_clock::time_point now = gc_clock::now()) {
+        auto sst = sstable_writer(ks, cf, dir, generation, v, f, now);
+        sst.sstable_buffer_size = buffer_size;
+        return make_lw_shared<sstable_writer>(std::move(sst));
     }
 
     // Used to create synthetic sstables for testing leveled compaction strategy.

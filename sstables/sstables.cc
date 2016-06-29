@@ -756,25 +756,25 @@ future<> sstable::read_toc() {
 
 }
 
-void sstable::generate_toc(compressor c, double filter_fp_chance) {
+void sstable_writer::generate_toc(compressor c, double filter_fp_chance) {
     // Creating table of components.
-    _components.insert(component_type::TOC);
-    _components.insert(component_type::Statistics);
-    _components.insert(component_type::Digest);
-    _components.insert(component_type::Index);
-    _components.insert(component_type::Summary);
-    _components.insert(component_type::Data);
+    _components.insert(sstable::component_type::TOC);
+    _components.insert(sstable::component_type::Statistics);
+    _components.insert(sstable::component_type::Digest);
+    _components.insert(sstable::component_type::Index);
+    _components.insert(sstable::component_type::Summary);
+    _components.insert(sstable::component_type::Data);
     if (filter_fp_chance != 1.0) {
-        _components.insert(component_type::Filter);
+        _components.insert(sstable::component_type::Filter);
     }
     if (c == compressor::none) {
-        _components.insert(component_type::CRC);
+        _components.insert(sstable::component_type::CRC);
     } else {
-        _components.insert(component_type::CompressionInfo);
+        _components.insert(sstable::component_type::CompressionInfo);
     }
 }
 
-void sstable::write_toc(const io_priority_class& pc) {
+void sstable_writer::write_toc(const io_priority_class& pc) {
     auto file_path = filename(sstable::component_type::TemporaryTOC);
 
     sstlog.debug("Writing TOC file {} ", file_path);
@@ -801,7 +801,7 @@ void sstable::write_toc(const io_priority_class& pc) {
 
     for (auto&& key : _components) {
             // new line character is appended to the end of each component name.
-        auto value = _component_map[key] + "\n";
+        auto value = sstable::_component_map[key] + "\n";
         bytes b = bytes(reinterpret_cast<const bytes::value_type *>(value.c_str()), value.size());
         write(w, b);
     }
@@ -817,7 +817,7 @@ void sstable::write_toc(const io_priority_class& pc) {
     });
 }
 
-void sstable::seal_sstable() {
+void sstable_writer::seal_sstable() {
     // SSTable sealing is about renaming temporary TOC file after guaranteeing
     // that each component reached the disk safely.
 
@@ -922,9 +922,9 @@ future<> sstable::read_simple(T& component, const io_priority_class& pc) {
 }
 
 template <sstable::component_type Type, typename T>
-void sstable::write_simple(T& component, const io_priority_class& pc) {
+void sstable_writer::write_simple(T& component, const io_priority_class& pc) {
     auto file_path = filename(Type);
-    sstlog.debug(("Writing " + _component_map[Type] + " file {} ").c_str(), file_path);
+    sstlog.debug(("Writing " + sstable::_component_map[Type] + " file {} ").c_str(), file_path);
     file f = new_sstable_component_file(sstable_write_error, file_path, open_flags::wo | open_flags::create | open_flags::exclusive).get0();
 
     file_output_stream_options options;
@@ -937,7 +937,7 @@ void sstable::write_simple(T& component, const io_priority_class& pc) {
 }
 
 template future<> sstable::read_simple<sstable::component_type::Filter>(sstables::filter& f, const io_priority_class& pc);
-template void sstable::write_simple<sstable::component_type::Filter>(sstables::filter& f, const io_priority_class& pc);
+template void sstable_writer::write_simple<sstable::component_type::Filter>(sstables::filter& f, const io_priority_class& pc);
 
 future<> sstable::read_compression(const io_priority_class& pc) {
      // FIXME: If there is no compression, we should expect a CRC file to be present.
@@ -948,20 +948,20 @@ future<> sstable::read_compression(const io_priority_class& pc) {
     return read_simple<component_type::CompressionInfo>(_compression, pc);
 }
 
-void sstable::write_compression(const io_priority_class& pc) {
-    if (!has_component(sstable::component_type::CompressionInfo)) {
+void sstable_writer::write_compression(const io_priority_class& pc) {
+    if (!_components.count(sstable::component_type::CompressionInfo)) {
         return;
     }
 
-    write_simple<component_type::CompressionInfo>(_compression, pc);
+    write_simple<sstable::component_type::CompressionInfo>(_compression, pc);
 }
 
 future<> sstable::read_statistics(const io_priority_class& pc) {
     return read_simple<component_type::Statistics>(_statistics, pc);
 }
 
-void sstable::write_statistics(const io_priority_class& pc) {
-    write_simple<component_type::Statistics>(_statistics, pc);
+void sstable_writer::write_statistics(const io_priority_class& pc) {
+    write_simple<sstable::component_type::Statistics>(_statistics, pc);
 }
 
 void sstable::rewrite_statistics(const io_priority_class& pc) {
@@ -1030,12 +1030,12 @@ future<> sstable::open_data() {
     });
 }
 
-future<> sstable::create_data() {
+future<> sstable_writer::create_data() {
     auto oflags = open_flags::wo | open_flags::create | open_flags::exclusive;
     file_open_options opt;
     opt.extent_allocation_size_hint = 32 << 20;
-    return when_all(new_sstable_component_file(sstable_write_error, filename(component_type::Index), oflags),
-                    new_sstable_component_file(sstable_write_error, filename(component_type::Data), oflags, opt)).then([this] (auto files) {
+    return when_all(new_sstable_component_file(sstable_write_error, filename(sstable::component_type::Index), oflags),
+                    new_sstable_component_file(sstable_write_error, filename(sstable::component_type::Data), oflags, opt)).then([this] (auto files) {
         // FIXME: If both files could not be created, the first get below will
         // throw an exception, and second get() will not be attempted, and
         // we'll get a warning about the second future being destructed
@@ -1063,7 +1063,7 @@ future<> sstable::load() {
 
 // @clustering_key: it's expected that clustering key is already in its composite form.
 // NOTE: empty clustering key means that there is no clustering key.
-void sstable::write_column_name(file_writer& out, const composite& clustering_key, const std::vector<bytes_view>& column_names, composite_marker m) {
+void sstable_writer::write_column_name(file_writer& out, const composite& clustering_key, const std::vector<bytes_view>& column_names, composite_marker m) {
     // FIXME: min_components and max_components also keep track of clustering
     // prefix, so we must merge clustering_key and column_names somehow and
     // pass the result to the functions below.
@@ -1089,7 +1089,7 @@ void sstable::write_column_name(file_writer& out, const composite& clustering_ke
     write(out, sz16, ck_bview, c);
 }
 
-void sstable::write_column_name(file_writer& out, bytes_view column_names) {
+void sstable_writer::write_column_name(file_writer& out, bytes_view column_names) {
     column_name_helper::min_max_components(_c_stats.min_column_names, _c_stats.max_column_names, { column_names });
 
     size_t sz = column_names.size();
@@ -1108,7 +1108,7 @@ static inline void update_cell_stats(column_stats& c_stats, uint64_t timestamp) 
 }
 
 // Intended to write all cell components that follow column name.
-void sstable::write_cell(file_writer& out, atomic_cell_view cell) {
+void sstable_writer::write_cell(file_writer& out, atomic_cell_view cell) {
     // FIXME: counter cell isn't supported yet.
 
     uint64_t timestamp = cell.timestamp();
@@ -1144,7 +1144,7 @@ void sstable::write_cell(file_writer& out, atomic_cell_view cell) {
     }
 }
 
-void sstable::write_row_marker(file_writer& out, const rows_entry& clustered_row, const composite& clustering_key) {
+void sstable_writer::write_row_marker(file_writer& out, const rows_entry& clustered_row, const composite& clustering_key) {
     const auto& marker = clustered_row.row().marker();
     if (marker.is_missing()) {
         return;
@@ -1176,7 +1176,7 @@ void sstable::write_row_marker(file_writer& out, const rows_entry& clustered_row
     }
 }
 
-void sstable::write_range_tombstone(file_writer& out,
+void sstable_writer::write_range_tombstone(file_writer& out,
         const composite& start,
         bound_kind start_kind,
         const composite& end,
@@ -1206,7 +1206,7 @@ void sstable::write_range_tombstone(file_writer& out,
     write(out, deletion_time, timestamp);
 }
 
-void sstable::write_collection(file_writer& out, const composite& clustering_key, const column_definition& cdef, collection_mutation_view collection) {
+void sstable_writer::write_collection(file_writer& out, const composite& clustering_key, const column_definition& cdef, collection_mutation_view collection) {
 
     auto t = static_pointer_cast<const collection_type_impl>(cdef.type);
     auto mview = t->deserialize_mutation_form(collection);
@@ -1220,7 +1220,7 @@ void sstable::write_collection(file_writer& out, const composite& clustering_key
 
 // write_datafile_clustered_row() is about writing a clustered_row to data file according to SSTables format.
 // clustered_row contains a set of cells sharing the same clustering key.
-void sstable::write_clustered_row(file_writer& out, const schema& schema, const rows_entry& clustered_row) {
+void sstable_writer::write_clustered_row(file_writer& out, const schema& schema, const rows_entry& clustered_row) {
     auto clustering_key = composite::from_clustering_element(schema, clustered_row.key());
 
     if (schema.is_compound() && !schema.is_dense()) {
@@ -1261,7 +1261,7 @@ void sstable::write_clustered_row(file_writer& out, const schema& schema, const 
     });
 }
 
-void sstable::write_static_row(file_writer& out, const schema& schema, const row& static_row) {
+void sstable_writer::write_static_row(file_writer& out, const schema& schema, const row& static_row) {
     static_row.for_each_cell([&] (column_id id, const atomic_cell_or_collection& c) {
         auto&& column_definition = schema.static_column_at(id);
         if (!column_definition.is_atomic()) {
@@ -1381,7 +1381,7 @@ static void seal_statistics(statistics& s, metadata_collector& collector,
 ///
 ///  @param out holds an output stream to data file.
 ///
-void sstable::do_write_components(::mutation_reader mr,
+void sstable_writer::do_write_components(::mutation_reader mr,
         uint64_t estimated_partitions, schema_ptr schema, uint64_t max_sstable_size, file_writer& out,
         const io_priority_class& pc) {
     file_output_stream_options options;
@@ -1401,7 +1401,7 @@ void sstable::do_write_components(::mutation_reader mr,
 
     // Returns offset into data component.
     auto get_offset = [this, &out] () {
-        if (this->has_component(sstable::component_type::CompressionInfo)) {
+        if (this->_components.count(sstable::component_type::CompressionInfo)) {
             // Variable returned by compressed_file_length() is constantly updated by compressed output stream.
             return this->_compression.compressed_file_length();
         } else {
@@ -1488,7 +1488,7 @@ void sstable::do_write_components(::mutation_reader mr,
     index->close().get();
     _index_file = file(); // index->close() closed _index_file
 
-    if (has_component(sstable::component_type::CompressionInfo)) {
+    if (_components.count(sstable::component_type::CompressionInfo)) {
         _collector.add_compression_ratio(_compression.compressed_file_length(), _compression.uncompressed_file_length());
     }
 
@@ -1497,10 +1497,10 @@ void sstable::do_write_components(::mutation_reader mr,
     seal_statistics(_statistics, _collector, dht::global_partitioner().name(), filter_fp_chance);
 }
 
-void sstable::prepare_write_components(::mutation_reader mr, uint64_t estimated_partitions, schema_ptr schema,
+void sstable_writer::prepare_write_components(::mutation_reader mr, uint64_t estimated_partitions, schema_ptr schema,
         uint64_t max_sstable_size, const io_priority_class& pc) {
     // CRC component must only be present when compression isn't enabled.
-    bool checksum_file = has_component(sstable::component_type::CRC);
+    bool checksum_file = _components.count(sstable::component_type::CRC);
 
     if (checksum_file) {
         file_output_stream_options options;
@@ -1528,13 +1528,13 @@ void sstable::prepare_write_components(::mutation_reader mr, uint64_t estimated_
     }
 }
 
-future<> sstable::write_components(memtable& mt, bool backup, const io_priority_class& pc) {
+future<> sstable_writer::write_components(memtable& mt, bool backup, const io_priority_class& pc) {
     _collector.set_replay_position(mt.replay_position());
     return write_components(mt.make_reader(mt.schema()),
             mt.partition_count(), mt.schema(), std::numeric_limits<uint64_t>::max(), backup, pc);
 }
 
-future<> sstable::write_components(::mutation_reader mr,
+future<> sstable_writer::write_components(::mutation_reader mr,
         uint64_t estimated_partitions, schema_ptr schema, uint64_t max_sstable_size, bool backup, const io_priority_class& pc) {
     return seastar::async([this, mr = std::move(mr), estimated_partitions, schema = std::move(schema), max_sstable_size, backup, &pc] () mutable {
         generate_toc(schema->get_compressor_params().get_compressor(), schema->bloom_filter_fp_chance());
@@ -1549,10 +1549,25 @@ future<> sstable::write_components(::mutation_reader mr,
         seal_sstable();
 
         if (backup) {
-            auto dir = get_dir() + "/backups/";
+            auto dir = _dir + "/backups/";
             sstable_write_io_check(touch_directory, dir).get();
-            create_links(dir).get();
+            auto sst = sstable(_ks, _cf, _dir, _generation, _version, _format);
+            sst._components = _components; // create_links() rely on components set when creating links.
+            sst.create_links(dir).get();
         }
+    });
+}
+
+future<shared_sstable> sstable_writer::get_sstable_from_writer(sstable_writer&& writer) {
+    auto sst = make_lw_shared<sstable>(std::move(writer._ks), std::move(writer._cf), std::move(writer._dir), writer._generation,
+        writer._version, writer._format, writer._now);
+    sst->_compression = std::move(writer._compression);
+    sst->_filter = std::move(writer._filter);
+    sst->_summary = std::move(writer._summary);
+    sst->_statistics = std::move(writer._statistics);
+    sst->_components = std::move(writer._components);
+    return sst->open_data().then([sst] {
+        return make_ready_future<shared_sstable>(std::move(sst));
     });
 }
 
@@ -1628,6 +1643,10 @@ const bool sstable::has_component(component_type f) const {
 
 const sstring sstable::filename(component_type f) const {
     return filename(_dir, _ks, _cf, _version, _generation, _format, f);
+}
+
+const sstring sstable_writer::filename(sstable::component_type f) const {
+    return sstable::filename(_dir, _ks, _cf, _version, _generation, _format, f);
 }
 
 std::vector<sstring> sstable::component_filenames() const {

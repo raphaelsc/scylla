@@ -108,6 +108,7 @@ public:
 };
 
 class key;
+class sstable_writer;
 
 using index_list = std::vector<index_entry>;
 
@@ -230,14 +231,6 @@ public:
     // progress (i.e., returned a future which hasn't completed yet).
     mutation_reader read_rows(schema_ptr schema, const io_priority_class& pc = default_priority_class());
 
-    // Write sstable components from a memtable.
-    future<> write_components(memtable& mt, bool backup = false,
-                              const io_priority_class& pc = default_priority_class());
-
-    future<> write_components(::mutation_reader mr,
-            uint64_t estimated_partitions, schema_ptr schema, uint64_t max_sstable_size, bool backup = false,
-            const io_priority_class& pc = default_priority_class());
-
     uint64_t get_estimated_key_count() const {
         return ((uint64_t)_summary.header.size_at_full_sampling + 1) *
                 _summary.header.min_index_interval;
@@ -256,10 +249,6 @@ public:
 
     bool marked_for_deletion() const {
         return _marked_for_deletion;
-    }
-
-    void add_ancestor(int64_t generation) {
-        _collector.add_ancestor(generation);
     }
 
     // Returns true iff this sstable contains data which belongs to many shards.
@@ -308,10 +297,6 @@ public:
     }
     sstring toc_filename() const;
 
-    metadata_collector& get_metadata_collector() {
-        return _collector;
-    }
-
     future<> create_links(sstring dir, int64_t generation) const;
 
     future<> create_links(sstring dir) const {
@@ -340,14 +325,9 @@ private:
         , _now(now)
     { }
 
-    size_t sstable_buffer_size = 128*1024;
+    static constexpr size_t default_sstable_buffer_size = 128*1024;
+    size_t sstable_buffer_size = default_sstable_buffer_size;
 
-    void do_write_components(::mutation_reader mr,
-            uint64_t estimated_partitions, schema_ptr schema, uint64_t max_sstable_size,
-            file_writer& out, const io_priority_class& pc);
-    void prepare_write_components(::mutation_reader mr,
-            uint64_t estimated_partitions, schema_ptr schema, uint64_t max_sstable_size,
-            const io_priority_class& pc);
     static std::unordered_map<version_types, sstring, enum_hash<version_types>> _version_string;
     static std::unordered_map<format_types, sstring, enum_hash<format_types>> _format_string;
     static std::unordered_map<component_type, sstring, enum_hash<component_type>> _component_map;
@@ -359,10 +339,6 @@ private:
     utils::filter_ptr _filter;
     summary _summary;
     statistics _statistics;
-    // NOTE: _collector and _c_stats are used to generation of statistics file
-    // when writing a new sstable.
-    metadata_collector _collector;
-    column_stats _c_stats;
     file _index_file;
     file _data_file;
     uint64_t _data_file_size;
@@ -390,37 +366,20 @@ private:
     template <sstable::component_type Type, typename T>
     future<> read_simple(T& comp, const io_priority_class& pc);
 
-    template <sstable::component_type Type, typename T>
-    void write_simple(T& comp, const io_priority_class& pc);
-
-    void generate_toc(compressor c, double filter_fp_chance);
-    void write_toc(const io_priority_class& pc);
-    void seal_sstable();
-
     future<> read_compression(const io_priority_class& pc);
-    void write_compression(const io_priority_class& pc);
 
     future<> read_filter(const io_priority_class& pc);
 
-    void write_filter(const io_priority_class& pc);
-
     future<> read_summary(const io_priority_class& pc);
-
-    void write_summary(const io_priority_class& pc) {
-        write_simple<component_type::Summary>(_summary, pc);
-    }
 
     // To be called when we try to load an SSTable that lacks a Summary. Could
     // happen if old tools are being used.
     future<> generate_summary(const io_priority_class& pc);
 
     future<> read_statistics(const io_priority_class& pc);
-    void write_statistics(const io_priority_class& pc);
     // Rewrite statistics component by creating a temporary Statistics and
     // renaming it into place of existing one.
     void rewrite_statistics(const io_priority_class& pc);
-
-    future<> create_data();
 
     future<index_list> read_indexes(uint64_t summary_idx, const io_priority_class& pc);
 
@@ -476,19 +435,6 @@ private:
     // FIXME: pending on Bloom filter implementation
     bool filter_has_key(const key& key) { return _filter->is_present(bytes_view(key)); }
     bool filter_has_key(const schema& s, const dht::decorated_key& dk) { return filter_has_key(key::from_partition_key(s, dk._key)); }
-
-    // NOTE: functions used to generate sstable components.
-    void write_row_marker(file_writer& out, const rows_entry& clustered_row, const composite& clustering_key);
-    void write_clustered_row(file_writer& out, const schema& schema, const rows_entry& clustered_row);
-    void write_static_row(file_writer& out, const schema& schema, const row& static_row);
-    void write_cell(file_writer& out, atomic_cell_view cell);
-    void write_column_name(file_writer& out, const composite& clustering_key, const std::vector<bytes_view>& column_names, composite_marker m = composite_marker::none);
-    void write_column_name(file_writer& out, bytes_view column_names);
-    void write_range_tombstone(file_writer& out, const composite& start, bound_kind start_kind, const composite& end, bound_kind stop_kind, std::vector<bytes_view> suffix, const tombstone t);
-    void write_range_tombstone(file_writer& out, const composite& start, const composite& end, std::vector<bytes_view> suffix, const tombstone t) {
-        write_range_tombstone(out, start, bound_kind::incl_start, end, bound_kind::incl_end, std::move(suffix), std::move(t));
-    }
-    void write_collection(file_writer& out, const composite& clustering_key, const column_definition& cdef, collection_mutation_view collection);
 public:
     future<> read_toc();
 
@@ -568,9 +514,96 @@ public:
     friend class test;
 
     friend class key_reader;
+
+    friend class sstable_writer;
+};
+
+class sstable_writer {
+    compression _compression;
+    utils::filter_ptr _filter;
+    summary _summary;
+    statistics _statistics;
+    file _index_file;
+    file _data_file;
+    metadata_collector _collector;
+    column_stats _c_stats;
+    std::unordered_set<sstable::component_type, enum_hash<sstable::component_type>> _components;
+
+    sstring _ks;
+    sstring _cf;
+    sstring _dir;
+    unsigned long _generation = 0;
+    sstable::version_types _version;
+    sstable::format_types _format;
+    gc_clock::time_point _now;
+    size_t sstable_buffer_size = sstable::default_sstable_buffer_size;
+public:
+    sstable_writer(sstring ks, sstring cf, sstring dir, int64_t generation, sstable::version_types v, sstable::format_types f,
+            gc_clock::time_point now = gc_clock::now())
+        : _ks(std::move(ks))
+        , _cf(std::move(cf))
+        , _dir(std::move(dir))
+        , _generation(generation)
+        , _version(v)
+        , _format(f)
+        , _now(now)
+    { }
+
+    // Write sstable components from a memtable.
+    future<> write_components(memtable& mt, bool backup = false,
+                              const io_priority_class& pc = default_priority_class());
+    future<> write_components(::mutation_reader mr,
+            uint64_t estimated_partitions, schema_ptr schema, uint64_t max_sstable_size, bool backup = false,
+            const io_priority_class& pc = default_priority_class());
+
+    static future<lw_shared_ptr<sstable>> get_sstable_from_writer(sstable_writer&& writer);
+private:
+    void do_write_components(::mutation_reader mr,
+            uint64_t estimated_partitions, schema_ptr schema, uint64_t max_sstable_size,
+            file_writer& out, const io_priority_class& pc);
+    void prepare_write_components(::mutation_reader mr,
+            uint64_t estimated_partitions, schema_ptr schema, uint64_t max_sstable_size,
+            const io_priority_class& pc);
+
+    future<> create_data();
+    void seal_sstable();
+    void generate_toc(compressor c, double filter_fp_chance);
+    const sstring filename(sstable::component_type f) const;
+
+    template <sstable::component_type Type, typename T>
+    void write_simple(T& comp, const io_priority_class& pc);
+    void write_toc(const io_priority_class& pc);
+    void write_compression(const io_priority_class& pc);
+    void write_filter(const io_priority_class& pc);
+    void write_summary(const io_priority_class& pc) {
+        write_simple<sstable::component_type::Summary>(_summary, pc);
+    }
+    void write_statistics(const io_priority_class& pc);
+
+    void write_row_marker(file_writer& out, const rows_entry& clustered_row, const composite& clustering_key);
+    void write_clustered_row(file_writer& out, const schema& schema, const rows_entry& clustered_row);
+    void write_static_row(file_writer& out, const schema& schema, const row& static_row);
+    void write_cell(file_writer& out, atomic_cell_view cell);
+    void write_column_name(file_writer& out, const composite& clustering_key, const std::vector<bytes_view>& column_names, composite_marker m = composite_marker::none);
+    void write_column_name(file_writer& out, bytes_view column_names);
+    void write_range_tombstone(file_writer& out, const composite& start, bound_kind start_kind, const composite& end, bound_kind stop_kind, std::vector<bytes_view> suffix, const tombstone t);
+    void write_range_tombstone(file_writer& out, const composite& start, const composite& end, std::vector<bytes_view> suffix, const tombstone t) {
+        write_range_tombstone(out, start, bound_kind::incl_start, end, bound_kind::incl_end, std::move(suffix), std::move(t));
+    }
+    void write_collection(file_writer& out, const composite& clustering_key, const column_definition& cdef, collection_mutation_view collection);
+public:
+    const sstring get_filename() const {
+        return filename(sstable::component_type::Data);
+    }
+    metadata_collector& get_metadata_collector() {
+        return _collector;
+    }
+
+    friend class test;
 };
 
 using shared_sstable = lw_shared_ptr<sstable>;
+using shared_sstable_writer = lw_shared_ptr<sstable_writer>;
 using sstable_list = std::map<int64_t, shared_sstable>;
 
 ::key_reader make_key_reader(schema_ptr s, shared_sstable sst, const query::partition_range& range,

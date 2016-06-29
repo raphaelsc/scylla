@@ -92,7 +92,7 @@ namespace sstables {
     // Compact a list of N sstables into M sstables.
     // Returns a vector with newly created sstables(s).
     //
-    // creator is used to get a sstable object for a new sstable that will be written.
+    // creator is used to get a sstable write object for a new sstable that will be written.
     // max_sstable_size is a relaxed limit size for a sstable to be generated.
     // Example: It's okay for the size of a new sstable to go beyond max_sstable_size
     // when writing its last partition.
@@ -101,7 +101,7 @@ namespace sstables {
     // cleaned up, log messages will inform the user that compact_sstables runs for
     // cleaning operation, and compaction history will not be updated.
     future<std::vector<shared_sstable>> compact_sstables(std::vector<shared_sstable> sstables,
-            column_family& cf, std::function<shared_sstable()> creator,
+            column_family& cf, std::function<shared_sstable_writer()> creator,
             uint64_t max_sstable_size, uint32_t sstable_level, bool cleanup = false);
 
     // Return the most interesting bucket applying the size-tiered strategy.

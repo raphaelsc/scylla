@@ -366,7 +366,7 @@ SEASTAR_TEST_CASE(test_sstable_conforms_to_mutation_source) {
 
         run_mutation_source_tests([&dirs] (schema_ptr s, const std::vector<mutation>& partitions) -> mutation_source {
             tmpdir sstable_dir;
-            auto sst = make_lw_shared<sstables::sstable>("ks", "cf",
+            auto writer = sstables::sstable_writer("ks", "cf",
                 sstable_dir.path,
                 1 /* generation */,
                 sstables::sstable::version_types::la,
@@ -379,7 +379,8 @@ SEASTAR_TEST_CASE(test_sstable_conforms_to_mutation_source) {
                 mt->apply(m);
             }
 
-            sst->write_components(*mt).get();
+            writer.write_components(*mt).get();
+            auto sst = sstables::sstable_writer::get_sstable_from_writer(std::move(writer)).get0();
             sst->load().get();
 
             return as_mutation_source(sst);
@@ -404,14 +405,15 @@ SEASTAR_TEST_CASE(test_sstable_can_write_and_read_range_tombstone) {
         auto mt = make_lw_shared<memtable>(s);
         mt->apply(std::move(m));
 
-        auto sst = sstables::sstable("ks", "cf",
+        auto writer = sstables::sstable_writer("ks", "cf",
                 dir->path,
                 1 /* generation */,
                 sstables::sstable::version_types::la,
                 sstables::sstable::format_types::big);
-        sst.write_components(*mt).get();
-        sst.load().get();
-        auto mr = sst.read_rows(s);
+        writer.write_components(*mt).get();
+        auto sst = sstables::sstable_writer::get_sstable_from_writer(std::move(writer)).get0();
+        sst->load().get();
+        auto mr = sst->read_rows(s);
         auto sm = mr.read().get0();
         auto mut = mutation_from_streamed_mutation(std::move(sm)).get0();
         BOOST_REQUIRE(bool(mut));

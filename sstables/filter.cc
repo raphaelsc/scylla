@@ -54,8 +54,8 @@ future<> sstable::read_filter(const io_priority_class& pc) {
     });
 }
 
-void sstable::write_filter(const io_priority_class& pc) {
-    if (!has_component(sstable::component_type::Filter)) {
+void sstable_writer::write_filter(const io_priority_class& pc) {
+    if (!_components.count(sstable::component_type::Filter)) {
         return;
     }
 

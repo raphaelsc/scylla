@@ -688,12 +688,10 @@ column_family::seal_active_streaming_memtable_immediate() {
         auto f = current_waiters.get_shared_future(); // for this seal
 
         with_lock(_sstables_lock.for_read(), [this, old] {
-            auto newtab = make_lw_shared<sstables::sstable>(_schema->ks_name(), _schema->cf_name(),
+            auto writer = make_lw_shared<sstables::sstable_writer>(_schema->ks_name(), _schema->cf_name(),
                 _config.datadir, calculate_generation_for_new_table(),
                 sstables::sstable::version_types::ka,
                 sstables::sstable::format_types::big);
-
-            newtab->set_unshared();
 
             auto&& priority = service::get_local_streaming_write_priority();
             // This is somewhat similar to the main memtable flush, but with important differences.
@@ -709,11 +707,12 @@ column_family::seal_active_streaming_memtable_immediate() {
             //
             // Lastly, we don't have any commitlog RP to update, and we don't need to deal manipulate the
             // memtable list, since this memtable was not available for reading up until this point.
-            return newtab->write_components(*old, incremental_backups_enabled(), priority).then([this, newtab, old] {
-                return newtab->open_data();
-            }).then([this, old, newtab] () {
-                add_sstable(newtab);
-                trigger_compaction();
+            return writer->write_components(*old, incremental_backups_enabled(), priority).then([this, writer, old] {
+                return sstables::sstable_writer::get_sstable_from_writer(std::move(*writer));
+            }).then([this, old] (auto newtab) {
+                newtab->set_unshared();
+                this->add_sstable(newtab);
+                this->trigger_compaction();
             }).handle_exception([] (auto ep) {
                 dblog.error("failed to write streamed sstable: {}", ep);
                 return make_exception_future<>(ep);
@@ -768,7 +767,7 @@ future<stop_iteration>
 column_family::try_flush_memtable_to_sstable(lw_shared_ptr<memtable> old) {
     auto gen = calculate_generation_for_new_table();
 
-    auto newtab = make_lw_shared<sstables::sstable>(_schema->ks_name(), _schema->cf_name(),
+    auto writer = make_lw_shared<sstables::sstable_writer>(_schema->ks_name(), _schema->cf_name(),
         _config.datadir, gen,
         sstables::sstable::version_types::ka,
         sstables::sstable::format_types::big);
@@ -777,8 +776,7 @@ column_family::try_flush_memtable_to_sstable(lw_shared_ptr<memtable> old) {
 
     _config.cf_stats->pending_memtables_flushes_count++;
     _config.cf_stats->pending_memtables_flushes_bytes += memtable_size;
-    newtab->set_unshared();
-    dblog.debug("Flushing to {}", newtab->get_filename());
+    dblog.debug("Flushing to {}", writer->get_filename());
     // Note that due to our sharded architecture, it is possible that
     // in the face of a value change some shards will backup sstables
     // while others won't.
@@ -791,14 +789,15 @@ column_family::try_flush_memtable_to_sstable(lw_shared_ptr<memtable> old) {
     // The code as is guarantees that we'll never partially backup a
     // single sstable, so that is enough of a guarantee.
     auto&& priority = service::get_local_memtable_flush_priority();
-    return newtab->write_components(*old, incremental_backups_enabled(), priority).then([this, newtab, old] {
-        return newtab->open_data();
-    }).then_wrapped([this, old, newtab, memtable_size] (future<> ret) {
+    return writer->write_components(*old, incremental_backups_enabled(), priority).then([this, writer, old] {
+        return sstables::sstable_writer::get_sstable_from_writer(std::move(*writer));
+    }).then_wrapped([this, old, memtable_size] (future<sstables::shared_sstable> ret) {
         _config.cf_stats->pending_memtables_flushes_count--;
         _config.cf_stats->pending_memtables_flushes_bytes -= memtable_size;
         dblog.debug("Flushing done");
         try {
-            ret.get();
+            auto newtab = ret.get0();
+            newtab->set_unshared();
 
             // We must add sstable before we call update_cache(), because
             // memtable's data after moving to cache can be evicted at any time.
@@ -1044,10 +1043,9 @@ column_family::compact_sstables(sstables::compaction_descriptor descriptor, bool
         auto create_sstable = [this] {
                 auto gen = this->calculate_generation_for_new_table();
                 // FIXME: use "tmp" marker in names of incomplete sstable
-                auto sst = make_lw_shared<sstables::sstable>(_schema->ks_name(), _schema->cf_name(), _config.datadir, gen,
+                auto sst = make_lw_shared<sstables::sstable_writer>(_schema->ks_name(), _schema->cf_name(), _config.datadir, gen,
                         sstables::sstable::version_types::ka,
                         sstables::sstable::format_types::big);
-                sst->set_unshared();
                 return sst;
         };
         return sstables::compact_sstables(*sstables_to_compact, *this, create_sstable, descriptor.max_sstable_bytes, descriptor.level,

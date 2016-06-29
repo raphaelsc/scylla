@@ -189,12 +189,13 @@ static sizes calculate_sizes(const mutation& m) {
     result.query_result = m.query(partition_slice_builder(*s).build(), query::result_request::only_result).buf().size();
 
     tmpdir sstable_dir;
-    auto sst = make_lw_shared<sstables::sstable>(s->ks_name(), s->cf_name(),
+    auto writer = sstables::sstable_writer(s->ks_name(), s->cf_name(),
         sstable_dir.path,
         1 /* generation */,
         sstables::sstable::version_types::la,
         sstables::sstable::format_types::big);
-    sst->write_components(*mt).get();
+    writer.write_components(*mt).get();
+    auto sst = sstables::sstable_writer::get_sstable_from_writer(std::move(writer)).get0();
     sst->load().get();
     result.sstable = sst->data_size();
 

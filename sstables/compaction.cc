@@ -123,7 +123,7 @@ static void delete_sstables_for_interrupted_compaction(std::vector<shared_sstabl
 // (currently) or more (in the future) new sstables. The new sstables
 // are created using the "sstable_creator" object passed by the caller.
 future<std::vector<shared_sstable>>
-compact_sstables(std::vector<shared_sstable> sstables, column_family& cf, std::function<shared_sstable()> creator,
+compact_sstables(std::vector<shared_sstable> sstables, column_family& cf, std::function<shared_sstable_writer()> creator,
                  uint64_t max_sstable_size, uint32_t sstable_level, bool cleanup) {
     std::vector<::mutation_reader> readers;
     uint64_t estimated_partitions = 0;
@@ -290,25 +290,26 @@ compact_sstables(std::vector<shared_sstable> sstables, column_family& cf, std::f
             // If a mutation is available, we must unread it for write_components to read it afterwards.
             output_reader->unread(std::move(*mut));
 
-            auto newtab = creator();
-            info->new_sstables.push_back(newtab);
-            newtab->get_metadata_collector().set_replay_position(rp);
-            newtab->get_metadata_collector().sstable_level(sstable_level);
+            auto writer = creator();
+            writer->get_metadata_collector().set_replay_position(rp);
+            writer->get_metadata_collector().sstable_level(sstable_level);
             for (auto ancestor : *ancestors) {
-                newtab->add_ancestor(ancestor);
+                writer->get_metadata_collector().add_ancestor(ancestor);
             }
 
             ::mutation_reader mutation_queue_reader = make_mutation_reader<queue_reader>(output_reader);
 
             auto&& priority = service::get_local_compaction_priority();
-            return newtab->write_components(std::move(mutation_queue_reader), partitions_per_sstable, schema, max_sstable_size, false, priority).then([newtab, info] {
-                return newtab->open_data().then([newtab, info] {
+            return writer->write_components(std::move(mutation_queue_reader), partitions_per_sstable, schema, max_sstable_size, false, priority).then([writer, info] {
+                return sstable_writer::get_sstable_from_writer(std::move(*writer)).then([info] (auto newtab) {
+                    newtab->set_unshared();
                     info->end_size += newtab->data_size();
+                    info->new_sstables.push_back(newtab);
                     return make_ready_future<stop_iteration>(stop_iteration::no);
                 });
-            }).handle_exception([sst = newtab] (auto ep) {
+            }).handle_exception([filename = writer->get_filename()] (auto ep) {
                 logger.error("Compaction found an exception when writing sstable {} : {}",
-                        sst->get_filename(), ep);
+                        filename, ep);
                 return make_exception_future<stop_iteration>(ep);
             });
         });
