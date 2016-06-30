@@ -46,10 +46,13 @@
 #include "schema.hh"
 #include "cql3/statements/property_definitions.hh"
 #include "leveled_manifest.hh"
+#include "sstable_set.hh"
 
 namespace sstables {
 
 extern logging::logger logger;
+
+sstable_set::~sstable_set() = default;
 
 class compaction_strategy_impl {
 public:
