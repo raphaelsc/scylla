@@ -1170,7 +1170,8 @@ static lw_shared_ptr<sstable_list> create_sstable_list(std::vector<sstables::sha
 static std::vector<sstables::shared_sstable> get_candidates_for_leveled_strategy(column_family& cf) {
     std::vector<sstables::shared_sstable> candidates;
     candidates.reserve(cf.sstables_count());
-    for (auto& entry : *cf.get_sstables()) {
+    auto ssts = cf.get_sstables();
+    for (auto& entry : *ssts) {
         candidates.push_back(entry);
     }
     return candidates;
