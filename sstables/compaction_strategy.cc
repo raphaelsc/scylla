@@ -47,7 +47,9 @@
 #include "cql3/statements/property_definitions.hh"
 #include "leveled_manifest.hh"
 #include "sstable_set.hh"
+#include "compatible_ring_position.hh"
 #include <boost/range/algorithm/find.hpp>
+#include <boost/icl/interval_map.hpp>
 
 namespace sstables {
 
@@ -76,6 +78,65 @@ public:
         _sstables.erase(boost::find(_sstables, sst));
     }
 };
+
+// specialized when sstables are partitioned in the token range space
+// e.g. leveled compaction strategy
+class partitioned_sstable_set : public sstable_set {
+    using value_set = std::unordered_set<shared_sstable>;
+    using interval_map_type = boost::icl::interval_map<compatible_ring_position, value_set>;
+    using interval_type = interval_map_type::interval_type;
+private:
+    schema_ptr _schema;
+    interval_map_type _sstables;
+private:
+    interval_type as_imap_range(const query::partition_range& range) const {
+        if (range.start() && range.end()) {
+            return interval_type::closed(
+                    compatible_ring_position(*_schema, range.start()->value()),
+                    compatible_ring_position(*_schema, range.end()->value()));
+        }
+        throw "?";
+    }
+public:
+    explicit partitioned_sstable_set(schema_ptr schema)
+            : _schema(std::move(schema)) {
+    }
+    virtual shared_ptr<sstable_set> clone() const override {
+        return make_shared<partitioned_sstable_set>(*this);
+    }
+    virtual std::vector<shared_sstable> select(const query::partition_range& range) const override {
+        auto ipair = _sstables.equal_range(as_imap_range(range));
+        auto b = std::move(ipair.first);
+        auto e = std::move(ipair.second);
+        value_set result;
+        while (b != e) {
+            boost::copy(b++->second, std::inserter(result, result.end()));
+        }
+        return std::vector<shared_sstable>(result.begin(), result.end());
+    }
+    virtual std::vector<shared_sstable> all() const override {
+        value_set result;
+        for (auto&& e : _sstables) {
+            boost::copy(e.second, std::inserter(result, result.end()));
+        }
+        return std::vector<shared_sstable>(result.begin(), result.end());
+    }
+    virtual void insert(shared_sstable sst) override {
+        auto first = sst->get_first_decorated_key(*_schema).token();
+        auto last = sst->get_last_decorated_key(*_schema).token();
+        using bound = query::partition_range::bound;
+        _sstables.add({as_imap_range(query::partition_range(bound(dht::ring_position::starting_at(first)), bound(dht::ring_position::ending_at(last)))),
+                value_set({sst})});
+    }
+    virtual void erase(shared_sstable sst) override {
+        auto first = sst->get_first_decorated_key(*_schema).token();
+        auto last = sst->get_last_decorated_key(*_schema).token();
+        using bound = query::partition_range::bound;
+        _sstables.subtract({as_imap_range(query::partition_range(bound(dht::ring_position::starting_at(first)), bound(dht::ring_position::ending_at(last)))),
+                value_set({sst})});
+    }
+};
+
 
 class compaction_strategy_impl {
 public:
