@@ -72,6 +72,7 @@
 #include "key_reader.hh"
 #include <seastar/core/rwlock.hh>
 #include <seastar/core/shared_future.hh>
+#include <boost/range/algorithm/max_element.hpp>
 
 class frozen_mutation;
 class reconcilable_result;
@@ -516,7 +517,9 @@ public:
             if (_sstables->empty()) {
                 return make_ready_future<int64_t>(0);
             }
-            return make_ready_future<int64_t>((*_sstables->rbegin()).first);
+            return make_ready_future<int64_t>(
+                    *boost::max_element(*_sstables
+                               | boost::adaptors::transformed(std::mem_fn(&sstables::sstable::generation))));
         });
     }
 
