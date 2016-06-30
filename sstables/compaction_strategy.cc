@@ -47,12 +47,35 @@
 #include "cql3/statements/property_definitions.hh"
 #include "leveled_manifest.hh"
 #include "sstable_set.hh"
+#include <boost/range/algorithm/find.hpp>
 
 namespace sstables {
 
 extern logging::logger logger;
 
 sstable_set::~sstable_set() = default;
+
+// default sstable_set, not specialized for anything
+class bag_sstable_set : public sstable_set {
+    // erasing is slow, but select() is fast
+    std::vector<shared_sstable> _sstables;
+public:
+    virtual shared_ptr<sstable_set> clone() const override {
+        return make_shared<bag_sstable_set>(*this);
+    }
+    virtual std::vector<shared_sstable> select(const query::partition_range& range) const override {
+        return _sstables;
+    }
+    virtual std::vector<shared_sstable> all() const override {
+        return _sstables;
+    }
+    virtual void insert(shared_sstable sst) override {
+        _sstables.push_back(std::move(sst));
+    }
+    virtual void erase(shared_sstable sst) override {
+        _sstables.erase(boost::find(_sstables, sst));
+    }
+};
 
 class compaction_strategy_impl {
 public:
