@@ -39,6 +39,10 @@ public:
     void add_sstable(sstables::sstable&& sstable) {
         _cf->_sstables->insert(make_lw_shared(std::move(sstable)));
     }
+
+    std::vector<sstables::shared_sstable> select_sstables(query::partition_range pr) {
+        return _cf->_sstables->select(pr);
+    }
 };
 
 namespace sstables {

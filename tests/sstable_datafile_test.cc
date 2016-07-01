@@ -2610,3 +2610,46 @@ SEASTAR_TEST_CASE(test_wrong_range_tombstone_order) {
         BOOST_REQUIRE(!smopt);
     });
 }
+
+SEASTAR_TEST_CASE(sstable_set_select_test) {
+    auto builder = schema_builder("tests", "test")
+        .with_column("name", utf8_type, column_kind::partition_key);
+    builder.set_compaction_strategy(sstables::compaction_strategy_type::leveled);
+    auto s = builder.build();
+    auto cm = make_lw_shared<compaction_manager>();
+    auto cf = make_lw_shared<column_family>(s, column_family::config(), column_family::no_commitlog(), *cm);
+
+    auto key_and_token = token_generation_for_current_shard(5);
+    add_sstable_for_leveled_test(cf, /*gen*/1, 0, 0, key_and_token[0].first, key_and_token[1].first);
+    add_sstable_for_leveled_test(cf, /*gen*/2, 0, 0, key_and_token[2].first, key_and_token[3].first);
+    BOOST_REQUIRE(cf->sstables_count() == 2);
+
+    auto get_decorated_key = [] (const schema& s, const sstring& key) {
+        auto p_key = key::from_bytes(to_bytes(key)).to_partition_key(s);
+        return dht::global_partitioner().decorate_key(s, p_key);
+    };
+
+    {
+        dht::ring_position rp = get_decorated_key(*s, key_and_token[2].first);
+        auto sstables = column_family_test(cf).select_sstables(query::partition_range(rp));
+        BOOST_REQUIRE(sstables.size() == 1);
+        BOOST_REQUIRE(sstables[0]->generation() == 2);
+    }
+
+    {
+        dht::ring_position rp = get_decorated_key(*s, key_and_token[4].first);
+        auto sstables = column_family_test(cf).select_sstables(query::partition_range(rp));
+        BOOST_REQUIRE(sstables.size() == 0);
+    }
+
+    {
+        auto first = get_decorated_key(*s, key_and_token[1].first).token();
+        auto last = get_decorated_key(*s, key_and_token[2].first).token();
+        using bound = query::partition_range::bound;
+        auto pr = query::partition_range(bound(dht::ring_position::starting_at(first)), bound(dht::ring_position::ending_at(last)));
+        auto sstables = column_family_test(cf).select_sstables(std::move(pr));
+        BOOST_REQUIRE(sstables.size() == 2);
+    }
+
+    return make_ready_future<>();
+}
