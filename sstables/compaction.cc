@@ -119,6 +119,39 @@ static void delete_sstables_for_interrupted_compaction(std::vector<shared_sstabl
     }
 }
 
+static query::partition_range get_partition_range(const schema& s, const std::vector<shared_sstable>& sstables) {
+    using bound = query::partition_range::bound;
+    auto it = sstables.begin();
+    auto& first_sstable = *it++;
+    dht::token first = first_sstable->get_first_decorated_key(s).token();
+    dht::token last = first_sstable->get_last_decorated_key(s).token();
+
+    while (it != sstables.end()) {
+        auto& candidate_sstable = *it++;
+        dht::token first_candidate = candidate_sstable->get_first_decorated_key(s).token();
+        dht::token last_candidate = candidate_sstable->get_last_decorated_key(s).token();
+
+        first = first <= first_candidate? first : first_candidate;
+        last = last >= last_candidate ? last : last_candidate;
+    }
+    return query::partition_range(bound(dht::ring_position::starting_at(first)), bound(dht::ring_position::ending_at(last)));
+}
+
+static shared_ptr<sstables::sstable_set> build_sstable_set(column_family& cf, std::vector<shared_sstable>&& sstables) {
+    // FIXME: we could unconditionally use partitioned_sstable_set here.
+    shared_ptr<sstables::sstable_set> set = cf.get_compaction_strategy().make_sstable_set(cf.schema());
+    for (auto&& sst : sstables) {
+        set->insert(std::move(sst));
+    }
+    return set;
+}
+
+static std::vector<shared_sstable> select_sstables(column_family& cf, std::vector<shared_sstable>&& sstables,
+        query::partition_range pr) {
+    auto set = build_sstable_set(cf, std::move(sstables));
+    return set->select(pr);
+}
+
 // compact_sstables compacts the given list of sstables creating one
 // (currently) or more (in the future) new sstables. The new sstables
 // are created using the "sstable_creator" object passed by the caller.
@@ -149,6 +182,7 @@ compact_sstables(std::vector<shared_sstable> sstables, column_family& cf, std::f
         std::back_inserter(not_compacted_sstables), [] (const shared_sstable& x, const shared_sstable& y) {
             return x->generation() < y->generation();
         });
+    not_compacted_sstables = select_sstables(cf, std::move(not_compacted_sstables), get_partition_range(*cf.schema(), sstables));
 
     auto schema = cf.schema();
     for (auto sst : sstables) {
