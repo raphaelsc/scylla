@@ -28,10 +28,16 @@
 
 namespace query {
 
+static thread_local std::vector<range<clustering_key_prefix>> clustering_key_full_range = {{}};
+
 const std::vector<range<clustering_key_prefix>>&
 clustering_key_filtering_context::get_ranges(const partition_key& key) const {
-    static thread_local std::vector<range<clustering_key_prefix>> full_range = {{}};
-    return _factory ? _factory->get_ranges(key) : full_range;
+    return _factory ? _factory->get_ranges(key) : clustering_key_full_range;
+}
+
+std::vector<range<clustering_key_prefix>>
+clustering_key_filtering_context::get_all_ranges() const {
+    return _factory ? _factory->get_all_ranges() : clustering_key_full_range;
 }
 
 clustering_key_filtering_context clustering_key_filtering_context::create_no_filtering() {
@@ -58,6 +64,10 @@ public:
     }
 
     virtual const std::vector<range<clustering_key_prefix>>& get_ranges(const partition_key& key) override {
+        return _ranges;
+    }
+
+    virtual std::vector<range<clustering_key_prefix>> get_all_ranges() override {
         return _ranges;
     }
 };
@@ -94,6 +104,15 @@ public:
             return _ck_ranges;
         }
         return _slice.row_ranges(*_schema, key);
+    }
+
+    virtual std::vector<range<clustering_key_prefix>> get_all_ranges() override {
+        auto all_ranges = _slice.default_row_ranges();
+        const auto& specific_ranges = _slice.get_specific_ranges();
+        if (specific_ranges) {
+            all_ranges.insert(all_ranges.end(), specific_ranges->ranges().begin(), specific_ranges->ranges().end());
+        }
+        return all_ranges;
     }
 };
 
