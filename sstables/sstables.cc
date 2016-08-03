@@ -969,6 +969,62 @@ void sstable::write_compression(const io_priority_class& pc) {
     write_simple<component_type::CompressionInfo>(_compression, pc);
 }
 
+void sstable::validate_min_max_metadata() {
+    if (!_schema->clustering_key_size()) {
+        return;
+    }
+
+    auto entry = _statistics.contents.find(metadata_type::Stats);
+    if (entry == _statistics.contents.end()) {
+        throw std::runtime_error("Stats metadata not available");
+    }
+    auto& p = entry->second;
+    if (!p) {
+        throw std::runtime_error("Statistics is malformed");
+    }
+
+    stats_metadata& s = *static_cast<stats_metadata *>(p.get());
+    bool incorrect_min_max_column_names = false;
+
+    if (s.min_column_names.elements.empty() && s.max_column_names.elements.empty()) {
+        return;
+    }
+
+    // The min/max metadata is wrong if:
+    // 1) it's not empty and schema defines at least one clustering key.
+    // 2) their size differ.
+    // 3) column name is stored instead of clustering value.
+    // 4) clustering component is stored as composite.
+    if ((!_schema->clustering_key_size() && (s.min_column_names.elements.size() || s.max_column_names.elements.size())) ||
+            (s.min_column_names.elements.size() != s.max_column_names.elements.size())) {
+        incorrect_min_max_column_names = true;
+    }
+    if (!incorrect_min_max_column_names) {
+        for (auto i = 0U; i < s.min_column_names.elements.size(); i++) {
+            if (_schema->get_column_definition(s.min_column_names.elements[i].value) ||
+                    _schema->get_column_definition(s.max_column_names.elements[i].value)) {
+                incorrect_min_max_column_names = true;
+                break;
+            }
+
+            if (_schema->is_compound() && _schema->clustering_key_size() > 1 && _schema->is_dense()) {
+                if (composite::is_valid(s.min_column_names.elements[i].value) ||
+                        composite::is_valid(s.max_column_names.elements[i].value)) {
+                    incorrect_min_max_column_names = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    // let's clear min/max if the data is incorrect, so user will not rely on a metadata that could lead
+    // to bad decisions.
+    if (incorrect_min_max_column_names) {
+        s.min_column_names.elements.clear();
+        s.max_column_names.elements.clear();
+    }
+}
+
 future<> sstable::read_statistics(const io_priority_class& pc) {
     return read_simple<component_type::Statistics>(_statistics, pc);
 }
@@ -1064,6 +1120,7 @@ future<> sstable::load() {
     return read_toc().then([this] {
         return read_statistics(default_priority_class());
     }).then([this] {
+        validate_min_max_metadata();
         return read_compression(default_priority_class());
     }).then([this] {
         return read_filter(default_priority_class());

@@ -452,6 +452,27 @@ public:
         return _bytes;
     }
 
+    // Checks that bytes storing a composite is properly encoded.
+    static bool is_valid(const bytes& value) {
+        size_t len = 0U;
+        bytes_view v(value);
+
+        while (len < value.size()) {
+            if (v.size() < sizeof(size_type)) {
+                return false;
+            }
+            auto s = read_simple<size_type>(v);
+
+            if (v.size() < (s + sizeof(eoc_type))) {
+                return false;
+            }
+            v.remove_prefix(s + sizeof(eoc_type));
+
+            len += sizeof(size_type) + s + sizeof(eoc_type);
+        }
+        return (len == value.size());
+    }
+
     template <typename Component>
     friend inline std::ostream& operator<<(std::ostream& os, const std::pair<Component, eoc>& c) {
         return os << "{value=" << c.first << "; eoc=" << sprint("0x%02x", eoc_type(c.second) & 0xff) << "}";
