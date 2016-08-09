@@ -131,9 +131,8 @@ public:
     enum class version_types { ka, la };
     enum class format_types { big };
 public:
-    sstable(sstring ks, sstring cf, sstring dir, int64_t generation, version_types v, format_types f, gc_clock::time_point now = gc_clock::now())
-        : _ks(std::move(ks))
-        , _cf(std::move(cf))
+    sstable(schema_ptr schema, sstring dir, int64_t generation, version_types v, format_types f, gc_clock::time_point now = gc_clock::now())
+        : _schema(std::move(schema))
         , _dir(std::move(dir))
         , _generation(generation)
         , _version(v)
@@ -377,10 +376,9 @@ public:
     std::vector<sstring> component_filenames() const;
 
 private:
-    sstable(size_t wbuffer_size, sstring ks, sstring cf, sstring dir, int64_t generation, version_types v, format_types f, gc_clock::time_point now = gc_clock::now())
+    sstable(size_t wbuffer_size, schema_ptr schema, sstring dir, int64_t generation, version_types v, format_types f, gc_clock::time_point now = gc_clock::now())
         : sstable_buffer_size(wbuffer_size)
-        , _ks(std::move(ks))
-        , _cf(std::move(cf))
+        , _schema(std::move(schema))
         , _dir(std::move(dir))
         , _generation(generation)
         , _version(v)
@@ -433,8 +431,7 @@ private:
             const composite& clustering_key,
             const std::vector<bytes_view>& column_names);
 
-    sstring _ks;
-    sstring _cf;
+    schema_ptr _schema;
     sstring _dir;
     unsigned long _generation = 0;
     version_types _version;
@@ -634,7 +631,7 @@ public:
     // Used to mark a sstable for deletion that is not relevant to the current shard.
     // It doesn't mean that the sstable will be deleted, but that the sstable is not
     // relevant to the current shard, thus can be deleted by the deletion manager.
-    static void mark_sstable_for_deletion(sstring ks, sstring cf, sstring dir, int64_t generation, version_types v, format_types f);
+    static void mark_sstable_for_deletion(const schema_ptr& schema, sstring dir, int64_t generation, version_types v, format_types f);
 
     // Allow the test cases from sstable_test.cc to test private methods. We use
     // a placeholder to avoid cluttering this class too much. The sstable_test class
