@@ -234,7 +234,8 @@ public:
         schema_ptr schema,
         const key& k,
         query::clustering_key_filtering_context ck_filtering = query::no_clustering_key_filtering,
-        const io_priority_class& pc = default_priority_class());
+        const io_priority_class& pc = default_priority_class(),
+        bool check_bloom_filter = true);
     /**
      * @param schema a schema_ptr object describing this table
      * @param min the minimum token we want to search for (inclusive)
@@ -552,7 +553,6 @@ private:
     future<summary_entry&> read_summary_entry(size_t i);
 
     // FIXME: pending on Bloom filter implementation
-    bool filter_has_key(const key& key) { return _filter->is_present(bytes_view(key)); }
     bool filter_has_key(const schema& s, const dht::decorated_key& dk) { return filter_has_key(key::from_partition_key(s, dk._key)); }
 
     // NOTE: functions used to generate sstable components.
@@ -569,6 +569,10 @@ private:
     void write_collection(file_writer& out, const composite& clustering_key, const column_definition& cdef, collection_mutation_view collection);
 public:
     future<> read_toc();
+
+    bool filter_has_key(const key& key) {
+        return _filter->is_present(bytes_view(key));
+    }
 
     bool filter_has_key(const schema& s, partition_key_view key) {
         return filter_has_key(key::from_partition_key(s, key));
