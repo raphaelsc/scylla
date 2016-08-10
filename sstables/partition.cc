@@ -731,11 +731,13 @@ future<streamed_mutation_opt>
 sstables::sstable::read_row(schema_ptr schema,
                             const sstables::key& key,
                             query::clustering_key_filtering_context ck_filtering,
-                            const io_priority_class& pc) {
+                            const io_priority_class& pc,
+                            bool check_bloom_filter) {
 
     assert(schema);
 
-    if (!filter_has_key(key)) {
+    // Avoid checking bloom filter twice if the caller already did it.
+    if (check_bloom_filter && !filter_has_key(key)) {
         return make_ready_future<streamed_mutation_opt>();
     }
     return find_disk_ranges(schema, key, ck_filtering, pc).then([this, &key, ck_filtering, &pc, schema] (disk_read_range toread) {
