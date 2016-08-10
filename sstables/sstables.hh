@@ -404,6 +404,10 @@ private:
     uint64_t _index_file_size;
     uint64_t _filter_file_size = 0;
     uint64_t _bytes_on_disk = 0;
+    // One range for each component this sstable may have. Each range stores
+    // min and max value for that specific component. Empty if schema of this
+    // sstable defines no clustering key.
+    std::vector<range<bytes>> _clustering_components_ranges;
 
     // _pi_write is used temporarily for building the promoted
     // index (column sample) of one partition when writing a new sstable.
@@ -478,6 +482,11 @@ private:
     // a clustering key range. Read is optimized by filtering a sstable that
     // surely doesn't contain a given clustering key.
     void validate_min_max_metadata();
+
+    // Create one range for each clustering component of this sstable.
+    // It does nothing if schema defines no clustering key, and it's supposed
+    // to be called when loading an existing sstable or after writing a new one.
+    void set_clustering_components_ranges();
 
     future<> create_data();
 
@@ -626,6 +635,8 @@ public:
     // Return sstable key range as range<partition_key> reading only the summary component.
     future<range<partition_key>>
     get_sstable_key_range(const schema& s);
+
+    const std::vector<range<bytes>>& clustering_components_ranges();
 
     // Used to mark a sstable for deletion that is not relevant to the current shard.
     // It doesn't mean that the sstable will be deleted, but that the sstable is not
