@@ -27,10 +27,16 @@
 
 namespace query {
 
+static thread_local clustering_row_ranges full_range = {{}};
+
 const clustering_row_ranges&
 clustering_key_filtering_context::get_ranges(const partition_key& key) const {
-    static thread_local clustering_row_ranges full_range = {{}};
     return _factory ? _factory->get_ranges(key) : full_range;
+}
+
+clustering_row_ranges
+clustering_key_filtering_context::get_all_ranges() const {
+    return _factory ? _factory->get_all_ranges() : full_range;
 }
 
 clustering_key_filtering_context clustering_key_filtering_context::create_no_filtering() {
@@ -62,6 +68,10 @@ public:
 
     virtual bool want_static_columns(const partition_key& key) override {
         return true;
+    }
+
+    virtual clustering_row_ranges get_all_ranges() override {
+        return _ranges;
     }
 };
 
@@ -101,6 +111,15 @@ public:
 
     virtual bool want_static_columns(const partition_key& key) override {
         return true;
+    }
+
+    virtual clustering_row_ranges get_all_ranges() override {
+        auto all_ranges = _slice.default_row_ranges();
+        const auto& specific_ranges = _slice.get_specific_ranges();
+        if (specific_ranges) {
+            all_ranges.insert(all_ranges.end(), specific_ranges->ranges().begin(), specific_ranges->ranges().end());
+        }
+        return all_ranges;
     }
 };
 

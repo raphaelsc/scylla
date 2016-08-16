@@ -47,6 +47,8 @@ public:
     virtual const std::vector<nonwrapping_range<clustering_key_prefix>>& get_ranges(const partition_key&) = 0;
     // Whether we want to get the static row, in addition to the desired clustering rows
     virtual bool want_static_columns(const partition_key&) = 0;
+    // FIXME: possibly make this function return a const ref instead.
+    virtual std::vector<nonwrapping_range<clustering_key_prefix>> get_all_ranges() = 0;
 
     virtual ~clustering_key_filter_factory() = default;
 };
@@ -70,6 +72,8 @@ public:
     bool want_static_columns(const partition_key& key)  const {
         return _factory ? _factory->want_static_columns(key) : true;
     }
+
+    std::vector<nonwrapping_range<clustering_key_prefix>> get_all_ranges() const;
 
     static const clustering_key_filtering_context create(schema_ptr, const partition_slice&);
 
