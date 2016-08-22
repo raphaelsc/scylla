@@ -186,6 +186,19 @@ bool belongs_to_current_shard(const streamed_mutation& m) {
     return dht::shard_of(m.decorated_key().token()) == engine().cpu_id();
 }
 
+// Filter out sstables for reader using bloom filter.
+std::vector<sstables::shared_sstable>
+sstable_reader_filter(const std::vector<sstables::shared_sstable>& sstables, const sstables::key& key) {
+    std::vector<sstables::shared_sstable> candidates;
+    // NOTE: should we futurize this step which checks bloom filter of all candidates?
+    for (const auto& sst : sstables) {
+        if (sst->filter_has_key(key)) {
+            candidates.push_back(sst);
+        }
+    }
+    return candidates;
+}
+
 class range_sstable_reader final : public mutation_reader::impl {
     const query::partition_range& _pr;
     lw_shared_ptr<sstables::sstable_set> _sstables;
@@ -254,7 +267,8 @@ public:
         if (_done) {
             return make_ready_future<streamed_mutation_opt>();
         }
-        return parallel_for_each(_sstables->select(query::partition_range(_rp)),
+        auto candidates = sstable_reader_filter(_sstables->select(query::partition_range(_rp)), _key);
+        return parallel_for_each(std::move(candidates),
             [this](const lw_shared_ptr<sstables::sstable>& sstable) {
                 return sstable->read_row(_schema, _key, _ck_filtering, _pc).then([this](auto smo) {
                     if (smo) {
