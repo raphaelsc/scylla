@@ -218,6 +218,9 @@ public:
     virtual bool parallel_compaction() const {
         return true;
     }
+    virtual bool clustering_optimization() const {
+        return true;
+    }
     virtual int64_t estimated_pending_compactions(column_family& cf) const = 0;
     virtual std::unique_ptr<sstable_set_impl> make_sstable_set(schema_ptr schema) const {
         return std::make_unique<bag_sstable_set>();
@@ -601,6 +604,10 @@ public:
         return false;
     }
 
+    virtual bool clustering_optimization() const override {
+        return false;
+    }
+
     virtual compaction_strategy_type type() const {
         return compaction_strategy_type::leveled;
     }
@@ -681,6 +688,10 @@ compaction_descriptor compaction_strategy::get_sstables_for_compaction(column_fa
 
 bool compaction_strategy::parallel_compaction() const {
     return _compaction_strategy_impl->parallel_compaction();
+}
+
+bool compaction_strategy::clustering_optimization() const {
+    return _compaction_strategy_impl->clustering_optimization();
 }
 
 int64_t compaction_strategy::estimated_pending_compactions(column_family& cf) const {

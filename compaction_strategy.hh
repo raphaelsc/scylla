@@ -57,6 +57,9 @@ public:
     // Return if parallel compaction is allowed by strategy.
     bool parallel_compaction() const;
 
+    // Return if optimization to rule out sstables based on clustering range filter should be applied.
+    bool clustering_optimization() const;
+
     // An estimation of number of compaction for strategy to be satisfied.
     int64_t estimated_pending_compactions(column_family& cf) const;
 
