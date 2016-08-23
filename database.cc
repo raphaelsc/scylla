@@ -273,14 +273,8 @@ contains_rows(const sstables::sstable& sst, const schema_ptr& schema, const std:
 // Filter out sstables for reader using bloom filter and sstable metadata that keeps track
 // of a range for each clustering component.
 static std::vector<sstables::shared_sstable>
-sstable_reader_filter(const std::vector<sstables::shared_sstable>& sstables, const column_family& cf, const schema_ptr& schema,
+sstable_reader_filter(const std::vector<sstables::shared_sstable>& sstables, column_family& cf, const schema_ptr& schema,
         const sstables::key& key, query::clustering_key_filtering_context& ck_filtering) {
-    // TODO: add counters:
-    // - number of time the filter was executed
-    // - sstables considered by the filter (so dividing this by the previous one we get average sstables per read)
-    // - number of times the filter passed the fast-path checks
-    // - how many sstables survived the fast-path checks
-    // - how many sstables survived the clustering key checks
     std::vector<sstables::shared_sstable> candidates;
     // NOTE: should we futurize this step which checks bloom filter of all candidates?
     for (const auto& sst : sstables) {
@@ -294,10 +288,16 @@ sstable_reader_filter(const std::vector<sstables::shared_sstable>& sstables, con
     if (!schema->clustering_key_size() || !cf.get_compaction_strategy().clustering_optimization()) {
         return candidates;
     }
+    ::cf_stats* stats = cf.cf_stats();
+    stats->clustering_filter_count++;
+    stats->sstables_checked_by_clustering_filter += candidates.size();
+
     auto ck_filtering_all_ranges = ck_filtering.get_all_ranges();
     // fast path to include all sstables if only one full range was specified.
     // For example, this happens if query only specifies a partition key.
     if (ck_filtering_all_ranges.size() == 1 && ck_filtering_all_ranges[0].is_full()) {
+        stats->clustering_filter_fast_path_count++;
+        stats->surviving_sstables_after_clustering_filter += candidates.size();
         return candidates;
     }
     auto ranges = ranges_for_clustering_range_filter(schema, ck_filtering_all_ranges);
@@ -323,6 +323,7 @@ sstable_reader_filter(const std::vector<sstables::shared_sstable>& sstables, con
             candidates_with_clustering_range.push_back(sst);
         }
     }
+    stats->surviving_sstables_after_clustering_filter += candidates_with_clustering_range.size();
     return candidates_with_clustering_range;
 }
 
@@ -366,7 +367,7 @@ public:
 };
 
 class single_key_sstable_reader final : public mutation_reader::impl {
-    const column_family* _cf;
+    column_family* _cf;
     schema_ptr _schema;
     dht::ring_position _rp;
     sstables::key _key;
@@ -378,7 +379,7 @@ class single_key_sstable_reader final : public mutation_reader::impl {
     const io_priority_class& _pc;
     query::clustering_key_filtering_context _ck_filtering;
 public:
-    single_key_sstable_reader(const column_family* cf,
+    single_key_sstable_reader(column_family* cf,
                               schema_ptr schema,
                               lw_shared_ptr<sstables::sstable_set> sstables,
                               const partition_key& key,
@@ -434,7 +435,7 @@ column_family::make_sstable_reader(schema_ptr s,
         if (dht::shard_of(pos.token()) != engine().cpu_id()) {
             return make_empty_reader(); // range doesn't belong to this shard
         }
-        return restrict_reader(make_mutation_reader<single_key_sstable_reader>(this, std::move(s), _sstables, *pos.key(), ck_filtering, pc));
+        return restrict_reader(make_mutation_reader<single_key_sstable_reader>(const_cast<column_family*>(this), std::move(s), _sstables, *pos.key(), ck_filtering, pc));
     } else {
         // range_sstable_reader is not movable so we need to wrap it
         return restrict_reader(make_mutation_reader<range_sstable_reader>(std::move(s), _sstables, pr, ck_filtering, pc));
@@ -1574,6 +1575,34 @@ database::setup_collectd() {
                 , scollectd::per_cpu_plugin_instance
                 , "bytes", "pending_flushes")
                 , scollectd::make_typed(scollectd::data_type::GAUGE, _cf_stats.pending_memtables_flushes_bytes)
+    ));
+
+    _collectd.push_back(
+        scollectd::add_polled_metric(scollectd::type_instance_id("database"
+                , scollectd::per_cpu_plugin_instance
+                , "queue_length", "clustering_filter")
+                , scollectd::make_typed(scollectd::data_type::GAUGE, _cf_stats.clustering_filter_count)
+    ));
+
+    _collectd.push_back(
+        scollectd::add_polled_metric(scollectd::type_instance_id("database"
+                , scollectd::per_cpu_plugin_instance
+                , "queue_length", "clustering_filter")
+                , scollectd::make_typed(scollectd::data_type::GAUGE, _cf_stats.sstables_checked_by_clustering_filter)
+    ));
+
+    _collectd.push_back(
+        scollectd::add_polled_metric(scollectd::type_instance_id("database"
+                , scollectd::per_cpu_plugin_instance
+                , "queue_length", "clustering_filter")
+                , scollectd::make_typed(scollectd::data_type::GAUGE, _cf_stats.clustering_filter_fast_path_count)
+    ));
+
+    _collectd.push_back(
+        scollectd::add_polled_metric(scollectd::type_instance_id("database"
+                , scollectd::per_cpu_plugin_instance
+                , "queue_length", "clustering_filter")
+                , scollectd::make_typed(scollectd::data_type::GAUGE, _cf_stats.surviving_sstables_after_clustering_filter)
     ));
 
     _collectd.push_back(
