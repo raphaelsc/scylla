@@ -252,13 +252,10 @@ contains_rows(const sstables::sstable& sst, const schema_ptr& schema, const std:
 
         for (auto i = 0U; i < s; i++) {
             auto& type = clustering_key_types[i];
-            // TODO: See abstract_type::as_less_comparator.  We need a similar one for tri-compares so we don't have to repeat this everywhere.
-            auto cmp = [&type] (const bytes_view& b1, const bytes_view& b2) { return type->compare(b1, b2); };
-
             if (r[i].is_full()) {
                 continue;
             }
-            if (!r[i].overlaps(clustering_components_ranges[i], cmp)) {
+            if (!r[i].overlaps(clustering_components_ranges[i], type->as_tri_comparator())) {
                 non_overlapping = true;
                 break;
             }
