@@ -186,13 +186,132 @@ bool belongs_to_current_shard(const streamed_mutation& m) {
     return dht::shard_of(m.decorated_key().token()) == engine().cpu_id();
 }
 
-// Filter out sstables for reader using bloom filter.
-std::vector<sstables::shared_sstable>
-filter_sstable_for_reader(std::vector<sstables::shared_sstable>&& sstables, const sstables::key& key) {
+// Used to split a clustering key range into a range for each component.
+// If range returned by ck_filtering.get_all_ranges() is composite, a range will be
+// created for each component. If it's not composite, a single range is created.
+// This split is needed to check for overlap in each component individually.
+static std::vector<std::vector<nonwrapping_range<bytes_view>>>
+ranges_for_clustering_range_filter(const schema_ptr& schema, std::vector<nonwrapping_range<clustering_key_prefix>>& ck_filtering_all_ranges) {
+    std::vector<std::vector<nonwrapping_range<bytes_view>>> ranges;
+
+    for (auto& r : ck_filtering_all_ranges) {
+        // this vector stores a range for each component of a key, only one if not composite.
+        std::vector<nonwrapping_range<bytes_view>> composite_ranges;
+
+        if (r.is_full()) {
+            ranges.push_back({ nonwrapping_range<bytes_view>::make_open_ended_both_sides() });
+            continue;
+        }
+        auto start = r.start() ? r.start()->value().components() : clustering_key_prefix::make_empty().components();
+        auto end = r.end() ? r.end()->value().components() : clustering_key_prefix::make_empty().components();
+        auto start_it = start.begin();
+        auto end_it = end.begin();
+
+        // This test is enough because equal bounds in nonwrapping_range are inclusive.
+        auto is_singular = [] (auto& type, const bytes_view& b1, const bytes_view& b2) { return type->compare(b1, b2) == 0; };
+        auto component_type_it = schema->clustering_key_type()->types().begin();
+        bool non_singular_found = false;
+        composite_ranges.reserve(schema->clustering_key_size());
+
+        // the rule is to ignore any component cn if another component ck (k < n) is not if the form [v, v].
+        // If we have [v1, v1], [v2, v2], ... {vl3, vr3}, ....
+        // then we generate [v1, v1], [v2, v2], ... {vl3, vr3}. Where {  = '(' or '[', etc.
+        while (!non_singular_found && start_it != start.end() && end_it != end.end()) {
+            if (component_type_it == schema->clustering_key_type()->types().end()) {
+                throw std::runtime_error(sprint("clustering key filter passed more components than defined in schema of %s.%s",
+                    schema->ks_name(), schema->cf_name()));
+            }
+            non_singular_found = !is_singular(*component_type_it++, *start_it, *end_it);
+            composite_ranges.push_back(nonwrapping_range<bytes_view>(
+                {{ std::move(*start_it++), non_singular_found ? r.start()->is_inclusive() : true }},
+                {{ std::move(*end_it++), non_singular_found ? r.end()->is_inclusive() : true }}));
+        }
+        if (!non_singular_found) {
+            if (start_it != start.end()) {
+                composite_ranges.push_back(nonwrapping_range<bytes_view>({{ std::move(*start_it++), r.start()->is_inclusive() }}, {}));
+            } else if (end_it != end.end()) {
+                composite_ranges.push_back(nonwrapping_range<bytes_view>({}, {{ std::move(*end_it++), r.end()->is_inclusive() }}));
+            }
+        }
+        ranges.push_back(std::move(composite_ranges));
+    }
+    return ranges;
+}
+
+// Return true if this sstable possibly stores clustering row(s) specified by ranges.
+static inline bool
+contains_rows(const sstables::sstable& sst, const schema_ptr& schema, const std::vector<std::vector<nonwrapping_range<bytes_view>>>& ranges) {
+    auto& clustering_key_types = schema->clustering_key_type()->types();
+    auto& clustering_components_ranges = sst.clustering_components_ranges();
+
+    if (!schema->clustering_key_size() || clustering_components_ranges.empty()) {
+        return true;
+    }
+    for (auto& r : ranges) {
+        bool non_overlapping = false;
+        auto s = std::min(r.size(), clustering_components_ranges.size());
+
+        for (auto i = 0U; i < s; i++) {
+            auto& type = clustering_key_types[i];
+
+            if (r[i].is_full()) {
+                continue;
+            }
+            if (!r[i].overlaps(clustering_components_ranges[i], type->as_tri_comparator())) {
+                non_overlapping = true;
+                break;
+            }
+        }
+        if (!non_overlapping) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Filter out sstables for reader using bloom filter and sstable metadata that keeps track
+// of a range for each clustering component.
+static std::vector<sstables::shared_sstable>
+filter_sstable_for_reader(std::vector<sstables::shared_sstable>&& sstables, const schema_ptr& schema,
+        const sstables::key& key, query::clustering_key_filtering_context& ck_filtering) {
     auto sstable_has_not_key = [&] (const sstables::shared_sstable& sst) {
         return !sst->filter_has_key(key);
     };
     sstables.erase(boost::remove_if(sstables, sstable_has_not_key), sstables.end());
+
+    // no clustering filtering is applied if schema defines no clustering key.
+    if (!schema->clustering_key_size()) {
+        return sstables;
+    }
+    auto ck_filtering_all_ranges = ck_filtering.get_all_ranges();
+    // fast path to include all sstables if only one full range was specified.
+    // For example, this happens if query only specifies a partition key.
+    if (ck_filtering_all_ranges.size() == 1 && ck_filtering_all_ranges[0].is_full()) {
+        return sstables;
+    }
+    auto ranges = ranges_for_clustering_range_filter(schema, ck_filtering_all_ranges);
+    if (ranges.empty()) {
+        return {};
+    }
+
+    int64_t min_timestamp = std::numeric_limits<int64_t>::max();
+    auto sstable_has_not_clustering_key = [&min_timestamp, &schema, &ranges] (const sstables::shared_sstable& sst) {
+        if (!contains_rows(*sst, schema, ranges)) {
+            return false; // ordered after sstables that contain clustering rows.
+        } else {
+            min_timestamp = std::min(min_timestamp, sst->get_stats_metadata().min_timestamp);
+            return true;
+        }
+    };
+    auto sstable_has_relevant_tombstone = [&min_timestamp] (const sstables::shared_sstable& sst) {
+        const auto& stats = sst->get_stats_metadata();
+        // re-add sstable as candidate if it contains a tombstone that may cover a row in an included sstable.
+        return (stats.max_timestamp > min_timestamp && stats.estimated_tombstone_drop_time.bin.map.size());
+    };
+    auto skipped = std::partition(sstables.begin(), sstables.end(), sstable_has_not_clustering_key);
+    auto actually_skipped = std::partition(skipped, sstables.end(), sstable_has_relevant_tombstone);
+    sstables.erase(actually_skipped, sstables.end());
+
     return sstables;
 }
 
@@ -264,7 +383,7 @@ public:
         if (_done) {
             return make_ready_future<streamed_mutation_opt>();
         }
-        auto candidates = filter_sstable_for_reader(_sstables->select(query::partition_range(_rp)), _key);
+        auto candidates = filter_sstable_for_reader(_sstables->select(query::partition_range(_rp)), _schema, _key, _ck_filtering);
         return parallel_for_each(std::move(candidates),
             [this](const lw_shared_ptr<sstables::sstable>& sstable) {
                 return sstable->read_row(_schema, _key, _ck_filtering, _pc).then([this](auto smo) {
