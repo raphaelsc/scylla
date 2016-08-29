@@ -42,8 +42,9 @@ struct compaction_descriptor;
 
 class compaction_strategy {
     ::shared_ptr<compaction_strategy_impl> _compaction_strategy_impl;
+    bool _clustering_optimization;
 public:
-    compaction_strategy(::shared_ptr<compaction_strategy_impl> impl);
+    compaction_strategy(::shared_ptr<compaction_strategy_impl> impl, bool clustering_optimization = false);
 
     compaction_strategy();
     ~compaction_strategy();
@@ -56,6 +57,11 @@ public:
 
     // Return if parallel compaction is allowed by strategy.
     bool parallel_compaction() const;
+
+    // Return if optimization to rule out sstables based on clustering range filter should be applied.
+    bool clustering_optimization() const {
+        return _clustering_optimization;
+    }
 
     // An estimation of number of compaction for strategy to be satisfied.
     int64_t estimated_pending_compactions(column_family& cf) const;

@@ -663,8 +663,10 @@ public:
     }
 };
 
-compaction_strategy::compaction_strategy(::shared_ptr<compaction_strategy_impl> impl)
-    : _compaction_strategy_impl(std::move(impl)) {}
+compaction_strategy::compaction_strategy(::shared_ptr<compaction_strategy_impl> impl, bool clustering_optimization)
+    : _compaction_strategy_impl(std::move(impl))
+    , _clustering_optimization(clustering_optimization)
+{ }
 compaction_strategy::compaction_strategy() = default;
 compaction_strategy::~compaction_strategy() = default;
 compaction_strategy::compaction_strategy(const compaction_strategy&) = default;
@@ -696,6 +698,7 @@ compaction_strategy::make_sstable_set(schema_ptr schema) const {
 
 compaction_strategy make_compaction_strategy(compaction_strategy_type strategy, const std::map<sstring, sstring>& options) {
     ::shared_ptr<compaction_strategy_impl> impl;
+    bool clustering_optimization = false;
 
     switch(strategy) {
     case compaction_strategy_type::null:
@@ -711,13 +714,14 @@ compaction_strategy make_compaction_strategy(compaction_strategy_type strategy, 
         impl = make_shared<leveled_compaction_strategy>(leveled_compaction_strategy(options));
         break;
     case compaction_strategy_type::date_tiered:
+        clustering_optimization = true;
         impl = make_shared<date_tiered_compaction_strategy>(date_tiered_compaction_strategy(options));
         break;
     default:
         throw std::runtime_error("strategy not supported");
     }
 
-    return compaction_strategy(std::move(impl));
+    return compaction_strategy(std::move(impl), clustering_optimization);
 }
 
 }
