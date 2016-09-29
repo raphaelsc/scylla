@@ -1216,7 +1216,6 @@ column_family::rebuild_sstable_list(const std::vector<sstables::shared_sstable>&
     auto new_sstable_list = _compaction_strategy.make_sstable_set(_schema);
     auto new_compacted_but_not_deleted = _sstables_compacted_but_not_deleted;
 
-
     std::unordered_set<sstables::shared_sstable> s(
            sstables_to_remove.begin(), sstables_to_remove.end());
 
@@ -1283,6 +1282,7 @@ column_family::compact_sstables(sstables::compaction_descriptor descriptor, bool
         };
         return sstables::compact_sstables(*sstables_to_compact, *this, create_sstable, descriptor.max_sstable_bytes, descriptor.level,
                 cleanup).then([this, sstables_to_compact] (auto new_sstables) {
+            _compaction_strategy.notify_completion(*sstables_to_compact, new_sstables);
             return this->rebuild_sstable_list(new_sstables, *sstables_to_compact);
         });
     });
