@@ -27,7 +27,7 @@
 
 namespace sstables {
 
-future<> remove_by_toc_name(sstring sstable_toc_name);
+future<> remove_by_toc_name(sstring sstable_toc_name, io_check_error_handler error_handler = default_io_check_error_handler());
 
 }
 

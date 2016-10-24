@@ -27,125 +27,129 @@
 class checked_file_impl : public file_impl {
 public:
 
-    checked_file_impl(disk_error_signal_type& s, file f)
-            : _signal(s) , _file(f) {
+    checked_file_impl(io_check_error_handler error_handler, disk_error_signal_type& s, file f)
+            : _error_handler(std::move(error_handler)), _signal(s) , _file(f) {
         _memory_dma_alignment = f.memory_dma_alignment();
         _disk_read_dma_alignment = f.disk_read_dma_alignment();
         _disk_write_dma_alignment = f.disk_write_dma_alignment();
     }
 
     virtual future<size_t> write_dma(uint64_t pos, const void* buffer, size_t len, const io_priority_class& pc) override {
-        return do_io_check(_signal, [&] {
+        return do_io_check(_error_handler, _signal, [&] {
             return get_file_impl(_file)->write_dma(pos, buffer, len, pc);
         });
     }
 
     virtual future<size_t> write_dma(uint64_t pos, std::vector<iovec> iov, const io_priority_class& pc) override {
-        return do_io_check(_signal, [&] {
+        return do_io_check(_error_handler, _signal, [&] {
             return get_file_impl(_file)->write_dma(pos, iov, pc);
         });
     }
 
     virtual future<size_t> read_dma(uint64_t pos, void* buffer, size_t len, const io_priority_class& pc) override {
-        return do_io_check(_signal, [&] {
+        return do_io_check(_error_handler, _signal, [&] {
             return get_file_impl(_file)->read_dma(pos, buffer, len, pc);
         });
     }
 
     virtual future<size_t> read_dma(uint64_t pos, std::vector<iovec> iov, const io_priority_class& pc) override {
-        return do_io_check(_signal, [&] {
+        return do_io_check(_error_handler, _signal, [&] {
             return get_file_impl(_file)->read_dma(pos, iov, pc);
         });
     }
 
     virtual future<> flush(void) override {
-        return do_io_check(_signal, [&] {
+        return do_io_check(_error_handler, _signal, [&] {
             return get_file_impl(_file)->flush();
         });
     }
 
     virtual future<struct stat> stat(void) override {
-        return do_io_check(_signal, [&] {
+        return do_io_check(_error_handler, _signal, [&] {
             return get_file_impl(_file)->stat();
         });
     }
 
     virtual future<> truncate(uint64_t length) override {
-        return do_io_check(_signal, [&] {
+        return do_io_check(_error_handler, _signal, [&] {
             return get_file_impl(_file)->truncate(length);
         });
     }
 
     virtual future<> discard(uint64_t offset, uint64_t length) override {
-        return do_io_check(_signal, [&] {
+        return do_io_check(_error_handler, _signal, [&] {
             return get_file_impl(_file)->discard(offset, length);
         });
     }
 
     virtual future<> allocate(uint64_t position, uint64_t length) override {
-        return do_io_check(_signal, [&] {
+        return do_io_check(_error_handler, _signal, [&] {
             return get_file_impl(_file)->allocate(position, length);
         });
     }
 
     virtual future<uint64_t> size(void) override {
-        return do_io_check(_signal, [&] {
+        return do_io_check(_error_handler, _signal, [&] {
             return get_file_impl(_file)->size();
         });
     }
 
     virtual future<> close() override {
-        return do_io_check(_signal, [&] {
+        return do_io_check(_error_handler, _signal, [&] {
             return get_file_impl(_file)->close();
         });
     }
 
     virtual subscription<directory_entry> list_directory(std::function<future<> (directory_entry de)> next) override {
-        return do_io_check(_signal, [&] {
+        return do_io_check(_error_handler, _signal, [&] {
             return get_file_impl(_file)->list_directory(next);
         });
     }
 
 private:
+    io_check_error_handler _error_handler;
     disk_error_signal_type &_signal;
     file _file;
 };
 
-inline file make_checked_file(disk_error_signal_type& signal, file& f)
+inline file make_checked_file(io_check_error_handler error_handler, disk_error_signal_type& signal, file& f)
 {
-    return file(::make_shared<checked_file_impl>(signal, f));
+    return file(::make_shared<checked_file_impl>(std::move(error_handler), signal, f));
 }
 
 future<file>
 inline open_checked_file_dma(disk_error_signal_type& signal,
                              sstring name, open_flags flags,
-                             file_open_options options)
+                             file_open_options options,
+                             io_check_error_handler error_handler = default_io_check_error_handler())
 {
-    return do_io_check(signal, [&] {
-        return open_file_dma(name, flags, options).then([&] (file f) {
-            return make_ready_future<file>(make_checked_file(signal, f));
+    return do_io_check(error_handler, signal, [&, error_handler] {
+        return open_file_dma(name, flags, options).then([&, error_handler = std::move(error_handler)] (file f) {
+            return make_ready_future<file>(make_checked_file(std::move(error_handler), signal, f));
         });
     });
 }
 
 future<file>
 inline open_checked_file_dma(disk_error_signal_type& signal,
-                             sstring name, open_flags flags)
+                             sstring name, open_flags flags,
+                             io_check_error_handler error_handler = default_io_check_error_handler())
 {
-    return do_io_check(signal, [&] {
-        return open_file_dma(name, flags).then([&] (file f) {
-            return make_ready_future<file>(make_checked_file(signal, f));
+    return do_io_check(error_handler, signal, [&, error_handler] {
+        return open_file_dma(name, flags).then([&, error_handler = std::move(error_handler)] (file f) {
+            return make_ready_future<file>(make_checked_file(std::move(error_handler), signal, f));
         });
     });
 }
 
 future<file>
 inline open_checked_directory(disk_error_signal_type& signal,
-                              sstring name)
+                              sstring name,
+                              io_check_error_handler error_handler = default_io_check_error_handler())
 {
-    return do_io_check(signal, [&] {
-        return engine().open_directory(name).then([&] (file f) {
-            return make_ready_future<file>(make_checked_file(signal, f));
+    return do_io_check(error_handler, signal, [&, error_handler] {
+        return engine().open_directory(name).then([&, error_handler = std::move(error_handler)] (file f) {
+            return make_ready_future<file>(make_checked_file(std::move(error_handler), signal, f));
         });
     });
 }

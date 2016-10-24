@@ -48,6 +48,7 @@
 #include "mutation_reader.hh"
 #include "query-request.hh"
 #include "compound_compat.hh"
+#include "disk-error-handler.hh"
 
 namespace sstables {
 
@@ -134,13 +135,15 @@ public:
     enum class version_types { ka, la };
     enum class format_types { big };
 public:
-    sstable(schema_ptr schema, sstring dir, int64_t generation, version_types v, format_types f, gc_clock::time_point now = gc_clock::now())
+    sstable(schema_ptr schema, sstring dir, int64_t generation, version_types v, format_types f, gc_clock::time_point now = gc_clock::now(),
+            io_check_error_handler error_handler = default_io_check_error_handler())
         : _schema(std::move(schema))
         , _dir(std::move(dir))
         , _generation(generation)
         , _version(v)
         , _format(f)
         , _now(now)
+        , _error_handler(error_handler)
     { }
     sstable& operator=(const sstable&) = delete;
     sstable(const sstable&) = delete;
@@ -374,8 +377,16 @@ public:
     }
     std::vector<sstring> component_filenames() const;
 
+    io_check_error_handler& error_handler() const {
+        return const_cast<io_check_error_handler&>(_error_handler);
+    }
+    template<typename Func, typename... Args>
+    auto sstable_write_io_check(Func&& func, Args&&... args) const {
+        return do_io_check(error_handler(), sstable_write_error, func, std::forward<Args>(args)...);
+    }
 private:
-    sstable(size_t wbuffer_size, schema_ptr schema, sstring dir, int64_t generation, version_types v, format_types f, gc_clock::time_point now = gc_clock::now())
+    sstable(size_t wbuffer_size, schema_ptr schema, sstring dir, int64_t generation, version_types v, format_types f,
+            gc_clock::time_point now = gc_clock::now(), io_check_error_handler error_handler = default_io_check_error_handler())
         : sstable_buffer_size(wbuffer_size)
         , _single_partition_history(make_lw_shared<file_input_stream_history>())
         , _partition_range_history(make_lw_shared<file_input_stream_history>())
@@ -385,6 +396,7 @@ private:
         , _version(v)
         , _format(f)
         , _now(now)
+        , _error_handler(error_handler)
     { }
 
     size_t sstable_buffer_size = 128*1024;
@@ -449,6 +461,8 @@ private:
     bool _marked_for_deletion = false;
 
     gc_clock::time_point _now;
+
+    io_check_error_handler _error_handler;
 
     const bool has_component(component_type f) const;
 

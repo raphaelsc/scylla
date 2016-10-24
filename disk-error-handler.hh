@@ -38,65 +38,72 @@ extern thread_local disk_error_signal_type general_disk_error;
 
 bool should_stop_on_system_error(const std::system_error& e);
 
+using io_check_error_handler = std::function<void (disk_error_signal_type&, std::exception_ptr)>;
+
+static inline io_check_error_handler
+default_io_check_error_handler() {
+    return [] (disk_error_signal_type& signal, std::exception_ptr eptr) {
+        try {
+            std::rethrow_exception(eptr);
+        } catch(std::system_error& e) {
+            if (should_stop_on_system_error(e)) {
+                signal();
+                throw storage_io_error(e);
+            }
+        }
+    };
+}
+
 template<typename Func, typename... Args>
 std::enable_if_t<!is_future<std::result_of_t<Func(Args&&...)>>::value,
 		         std::result_of_t<Func(Args&&...)>>
-do_io_check(disk_error_signal_type& signal, Func&& func, Args&&... args) {
+do_io_check(io_check_error_handler error_handler, disk_error_signal_type& signal, Func&& func, Args&&... args) {
     try {
         // calling function
         return func(std::forward<Args>(args)...);
-    } catch (std::system_error& e) {
-        if (should_stop_on_system_error(e)) {
-            signal();
-            throw storage_io_error(e);
-        }
+    } catch (...) {
+        error_handler(signal, std::current_exception());
         throw;
     }
 }
 
 template<typename Func, typename... Args,
          typename RetType = typename std::enable_if<is_future<std::result_of_t<Func(Args&&...)>>::value>::type>
-auto do_io_check(disk_error_signal_type& signal, Func&& func, Args&&... args) {
+auto do_io_check(io_check_error_handler error_handler, disk_error_signal_type& signal, Func&& func, Args&&... args) {
     try {
         // calling function
         auto fut = func(std::forward<Args>(args)...);
-        return fut.handle_exception([&signal] (auto ep) {
-            try {
-                std::rethrow_exception(ep);
-            } catch (std::system_error& sys_err) {
-                if (should_stop_on_system_error(sys_err)) {
-                    signal();
-                    throw storage_io_error(sys_err);
-                }
-            }
+        return fut.handle_exception([error_handler, &signal] (auto ep) {
+            error_handler(signal, ep);
             return futurize<std::result_of_t<Func(Args&&...)>>::make_exception_future(ep);
         });
-    } catch (std::system_error& e) {
-        if (should_stop_on_system_error(e)) {
-            signal();
-            throw storage_io_error(e);
-        }
+    } catch (...) {
+        error_handler(signal, std::current_exception());
         throw;
     }
 }
 
 template<typename Func, typename... Args>
 auto commit_io_check(Func&& func, Args&&... args) {
-    return do_io_check(commit_error, func, std::forward<Args>(args)...);
+    return do_io_check(default_io_check_error_handler(), commit_error, func, std::forward<Args>(args)...);
 }
 
 template<typename Func, typename... Args>
-auto sstable_read_io_check(Func&& func, Args&&... args) {
-    return do_io_check(sstable_read_error, func, std::forward<Args>(args)...);
+auto sstable_read_io_check(io_check_error_handler error_handler, Func&& func, Args&&... args) {
+    return do_io_check(std::move(error_handler), sstable_read_error, func, std::forward<Args>(args)...);
 }
 
 template<typename Func, typename... Args>
-auto sstable_write_io_check(Func&& func, Args&&... args) {
-    return do_io_check(sstable_write_error, func, std::forward<Args>(args)...);
+auto sstable_write_io_check(io_check_error_handler error_handler, Func&& func, Args&&... args) {
+    return do_io_check(std::move(error_handler), sstable_write_error, func, std::forward<Args>(args)...);
+}
+
+template<typename Func, typename... Args>
+auto io_check(io_check_error_handler error_handler, Func&& func, Args&&... args) {
+    return do_io_check(std::move(error_handler), general_disk_error, func, std::forward<Args>(args)...);
 }
 
 template<typename Func, typename... Args>
 auto io_check(Func&& func, Args&&... args) {
-    return do_io_check(general_disk_error, func, std::forward<Args>(args)...);
+    return do_io_check(default_io_check_error_handler(), general_disk_error, func, std::forward<Args>(args)...);
 }
-
