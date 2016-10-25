@@ -1152,22 +1152,25 @@ future<std::vector<sstables::entry_descriptor>> column_family::flush_upload_dir(
     };
 
     return do_with(work(), [this] (work& work) {
+        auto error_handler = [] (std::exception_ptr eptr) {
+            // do nothing about sstable exception and caller will just rethrow it.
+        };
         return lister::scan_dir(_config.datadir + "/upload/", { directory_entry_type::regular },
-                [this, &work] (directory_entry de) {
+                [&, this] (directory_entry de) {
             auto comps = sstables::entry_descriptor::make_descriptor(de.name);
             if (comps.component != sstables::sstable::component_type::TOC) {
                 return make_ready_future<>();
             }
-            auto sst = make_lw_shared<sstables::sstable>(_schema,
-                                                        _config.datadir + "/upload", comps.generation,
-                                                        comps.version, comps.format);
+            auto sst = make_lw_shared<sstables::sstable>(_schema, _config.datadir + "/upload", comps.generation,
+                comps.version, comps.format, gc_clock::now(),
+                [&] (disk_error_signal_type&) { return error_handler; });
             work.sstables.emplace(comps.generation, std::move(sst));
             work.descriptors.emplace(comps.generation, std::move(comps));
             return make_ready_future<>();
-        }, &manifest_json_filter).then([this, &work] {
+        }, &manifest_json_filter).then([&] {
             work.flushed.reserve(work.descriptors.size());
 
-            return do_for_each(work.sstables, [this, &work] (auto& pair) {
+            return do_for_each(work.sstables, [&] (auto& pair) {
                 auto gen = this->calculate_generation_for_new_table();
                 auto& sst = pair.second;
 
@@ -1180,8 +1183,8 @@ future<std::vector<sstables::entry_descriptor>> column_family::flush_upload_dir(
                     return sst->mutate_sstable_level(0);
                 }).then([this, &sst, gen] {
                     return sst->create_links(_config.datadir, gen);
-                }).then([&sst] {
-                    return sstables::remove_by_toc_name(sst->toc_filename());
+                }).then([&] {
+                    return sstables::remove_by_toc_name(sst->toc_filename(), error_handler);
                 });
             });
         }).then([&work] {
