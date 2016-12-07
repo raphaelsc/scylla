@@ -1477,6 +1477,10 @@ std::vector<sstables::shared_sstable> column_family::select_sstables(const query
     return _sstables->select(range);
 }
 
+sstables::sstable_set::incremental_selector column_family::incremental_sstable_selector() const {
+    return _sstables->make_incremental_selector();
+}
+
 // Gets the list of all sstables in the column family, including ones that are
 // not used for active queries because they have already been compacted, but are
 // waiting for delete_atomically() to return.
@@ -1493,6 +1497,10 @@ lw_shared_ptr<sstable_list> column_family::get_sstables_including_compacted_unde
         ret->insert(s);
     }
     return ret;
+}
+
+const std::vector<sstables::shared_sstable>& column_family::compacted_undeleted_sstables() const {
+    return _sstables_compacted_but_not_deleted;
 }
 
 inline bool column_family::manifest_json_filter(const sstring& fname) {
