@@ -789,11 +789,27 @@ inline void write(file_writer& out, const utils::estimated_histogram& eh) {
     out.write(p, bytes).get();
 }
 
+template <typename Key, typename Value>
+struct streaming_histogram_entry {
+    Key key;
+    Value value;
+
+    template <typename Describer>
+    auto describe_type(Describer f) { return f(key, value); }
+};
+
 future<> parse(random_access_reader& in, utils::streaming_histogram& sh) {
-    auto bin = std::make_unique<disk_hash<uint32_t, double, uint64_t>>();
-    auto f = parse(in, sh.max_bin_size, *bin);
-    return f.then([&sh, bin = std::move(bin)] {
-        sh.bin = std::move(bin->map);
+    using Key = typename decltype(utils::streaming_histogram::bin)::key_type;
+    using Value = typename decltype(utils::streaming_histogram::bin)::mapped_type;
+
+    auto a = std::make_unique<disk_array<uint32_t, streaming_histogram_entry<Key, Value>>>();
+
+    auto f = parse(in, sh.max_bin_size, *a);
+    return f.then([&sh, a = std::move(a)] {
+        auto transform = [] (auto entry) -> std::pair<Key, Value> {
+            return { entry.key, entry.value };
+        };
+        boost::copy(a->elements | boost::adaptors::transformed(transform), std::inserter(sh.bin, sh.bin.end()));
         return make_ready_future<>();
     });
 }
@@ -802,10 +818,14 @@ inline void write(file_writer& out, const utils::streaming_histogram& sh) {
     uint32_t max_bin_size;
     check_truncate_and_assign(max_bin_size, sh.max_bin_size);
 
-    disk_hash<uint32_t, double, uint64_t> bin;
-    bin.map = sh.bin;
+    using Key = typename decltype(utils::streaming_histogram::bin)::key_type;
+    using Value = typename decltype(utils::streaming_histogram::bin)::mapped_type;
 
-    write(out, max_bin_size, bin);
+    disk_array<uint32_t, streaming_histogram_entry<Key, Value>> a;
+    a.elements = boost::copy_range<std::deque<streaming_histogram_entry<Key, Value>>>(sh.bin
+        | boost::adaptors::transformed([&] (auto& kv) { return streaming_histogram_entry<Key, Value>{kv.first, kv.second}; }));
+
+    write(out, max_bin_size, a);
 }
 
 // This is small enough, and well-defined. Easier to just read it all
