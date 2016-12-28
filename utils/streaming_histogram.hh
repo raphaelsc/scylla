@@ -116,8 +116,10 @@ struct streaming_histogram {
                     }
                 }
                 // merge those two
-                uint64_t k1 = bin.erase(q1);
-                uint64_t k2 = bin.erase(q2);
+                uint64_t k1 = bin.at(q1);
+                uint64_t k2 = bin.at(q2);
+                bin.erase(q1);
+                bin.erase(q2);
                 bin.insert({(q1 * k1 + q2 * k2) / (k1 + k2), k1 + k2});
             }
         }
