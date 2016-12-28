@@ -43,7 +43,7 @@
 
 #include <map>
 
-namespace sstables {
+namespace utils {
 
 /**
  * Histogram that can be constructed from streaming of data.
