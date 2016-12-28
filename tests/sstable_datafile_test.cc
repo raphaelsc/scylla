@@ -3254,7 +3254,7 @@ SEASTAR_TEST_CASE(sstable_tombstone_metadata_check) {
             auto sst = make_lw_shared<sstable>(s, tmp->path, 1, la, big);
             sst->write_components(*mt).get();
             sst = reusable_sst(s, tmp->path, 1).get0();
-            BOOST_REQUIRE(sst->get_stats_metadata().estimated_tombstone_drop_time.bin.map.size());
+            BOOST_REQUIRE(sst->get_stats_metadata().estimated_tombstone_drop_time.bin.size());
         }
 
         {
@@ -3265,7 +3265,7 @@ SEASTAR_TEST_CASE(sstable_tombstone_metadata_check) {
             auto sst = make_lw_shared<sstable>(s, tmp->path, 2, la, big);
             sst->write_components(*mt).get();
             sst = reusable_sst(s, tmp->path, 2).get0();
-            BOOST_REQUIRE(sst->get_stats_metadata().estimated_tombstone_drop_time.bin.map.size());
+            BOOST_REQUIRE(sst->get_stats_metadata().estimated_tombstone_drop_time.bin.size());
         }
 
         {
@@ -3276,7 +3276,7 @@ SEASTAR_TEST_CASE(sstable_tombstone_metadata_check) {
             auto sst = make_lw_shared<sstable>(s, tmp->path, 3, la, big);
             sst->write_components(*mt).get();
             sst = reusable_sst(s, tmp->path, 3).get0();
-            BOOST_REQUIRE(!sst->get_stats_metadata().estimated_tombstone_drop_time.bin.map.size());
+            BOOST_REQUIRE(!sst->get_stats_metadata().estimated_tombstone_drop_time.bin.size());
         }
 
         {
@@ -3295,7 +3295,7 @@ SEASTAR_TEST_CASE(sstable_tombstone_metadata_check) {
             auto sst = make_lw_shared<sstable>(s, tmp->path, 4, la, big);
             sst->write_components(*mt).get();
             sst = reusable_sst(s, tmp->path, 4).get0();
-            BOOST_REQUIRE(sst->get_stats_metadata().estimated_tombstone_drop_time.bin.map.size());
+            BOOST_REQUIRE(sst->get_stats_metadata().estimated_tombstone_drop_time.bin.size());
         }
 
         {
@@ -3307,7 +3307,7 @@ SEASTAR_TEST_CASE(sstable_tombstone_metadata_check) {
             auto sst = make_lw_shared<sstable>(s, tmp->path, 5, la, big);
             sst->write_components(*mt).get();
             sst = reusable_sst(s, tmp->path, 5).get0();
-            BOOST_REQUIRE(sst->get_stats_metadata().estimated_tombstone_drop_time.bin.map.size());
+            BOOST_REQUIRE(sst->get_stats_metadata().estimated_tombstone_drop_time.bin.size());
         }
 
         {
@@ -3320,7 +3320,7 @@ SEASTAR_TEST_CASE(sstable_tombstone_metadata_check) {
             auto sst = make_lw_shared<sstable>(s, tmp->path, 6, la, big);
             sst->write_components(*mt).get();
             sst = reusable_sst(s, tmp->path, 6).get0();
-            BOOST_REQUIRE(sst->get_stats_metadata().estimated_tombstone_drop_time.bin.map.size());
+            BOOST_REQUIRE(sst->get_stats_metadata().estimated_tombstone_drop_time.bin.size());
         }
     });
 }
