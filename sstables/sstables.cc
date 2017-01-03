@@ -1147,32 +1147,35 @@ future<> sstable::open_data() {
                     .then([this] (auto files) {
         _index_file = std::get<file>(std::get<0>(files).get());
         _data_file  = std::get<file>(std::get<1>(files).get());
-        return _data_file.stat().then([this] (struct stat st) {
-            if (this->has_component(sstable::component_type::CompressionInfo)) {
-                _sc->compression.update(st.st_size);
-            } else {
-                _data_file_size = st.st_size;
-            }
-            _data_file_write_time = db_clock::from_time_t(st.st_mtime);
-        }).then([this] {
-            return _index_file.size().then([this] (auto size) {
-              _index_file_size = size;
-            });
-        }).then([this] {
-            this->set_clustering_components_ranges();
-            this->set_first_and_last_keys();
+        return this->update_info();
+    });
+}
 
-            // Get disk usage for this sstable (includes all components).
-            _bytes_on_disk = 0;
-            return do_for_each(_components, [this] (component_type c) {
-                return this->sstable_write_io_check([&] {
-                    return engine().file_size(this->filename(c));
-                }).then([this] (uint64_t bytes) {
-                    _bytes_on_disk += bytes;
-                });
+future<> sstable::update_info() {
+    return _data_file.stat().then([this] (struct stat st) {
+        if (this->has_component(sstable::component_type::CompressionInfo)) {
+            _sc->compression.update(st.st_size);
+        } else {
+            _data_file_size = st.st_size;
+        }
+        _data_file_write_time = db_clock::from_time_t(st.st_mtime);
+    }).then([this] {
+        return _index_file.size().then([this] (auto size) {
+            _index_file_size = size;
+        });
+    }).then([this] {
+        this->set_clustering_components_ranges();
+        this->set_first_and_last_keys();
+
+        // Get disk usage for this sstable (includes all components).
+        _bytes_on_disk = 0;
+        return do_for_each(_components, [this] (component_type c) {
+            return this->sstable_write_io_check([&] {
+                return engine().file_size(this->filename(c));
+            }).then([this] (uint64_t bytes) {
+                _bytes_on_disk += bytes;
             });
         });
-
     });
 }
 
@@ -1192,23 +1195,94 @@ future<> sstable::create_data() {
     });
 }
 
+class shared_components_manager {
+    struct entry {
+        entry(std::unordered_set<shard_id> owners, lw_shared_ptr<sstable::shareable_components> sc,
+                seastar::file_handle data, seastar::file_handle index)
+            : owners(std::move(owners)), sc(std::move(sc)), data(std::move(data)), index(std::move(index)) {
+        }
+        std::unordered_set<shard_id> owners;
+        lw_shared_ptr<sstable::shareable_components> sc;
+        seastar::file_handle data;
+        seastar::file_handle index;
+    };
+    std::unordered_map<int64_t, entry> _shared_resources;
+public:
+    void insert(int gen, std::unordered_set<shard_id> owners, lw_shared_ptr<sstable::shareable_components> sc,
+            seastar::file_handle data, seastar::file_handle index) {
+        entry e(std::move(owners), std::move(sc), std::move(data), std::move(index));
+        _shared_resources.emplace(gen, std::move(e));
+    }
+
+    stdx::optional<std::tuple<foreign_shareable_components, seastar::file_handle, seastar::file_handle>>
+    get(int gen, shard_id owner) {
+        auto it = _shared_resources.find(gen);
+        if (it == _shared_resources.end()) {
+            return stdx::nullopt;
+        }
+        auto& e = it->second;
+
+        // we want to delete an entry from manager after it's consumed by all
+        // shards that own respective sstable, or memory would be unnecessarily
+        // wasted after the sstable is compacted, for example.
+        e.owners.erase(owner);
+        if (e.owners.empty()) {
+            _shared_resources.erase(it);
+        }
+        return std::make_tuple(make_foreign(e.sc), e.data, e.index);
+    }
+};
+
+static thread_local shared_components_manager g_shared_components_manager;
+
+future<> sstable::share_components(shared_sstable& sst, std::vector<shard_id> owners) {
+    return smp::submit_to(sst->generation() % smp::count, [owners = std::move(owners), foreign_sst = make_foreign(sst)] () mutable {
+        auto sst = make_lw_shared<sstable>(foreign_sst->_schema, foreign_sst->_dir, foreign_sst->_generation, foreign_sst->_version, foreign_sst->_format);
+
+        return sst->load().then([owners = std::move(owners), foreign_sst = std::move(foreign_sst), sst] () mutable {
+            auto sc = make_lw_shared<shareable_components>(std::move(*sst->_sc));
+            auto owners_s = boost::copy_range<std::unordered_set<shard_id>>(owners);
+            g_shared_components_manager.insert(sst->_generation, std::move(owners_s), std::move(sc), sst->_data_file.dup(), sst->_index_file.dup());
+        });
+    });
+}
+
+static future<stdx::optional<std::tuple<foreign_shareable_components, seastar::file_handle, seastar::file_handle>>>
+shared_components(int gen, shard_id owner) {
+    return smp::submit_to(gen % smp::count, [gen, owner] () mutable {
+        return g_shared_components_manager.get(gen, owner);
+    });
+}
+
 // This interface is only used during tests, snapshot loading and early initialization.
 // No need to set tunable priorities for it.
-future<> sstable::load() {
-    return read_toc().then([this] {
-        return read_statistics(default_priority_class());
-    }).then([this] {
+future<> sstable::load(bool use_shared_components) {
+    return seastar::async([this, use_shared_components] {
+        stdx::optional<std::tuple<foreign_shareable_components, seastar::file_handle, seastar::file_handle>> t;
+
+        read_toc().get();
+
+        if (use_shared_components) {
+            t = shared_components(_generation, engine().cpu_id()).get0();
+        }
+        // sstable owned by more than 1 shard will find its components in
+        // shared component manager, meaning that load will proceed with
+        // almost no disk usage.
+        if (t) {
+            _sc = std::move(std::get<0>(*t));
+            _data_file = std::get<1>(*t).to_file();
+            _index_file = std::get<2>(*t).to_file();
+            update_info().get();
+        } else {
+            read_statistics(default_priority_class()).get();
+            read_compression(default_priority_class()).get();
+            read_scylla_metadata(default_priority_class()).get();
+            read_filter(default_priority_class()).get();
+            read_summary(default_priority_class()).get();
+            open_data().get();
+        }
         validate_min_max_metadata();
         set_clustering_components_ranges();
-        return read_compression(default_priority_class());
-    }).then([this] {
-        return read_scylla_metadata(default_priority_class());
-    }).then([this] {
-        return read_filter(default_priority_class());
-    }).then([this] {;
-        return read_summary(default_priority_class());
-    }).then([this] {
-        return open_data();
     });
 }
 

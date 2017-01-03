@@ -235,7 +235,10 @@ public:
     static future<> remove_sstable_with_temp_toc(sstring ks, sstring cf, sstring dir, int64_t generation,
                                                  version_types v, format_types f);
 
-    future<> load();
+    // If use_shared_components is true, load() will try to load this sstable
+    // with components being shared by other shard. If no shared component
+    // is found, load() will read all components from disk and succeed.
+    future<> load(bool use_shared_components = false);
     future<> open_data();
 
     future<> set_generation(int64_t generation);
@@ -538,6 +541,9 @@ private:
 
     future<> create_data();
 
+    // Called when loading an existing sstable, after opening data and index.
+    future<> update_info();
+
     future<index_list> read_indexes(uint64_t summary_idx, const io_priority_class& pc);
     index_reader get_index_reader(const io_priority_class& pc);
 
@@ -693,6 +699,11 @@ public:
     // relevant to the current shard, thus can be deleted by the deletion manager.
     static void mark_sstable_for_deletion(const schema_ptr& schema, sstring dir, int64_t generation, version_types v, format_types f);
 
+    // Share immutable components of a sstable via shared_components_manager.
+    // After that, shards owning the shared sstable will find its components
+    // available in the manager during the load phase.
+    static future<> share_components(lw_shared_ptr<sstable>& sst, std::vector<shard_id> owners);
+
     // Allow the test cases from sstable_test.cc to test private methods. We use
     // a placeholder to avoid cluttering this class too much. The sstable_test class
     // will then re-export as public every method it needs.
@@ -706,6 +717,7 @@ public:
 
 using shared_sstable = lw_shared_ptr<sstable>;
 using sstable_list = std::unordered_set<shared_sstable>;
+using foreign_shareable_components = foreign_ptr<lw_shared_ptr<sstable::shareable_components>>;
 
 struct entry_descriptor {
     sstring ks;

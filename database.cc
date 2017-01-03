@@ -782,13 +782,30 @@ future<sstables::shared_sstable>
 column_family::open_sstable(sstring dir, int64_t generation, sstables::sstable::version_types v, sstables::sstable::format_types f) {
     auto sst = make_lw_shared<sstables::sstable>(_schema, dir, generation, v, f);
     return sst->get_owning_shards_from_unloaded().then([this, sst] (std::vector<shard_id> shards) mutable {
-        if (!belongs_to_current_shard(shards)) {
-            dblog.debug("sstable {} not relevant for this shard, ignoring", sst->get_filename());
-            sst->mark_for_deletion();
-            return make_ready_future<sstables::shared_sstable>();
+        auto f = make_ready_future<>();
+
+        // sstable that belong to more than one shard will have its components
+        // stored only by one shard so as to reduce memory usage.
+        // We use 'generation % smp::count' to decide which shard will be
+        // responsible for storing components of shared sstable, and sharing
+        // it with the other owners.
+        // NOTE: Shard 0 opens sstables first than others, so it's the only
+        // one that will ask for sharing of a shared sstable.
+        if (engine().cpu_id() == 0 && shards.size() > 1) {
+            f = sstables::sstable::share_components(sst, shards);
         }
-        return sst->load().then([sst] () mutable {
-            return make_ready_future<sstables::shared_sstable>(std::move(sst));
+
+        return f.then([this, sst, shards = std::move(shards)] () mutable {
+            if (!belongs_to_current_shard(shards)) {
+                dblog.debug("sstable {} not relevant for this shard, ignoring", sst->get_filename());
+                sst->mark_for_deletion();
+                return make_ready_future<sstables::shared_sstable>();
+            }
+
+            bool use_shared_components = shards.size() > 1;
+            return sst->load(use_shared_components).then([sst] () mutable {
+                return make_ready_future<sstables::shared_sstable>(std::move(sst));
+            });
         });
     });
 }
