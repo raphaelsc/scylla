@@ -100,6 +100,10 @@ public:
         });
     }
 
+    virtual std::unique_ptr<seastar::file_handle_impl> dup() override {
+        return get_file_impl(_file)->dup();
+    }
+
     virtual subscription<directory_entry> list_directory(std::function<future<> (directory_entry de)> next) override {
         return do_io_check(_error_handler, [&] {
             return get_file_impl(_file)->list_directory(next);
