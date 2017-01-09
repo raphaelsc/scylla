@@ -1260,10 +1260,10 @@ future<> update_schema_version_and_announce(distributed<service::storage_proxy>&
 
 class distributed_loader {
 public:
-    static future<> open_sstable(distributed<database>& db, sstables::entry_descriptor comps,
+    static future<> open_sstable(distributed<database>& db, sstring ks, sstring cf, sstables::entry_descriptor comps,
         std::function<future<> (column_family&, sstables::foreign_sstable_open_info)> func);
     static future<> load_new_sstables(distributed<database>& db, sstring ks, sstring cf, std::vector<sstables::entry_descriptor> new_tables);
-    static future<sstables::entry_descriptor> probe_file(distributed<database>& db, sstring sstdir, sstring fname);
+    static future<sstables::entry_descriptor> probe_file(distributed<database>& db, sstring ks, sstring cf, sstring fname);
     static future<> populate_column_family(distributed<database>& db, sstring sstdir, sstring ks, sstring cf);
     static future<> populate_keyspace(distributed<database>& db, sstring datadir, sstring ks_name);
     static future<> init_system_keyspace(distributed<database>& db);

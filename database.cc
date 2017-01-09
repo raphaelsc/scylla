@@ -1491,7 +1491,7 @@ static future<> invoke_all_with_ptr(distributed<Service>& s, PtrType ptr, Func&&
     });
 }
 
-future<> distributed_loader::open_sstable(distributed<database>& db, sstables::entry_descriptor comps,
+future<> distributed_loader::open_sstable(distributed<database>& db, sstring ks, sstring cf, sstables::entry_descriptor comps,
         std::function<future<> (column_family&, sstables::foreign_sstable_open_info)> func) {
     // loads components of a sstable from shard S and share it with all other
     // shards. Which shard a sstable will be opened at is decided using
@@ -1501,16 +1501,16 @@ future<> distributed_loader::open_sstable(distributed<database>& db, sstables::e
     // to distribute evenly the resource usage among all shards.
 
     return db.invoke_on(column_family::calculate_shard_from_sstable_generation(comps.generation),
-            [&db, comps = std::move(comps), func = std::move(func)] (database& local) {
-        auto& cf = local.find_column_family(comps.ks, comps.cf);
+            [&db, comps = std::move(comps), func = std::move(func), ks = std::move(ks), cfname = std::move(cf)] (database& local) {
+        auto& cf = local.find_column_family(ks, cfname);
 
         auto f = sstables::sstable::load_shared_components(cf.schema(), cf._config.datadir, comps.generation, comps.version, comps.format);
-        return f.then([&db, comps = std::move(comps), func = std::move(func)] (sstables::sstable_open_info info) {
+        return f.then([&db, comps = std::move(comps), func = std::move(func), ks, cfname] (sstables::sstable_open_info info) {
             // shared components loaded, now opening sstable in all shards with shared components
-            return do_with(std::move(info), [&db, comps = std::move(comps), func = std::move(func)] (auto& info) {
+            return do_with(std::move(info), [&db, comps = std::move(comps), func = std::move(func), ks, cfname] (auto& info) {
                 return invoke_all_with_ptr(db, std::move(info.components),
-                        [owners = info.owners, data = info.data.dup(), index = info.index.dup(), comps, func] (database& db, auto components) {
-                    auto& cf = db.find_column_family(comps.ks, comps.cf);
+                        [owners = info.owners, data = info.data.dup(), index = info.index.dup(), comps, func, ks, cfname] (database& db, auto components) {
+                    auto& cf = db.find_column_family(ks, cfname);
                     return func(cf, sstables::foreign_sstable_open_info{std::move(components), owners, data, index});
                 });
             });
@@ -1519,7 +1519,7 @@ future<> distributed_loader::open_sstable(distributed<database>& db, sstables::e
 }
 
 future<> distributed_loader::load_new_sstables(distributed<database>& db, sstring ks, sstring cf, std::vector<sstables::entry_descriptor> new_tables) {
-    return parallel_for_each(new_tables, [&db] (auto comps) {
+    return parallel_for_each(new_tables, [&db, ks, cf] (auto comps) {
         auto cf_sstable_open = [comps] (column_family& cf, sstables::foreign_sstable_open_info info) {
             auto f = cf.open_sstable(std::move(info), cf._config.datadir, comps.generation, comps.version, comps.format);
             return f.then([&cf] (sstables::shared_sstable sst) mutable {
@@ -1529,8 +1529,8 @@ future<> distributed_loader::load_new_sstables(distributed<database>& db, sstrin
                 return make_ready_future<>();
             });
         };
-        return distributed_loader::open_sstable(db, comps, cf_sstable_open);
-    }).then([&db, ks = std::move(ks), cf = std::move(cf)] {
+        return distributed_loader::open_sstable(db, std::move(ks), std::move(cf), comps, cf_sstable_open);
+    }).then([&db, ks, cf] {
         return db.invoke_on_all([ks = std::move(ks), cfname = std::move(cf)] (database& db) {
             auto& cf = db.find_column_family(ks, cfname);
             // atomically load all opened sstables into column family.
@@ -1547,7 +1547,7 @@ future<> distributed_loader::load_new_sstables(distributed<database>& db, sstrin
     });
 }
 
-future<sstables::entry_descriptor> distributed_loader::probe_file(distributed<database>& db, sstring sstdir, sstring fname) {
+future<sstables::entry_descriptor> distributed_loader::probe_file(distributed<database>& db, sstring ks, sstring cf, sstring fname) {
     using namespace sstables;
 
     entry_descriptor comps = entry_descriptor::make_descriptor(fname);
@@ -1558,9 +1558,9 @@ future<sstables::entry_descriptor> distributed_loader::probe_file(distributed<da
     if (comps.component != sstable::component_type::TOC) {
         return make_ready_future<entry_descriptor>(std::move(comps));
     }
-    auto cf_sstable_open = [sstdir, comps, fname] (column_family& cf, sstables::foreign_sstable_open_info info) {
+    auto cf_sstable_open = [comps, fname] (column_family& cf, sstables::foreign_sstable_open_info info) {
         cf.update_sstables_known_generation(comps.generation);
-        return cf.open_sstable(std::move(info), sstdir, comps.generation, comps.version, comps.format).then([&cf] (sstables::shared_sstable sst) mutable {
+        return cf.open_sstable(std::move(info), cf._config.datadir, comps.generation, comps.version, comps.format).then([&cf] (sstables::shared_sstable sst) mutable {
             if (sst) {
                 cf.load_sstable(sst);
             }
@@ -1568,7 +1568,7 @@ future<sstables::entry_descriptor> distributed_loader::probe_file(distributed<da
         });
     };
 
-    return distributed_loader::open_sstable(db, comps, cf_sstable_open).then_wrapped([fname] (future<> f) {
+    return distributed_loader::open_sstable(db, ks, cf, comps, cf_sstable_open).then_wrapped([fname] (future<> f) {
         try {
             f.get();
         } catch (malformed_sstable_exception& e) {
@@ -1606,9 +1606,9 @@ future<> distributed_loader::populate_column_family(distributed<database>& db, s
     auto descriptor = make_lw_shared<sstable_descriptor>();
 
     return do_with(std::vector<future<>>(), [&db, sstdir, verifier, descriptor, ks, cf] (std::vector<future<>>& futures) {
-        return lister::scan_dir(sstdir, { directory_entry_type::regular }, [&db, sstdir, verifier, descriptor, &futures] (directory_entry de) {
+        return lister::scan_dir(sstdir, { directory_entry_type::regular }, [&db, sstdir, ks, cf, verifier, descriptor, &futures] (directory_entry de) {
             // FIXME: The secondary indexes are in this level, but with a directory type, (starting with ".")
-            auto f = distributed_loader::probe_file(db, sstdir, de.name).then([verifier, descriptor, sstdir, de] (auto entry) {
+            auto f = distributed_loader::probe_file(db, ks, cf, de.name).then([verifier, descriptor, sstdir, de] (auto entry) {
                 auto filename = sstdir + "/" + de.name;
                 if (entry.component == sstables::sstable::component_type::TemporaryStatistics) {
                     return remove_file(sstables::sstable::filename(sstdir, entry.ks, entry.cf, entry.version, entry.generation,
