@@ -1560,14 +1560,6 @@ future<sstables::entry_descriptor> distributed_loader::probe_file(distributed<da
     }
     auto cf_sstable_open = [sstdir, comps, fname] (column_family& cf, sstables::foreign_sstable_open_info info) {
         cf.update_sstables_known_generation(comps.generation);
-        {
-            auto i = boost::range::find_if(*cf._sstables->all(), [gen = comps.generation] (sstables::shared_sstable sst) { return sst->generation() == gen; });
-            if (i != cf._sstables->all()->end()) {
-                auto new_toc = sstdir + "/" + fname;
-                throw std::runtime_error(sprint("Attempted to add sstable generation %d twice: new=%s existing=%s",
-                                                comps.generation, new_toc, (*i)->toc_filename()));
-            }
-        }
         return cf.open_sstable(std::move(info), sstdir, comps.generation, comps.version, comps.format).then([&cf] (sstables::shared_sstable sst) mutable {
             if (sst) {
                 cf.load_sstable(sst);
@@ -1708,6 +1700,17 @@ future<> distributed_loader::populate_column_family(distributed<database>& db, s
             auto& cf = db.find_column_family(ks, cfname);
             // Make sure this is called even if CF is empty
             cf.mark_ready_for_writes();
+
+            std::unordered_map<int64_t, sstables::shared_sstable> sstables;
+            for (auto& sst : *cf._sstables->all()) {
+                auto gen = sst->generation();
+                auto it = sstables.find(gen);
+                if (it != sstables.end()) {
+                    throw std::runtime_error(sprint("Attempted to add sstable generation %d twice: %s and %s. Refusing to boot",
+                        gen, sst->toc_filename(), it->second->toc_filename()));
+                }
+                sstables.emplace(gen, sst);
+            }
         });
     });
 
