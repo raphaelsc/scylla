@@ -36,6 +36,8 @@ class sstable_set {
     // used to support column_family::get_sstable(), which wants to return an sstable_list
     // that has a reference somewhere
     lw_shared_ptr<sstable_list> _all;
+    // used to make sure set will not contain more than one sstable with same generation
+    std::unordered_set<int64_t> _generations;
 public:
     ~sstable_set();
     sstable_set(std::unique_ptr<sstable_set_impl> impl, lw_shared_ptr<sstable_list> all);

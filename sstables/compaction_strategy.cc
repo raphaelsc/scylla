@@ -50,8 +50,10 @@
 #include "sstable_set.hh"
 #include "compatible_ring_position.hh"
 #include <boost/range/algorithm/find.hpp>
+#include <boost/range/adaptor/transformed.hpp>
 #include <boost/icl/interval_map.hpp>
 #include "date_tiered_compaction_strategy.hh"
+#include <seastar/util/defer.hh>
 
 logging::logger date_tiered_manifest::logger = logging::logger("DateTieredCompactionStrategy");
 
@@ -77,12 +79,14 @@ public:
 
 sstable_set::sstable_set(std::unique_ptr<sstable_set_impl> impl, lw_shared_ptr<sstable_list> all)
         : _impl(std::move(impl))
-        , _all(std::move(all)) {
+        , _all(std::move(all))
+        , _generations(boost::copy_range<std::unordered_set<int64_t>>(*_all | boost::adaptors::transformed(std::mem_fn(&sstable::generation)))) {
 }
 
 sstable_set::sstable_set(const sstable_set& x)
         : _impl(x._impl->clone())
-        , _all(make_lw_shared(sstable_list(*x._all))) {
+        , _all(make_lw_shared(sstable_list(*x._all)))
+        , _generations(x._generations) {
 }
 
 sstable_set::sstable_set(sstable_set&&) noexcept = default;
@@ -106,19 +110,24 @@ sstable_set::select(const dht::partition_range& range) const {
 
 void
 sstable_set::insert(shared_sstable sst) {
-    _impl->insert(sst);
-    try {
-        _all->insert(sst);
-    } catch (...) {
-        _impl->erase(sst);
-        throw;
+    auto sst_gen = sst->generation();
+    if (!_generations.insert(sst_gen).second) {
+        throw std::runtime_error(sprint("Attempted to add generation %d twice to sstable set, using %s.",
+           sst_gen, sst->toc_filename()));
     }
+    auto undo_gen_insert = defer([this, sst_gen] { _generations.erase(sst_gen); });
+    _impl->insert(sst);
+    auto undo_impl_insert = defer([this, sst] { _impl->erase(sst); });
+    _all->insert(sst);
+    undo_gen_insert.cancel();
+    undo_impl_insert.cancel();
 }
 
 void
 sstable_set::erase(shared_sstable sst) {
     _impl->erase(sst);
     _all->erase(sst);
+    _generations.erase(sst->generation());
 }
 
 sstable_set::~sstable_set() = default;
