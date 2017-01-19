@@ -144,78 +144,26 @@ static std::vector<shared_sstable> get_uncompacting_sstables(column_family& cf, 
     return not_compacted_sstables;
 }
 
-class compacting_sstable_writer {
-    const schema& _schema;
-    std::function<shared_sstable()> _creator;
-    uint64_t _partitions_per_sstable;
-    uint64_t _max_sstable_size;
-    uint32_t _sstable_level;
-    db::replay_position _rp;
-    std::vector<unsigned long> _ancestors;
-    compaction_info& _info;
-    shared_sstable _sst;
-    stdx::optional<sstable_writer> _writer;
-private:
-    void finish_sstable_write() {
-        _writer->consume_end_of_stream();
-        _writer = stdx::nullopt;
+class compaction_base;
 
-        _sst->open_data().get0();
-        _info.end_size += _sst->data_size();
-    }
+class compacting_sstable_writer {
+    compaction_base& _c;
+    sstable_writer* _writer = nullptr;
 public:
-    compacting_sstable_writer(const schema& s, std::function<shared_sstable()> creator, uint64_t partitions_per_sstable,
-                              uint64_t max_sstable_size, uint32_t sstable_level, db::replay_position rp,
-                              std::vector<unsigned long> ancestors, compaction_info& info)
-        : _schema(s)
-        , _creator(creator)
-        , _partitions_per_sstable(partitions_per_sstable)
-        , _max_sstable_size(max_sstable_size)
-        , _sstable_level(sstable_level)
-        , _rp(rp)
-        , _ancestors(std::move(ancestors))
-        , _info(info)
+    compacting_sstable_writer(compaction_base& c)
+        : _c(c)
     { }
 
-    void consume_new_partition(const dht::decorated_key& dk) {
-        if (_info.is_stop_requested()) {
-            // Compaction manager will catch this exception and re-schedule the compaction.
-            throw compaction_stop_exception(_info.ks, _info.cf, _info.stop_requested);
-        }
-        if (!_writer) {
-            _sst = _creator();
-            _info.new_sstables.push_back(_sst);
-            _sst->get_metadata_collector().set_replay_position(_rp);
-            _sst->get_metadata_collector().sstable_level(_sstable_level);
-            for (auto ancestor : _ancestors) {
-                _sst->add_ancestor(ancestor);
-            }
-
-            auto&& priority = service::get_local_compaction_priority();
-            _writer.emplace(_sst->get_writer(_schema, _partitions_per_sstable, _max_sstable_size, false, priority));
-        }
-        _info.total_keys_written++;
-        _writer->consume_new_partition(dk);
-    }
+    void consume_new_partition(const dht::decorated_key& dk);
 
     void consume(tombstone t) { _writer->consume(t); }
     stop_iteration consume(static_row&& sr, tombstone, bool) { return _writer->consume(std::move(sr)); }
     stop_iteration consume(clustering_row&& cr, tombstone, bool) { return _writer->consume(std::move(cr)); }
     stop_iteration consume(range_tombstone&& rt) { return _writer->consume(std::move(rt)); }
 
-    stop_iteration consume_end_of_partition() {
-        auto ret = _writer->consume_end_of_partition();
-        if (ret == stop_iteration::yes) {
-            finish_sstable_write();
-        }
-        return ret;
-    }
+    stop_iteration consume_end_of_partition();
 
-    void consume_end_of_stream() {
-        if (_writer) {
-            finish_sstable_write();
-        }
-    }
+    void consume_end_of_stream();
 };
 
 class compaction_base {
@@ -232,6 +180,8 @@ protected:
     uint64_t _estimated_partitions = 0;
     std::vector<unsigned long> _ancestors;
     db::replay_position _rp;
+    shared_sstable _sst;
+    stdx::optional<sstable_writer> _writer;
 protected:
     compaction_base(column_family& cf, std::vector<shared_sstable> sstables, std::function<shared_sstable()> creator,
             uint64_t max_sstable_size, uint32_t sstable_level)
@@ -328,9 +278,37 @@ public:
         };
     }
 
-    compacting_sstable_writer get_compacting_sstable_writer() const {
-        return compacting_sstable_writer(*_cf.schema(), _creator, partitions_per_sstable(),
-            _max_sstable_size, _sstable_level, _rp, _ancestors, *_info);
+    virtual sstable_writer* select_sstable_writer(const dht::decorated_key& dk) {
+        if (!_writer) {
+            _sst = _creator();
+            _info->new_sstables.push_back(_sst);
+            _sst->get_metadata_collector().set_replay_position(_rp);
+            _sst->get_metadata_collector().sstable_level(_sstable_level);
+            for (auto ancestor : _ancestors) {
+                _sst->add_ancestor(ancestor);
+            }
+
+            auto&& priority = service::get_local_compaction_priority();
+            _writer.emplace(_sst->get_writer(*_cf.schema(), partitions_per_sstable(), _max_sstable_size, false, priority));
+        }
+        return &*_writer;
+    }
+
+    virtual void stop_sstable_writer() {
+        _writer->consume_end_of_stream();
+        _writer = stdx::nullopt;
+        _sst->open_data().get0();
+        _info->end_size += _sst->data_size();
+    }
+
+    virtual void finish_sstable_writer() {
+        if (_writer) {
+            stop_sstable_writer();
+        }
+    }
+
+    compacting_sstable_writer get_compacting_sstable_writer() {
+        return compacting_sstable_writer(*this);
     }
 
     const schema_ptr& schema() const {
@@ -345,6 +323,29 @@ public:
         return *_info;
     }
 };
+
+void compacting_sstable_writer::consume_new_partition(const dht::decorated_key& dk) {
+    auto& info = _c.info();
+    if (info.is_stop_requested()) {
+        // Compaction manager will catch this exception and re-schedule the compaction.
+        throw compaction_stop_exception(info.ks, info.cf, info.stop_requested);
+    }
+    _writer = _c.select_sstable_writer(dk);
+    _writer->consume_new_partition(dk);
+    info.total_keys_written++;
+}
+
+stop_iteration compacting_sstable_writer::consume_end_of_partition() {
+    auto ret = _writer->consume_end_of_partition();
+    if (ret == stop_iteration::yes) {
+        _c.stop_sstable_writer();
+    }
+    return ret;
+}
+
+void compacting_sstable_writer::consume_end_of_stream() {
+    _c.finish_sstable_writer();
+}
 
 class regular_compaction final : public compaction_base {
 public:
