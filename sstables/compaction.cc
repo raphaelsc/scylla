@@ -146,25 +146,31 @@ static std::vector<shared_sstable> get_uncompacting_sstables(column_family& cf, 
 
 class compacting_sstable_writer {
     const schema& _schema;
-    std::function<shared_sstable()> _creator;
+    std::function<shared_sstable(shard_id)> _creator;
     uint64_t _partitions_per_sstable;
     uint64_t _max_sstable_size;
     uint32_t _sstable_level;
     db::replay_position _rp;
     std::vector<unsigned long> _ancestors;
     compaction_info& _info;
-    shared_sstable _sst;
-    stdx::optional<sstable_writer> _writer;
+    // multiple writer is supported for compaction that will generate one sstable
+    // for every shard owning the input sstables.
+    std::vector<std::pair<shared_sstable, stdx::optional<sstable_writer>>> _sstables;
+    shard_id _current_shard;
 private:
-    void finish_sstable_write() {
-        _writer->consume_end_of_stream();
-        _writer = stdx::nullopt;
+    void finish_sstable_write(shared_sstable& sst, stdx::optional<sstable_writer>& writer) {
+        writer->consume_end_of_stream();
+        writer = stdx::nullopt;
 
-        _sst->open_data().get0();
-        _info.end_size += _sst->data_size();
+        sst->open_data().get0();
+        _info.end_size += sst->data_size();
+    }
+
+    stdx::optional<sstable_writer>& current_writer() {
+        return _sstables[_current_shard].second;
     }
 public:
-    compacting_sstable_writer(const schema& s, std::function<shared_sstable()> creator, uint64_t partitions_per_sstable,
+    compacting_sstable_writer(const schema& s, std::function<shared_sstable(shard_id)> creator, uint64_t partitions_per_sstable,
                               uint64_t max_sstable_size, uint32_t sstable_level, db::replay_position rp,
                               std::vector<unsigned long> ancestors, compaction_info& info)
         : _schema(s)
@@ -175,6 +181,7 @@ public:
         , _rp(rp)
         , _ancestors(std::move(ancestors))
         , _info(info)
+        , _sstables(smp::count) // TODO: maybe turn smp::count into a parameter (int max_shards=1) to avoid extra space and make writer resilient.
     { }
 
     void consume_new_partition(const dht::decorated_key& dk) {
@@ -182,38 +189,45 @@ public:
             // Compaction manager will catch this exception and re-schedule the compaction.
             throw compaction_stop_exception(_info.ks, _info.cf, _info.stop_requested);
         }
-        if (!_writer) {
-            _sst = _creator();
-            _info.new_sstables.push_back(_sst);
-            _sst->get_metadata_collector().set_replay_position(_rp);
-            _sst->get_metadata_collector().sstable_level(_sstable_level);
-            for (auto ancestor : _ancestors) {
-                _sst->add_ancestor(ancestor);
+
+        auto shard = dht::shard_of(dk.token());
+        auto& sst = _sstables[shard].first;
+        auto& writer = _sstables[shard].second;
+        if (!writer) {
+            sst = _creator(shard);
+            _info.new_sstables.push_back(sst);
+            sst->get_metadata_collector().set_replay_position(_rp);
+            sst->get_metadata_collector().sstable_level(_sstable_level);
+            for (auto ancestor : _ancestors) { // find boost function to do it
+                sst->add_ancestor(ancestor);
             }
 
             auto&& priority = service::get_local_compaction_priority();
-            _writer.emplace(_sst->get_writer(_schema, _partitions_per_sstable, _max_sstable_size, false, priority));
+            writer.emplace(sst->get_writer(_schema, _partitions_per_sstable, _max_sstable_size, false, priority));
         }
+        _current_shard = shard;
         _info.total_keys_written++;
-        _writer->consume_new_partition(dk);
+        writer->consume_new_partition(dk);
     }
 
-    void consume(tombstone t) { _writer->consume(t); }
-    stop_iteration consume(static_row&& sr, tombstone, bool) { return _writer->consume(std::move(sr)); }
-    stop_iteration consume(clustering_row&& cr, tombstone, bool) { return _writer->consume(std::move(cr)); }
-    stop_iteration consume(range_tombstone&& rt) { return _writer->consume(std::move(rt)); }
+    void consume(tombstone t) { current_writer()->consume(t); }
+    stop_iteration consume(static_row&& sr, tombstone, bool) { return current_writer()->consume(std::move(sr)); }
+    stop_iteration consume(clustering_row&& cr, tombstone, bool) { return current_writer()->consume(std::move(cr)); }
+    stop_iteration consume(range_tombstone&& rt) { return current_writer()->consume(std::move(rt)); }
 
     stop_iteration consume_end_of_partition() {
-        auto ret = _writer->consume_end_of_partition();
+        auto ret = current_writer()->consume_end_of_partition();
         if (ret == stop_iteration::yes) {
-            finish_sstable_write();
+            finish_sstable_write(_sstables[_current_shard].first, _sstables[_current_shard].second);
         }
         return ret;
     }
 
     void consume_end_of_stream() {
-        if (_writer) {
-            finish_sstable_write();
+        for (auto& p : _sstables) {
+            if (p.second) {
+                finish_sstable_write(p.first, p.second);
+            }
         }
     }
 };
@@ -324,8 +338,13 @@ public:
         };
     }
 
-    compacting_sstable_writer get_compacting_sstable_writer() const {
-        return compacting_sstable_writer(*_cf.schema(), _creator, partitions_per_sstable(),
+    // default impl asks local column family for generating a sstable, but it may
+    // be extended for owner shard to calculate generation for new sstable.
+    virtual compacting_sstable_writer get_compacting_sstable_writer() const {
+        auto creat = [this] (shard_id shard) {
+            return _creator();
+        };
+        return compacting_sstable_writer(*_cf.schema(), creat, partitions_per_sstable(),
             _max_sstable_size, _sstable_level, _rp, _ancestors, *_info);
     }
 
