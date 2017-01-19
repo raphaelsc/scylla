@@ -218,45 +218,62 @@ public:
     }
 };
 
-// compact_sstables compacts the given list of sstables creating one
-// (currently) or more (in the future) new sstables. The new sstables
-// are created using the "sstable_creator" object passed by the caller.
-future<std::vector<shared_sstable>>
-compact_sstables(std::vector<shared_sstable> sstables, column_family& cf, std::function<shared_sstable()> creator,
-                 uint64_t max_sstable_size, uint32_t sstable_level, bool cleanup) {
-    return seastar::async([sstables = std::move(sstables), &cf, creator = std::move(creator), max_sstable_size, sstable_level, cleanup] () mutable {
-        // keep a immutable copy of sstable set because selector needs it alive
-        // and also sstables created after compaction shouldn't be considered.
-        const sstable_set s = cf.get_sstable_set();
-        auto selector = s.make_incremental_selector();
-        std::vector<::mutation_reader> readers;
-        uint64_t estimated_partitions = 0;
-        std::vector<unsigned long> ancestors;
-        auto info = make_lw_shared<compaction_info>();
-        auto& cm = cf.get_compaction_manager();
-        sstring sstable_logger_msg = "[";
+class compaction_base {
+protected:
+    column_family& _cf;
+    std::vector<shared_sstable> _sstables;
+    std::function<shared_sstable()> _creator;
+    uint64_t _max_sstable_size;
+    uint32_t _sstable_level;
+    const sstable_set _set;
+    sstable_set::incremental_selector _selector;
+    lw_shared_ptr<compaction_info> _info = make_lw_shared<compaction_info>();
+    std::vector<::mutation_reader> _readers;
+    uint64_t _estimated_partitions = 0;
+    std::vector<unsigned long> _ancestors;
+    sstring _formatted_msg;
+    db::replay_position _rp;
+protected:
+    compaction_base(column_family& cf, std::vector<shared_sstable> sstables, std::function<shared_sstable()> creator,
+            uint64_t max_sstable_size, uint32_t sstable_level)
+        : _cf(cf)
+        , _sstables(std::move(sstables))
+        , _creator (std::move(creator))
+        , _max_sstable_size(max_sstable_size)
+        , _sstable_level(sstable_level)
+        , _set(cf.get_sstable_set())
+        , _selector(_set.make_incremental_selector())
+    {
+        _cf.get_compaction_manager().register_compaction(_info);
+    }
 
-        info->type = (cleanup) ? compaction_type::Cleanup : compaction_type::Compaction;
-        // register compaction_stats of starting compaction into compaction manager
-        cm.register_compaction(info);
+    uint64_t partitions_per_sstable() const {
+        uint64_t estimated_sstables = std::max(1UL, uint64_t(ceil(double(_info->start_size) / _max_sstable_size)));
+        return ceil(double(_estimated_partitions) / estimated_sstables);
+    }
+public:
+    compaction_base& operator=(const compaction_base&) = delete;
+    compaction_base(const compaction_base&) = delete;
 
-        assert(sstables.size() > 0);
+    virtual ~compaction_base() {
+        _cf.get_compaction_manager().deregister_compaction(_info);
+    }
 
-        db::replay_position rp;
-
-        auto schema = cf.schema();
-        for (auto sst : sstables) {
+    virtual void setup() {
+        auto schema = _cf.schema();
+        _formatted_msg = "[";
+        for (auto& sst : _sstables) {
             // We also capture the sstable, so we keep it alive while the read isn't done
-            readers.emplace_back(make_mutation_reader<sstable_reader>(sst, schema));
+            _readers.emplace_back(make_mutation_reader<sstable_reader>(sst, schema));
             // FIXME: If the sstables have cardinality estimation bitmaps, use that
             // for a better estimate for the number of partitions in the merged
             // sstable than just adding up the lengths of individual sstables.
-            estimated_partitions += sst->get_estimated_key_count();
-            info->total_partitions += sst->get_estimated_key_count();
+            _estimated_partitions += sst->get_estimated_key_count();
+            _info->total_partitions += sst->get_estimated_key_count();
             // Compacted sstable keeps track of its ancestors.
-            ancestors.push_back(sst->generation());
-            sstable_logger_msg += sprint("%s:level=%d, ", sst->get_filename(), sst->get_sstable_level());
-            info->start_size += sst->data_size();
+            _ancestors.push_back(sst->generation());
+            _formatted_msg += sprint("%s:level=%d, ", sst->get_filename(), sst->get_sstable_level());
+            _info->start_size += sst->data_size();
             // TODO:
             // Note that this is not fully correct. Since we might be merging sstables that originated on
             // another shard (#cpu changed), we might be comparing RP:s with differing shard ids,
@@ -264,64 +281,21 @@ compact_sstables(std::vector<shared_sstable> sstables, column_family& cf, std::f
             // is that we might miss a high water mark for the commit log replayer,
             // this is kind of ok, esp. since we will hopefully not be trying to recover based on
             // compacted sstables anyway (CL should be clean by then).
-            rp = std::max(rp, sst->get_stats_metadata().position);
+            _rp = std::max(_rp, sst->get_stats_metadata().position);
         }
+        _formatted_msg += "]";
+        _info->sstables = _sstables.size();
+        _info->ks = schema->ks_name();
+        _info->cf = schema->cf_name();
+        _info->type = compaction_type::Compaction;
+    }
 
-        uint64_t estimated_sstables = std::max(1UL, uint64_t(ceil(double(info->start_size) / max_sstable_size)));
-        uint64_t partitions_per_sstable = ceil(double(estimated_partitions) / estimated_sstables);
-
-        sstable_logger_msg += "]";
-        info->sstables = sstables.size();
-        info->ks = schema->ks_name();
-        info->cf = schema->cf_name();
-        logger.info("{} {}", (!cleanup) ? "Compacting" : "Cleaning", sstable_logger_msg);
-
-        dht::token_range_vector owned_ranges;
-        if (cleanup) {
-            owned_ranges = service::get_local_storage_service().get_local_ranges(schema->ks_name());
-        }
-
-        auto reader = make_combined_reader(std::move(readers));
-
-        auto start_time = db_clock::now();
-
-        std::unordered_set<shared_sstable> compacting_set(sstables.begin(), sstables.end());
-        auto get_max_purgeable = [&cf, &selector, &compacting_set] (const dht::decorated_key& dk) {
-            return get_max_purgeable_timestamp(cf, selector, compacting_set, dk);
-        };
-        auto cr = compacting_sstable_writer(*schema, creator, partitions_per_sstable, max_sstable_size, sstable_level, rp, std::move(ancestors), *info);
-        auto cfc = make_stable_flattened_mutations_consumer<compact_for_compaction<compacting_sstable_writer>>(
-                *schema, gc_clock::now(), std::move(cr), get_max_purgeable);
-
-        auto filter = [cleanup, sorted_owned_ranges = std::move(owned_ranges)] (const streamed_mutation& sm) {
-            if (dht::shard_of(sm.decorated_key().token()) != engine().cpu_id()) {
-                return false;
-            }
-            if (cleanup && !belongs_to_current_node(sm.decorated_key().token(), sorted_owned_ranges)) {
-                return false;
-            }
-            return true;
-        };
-
-        try {
-            consume_flattened_in_thread(reader, cfc, filter);
-        } catch (...) {
-            cm.deregister_compaction(info);
-            delete_sstables_for_interrupted_compaction(info->new_sstables, info->ks, info->cf);
-            throw;
-        }
-
-        // deregister compaction_stats of finished compaction from compaction manager.
-        cm.deregister_compaction(info);
-
-        double ratio = double(info->end_size) / double(info->start_size);
-        auto end_time = db_clock::now();
-        // time taken by compaction in seconds.
-        auto duration = std::chrono::duration<float>(end_time - start_time);
-        auto throughput = (double(info->end_size) / (1024*1024)) / duration.count();
+    virtual void finish(std::chrono::time_point<db_clock> started_at, std::chrono::time_point<db_clock> ended_at) {
+        auto ratio = double(_info->end_size) / double(_info->start_size);
+        auto duration = std::chrono::duration<float>(ended_at - started_at);
+        auto throughput = (double(_info->end_size) / (1024*1024)) / duration.count();
         sstring new_sstables_msg;
-
-        for (auto& newtab : info->new_sstables) {
+        for (auto& newtab : _info->new_sstables) {
             new_sstables_msg += sprint("%s:level=%d, ", newtab->get_filename(), newtab->get_sstable_level());
         }
 
@@ -330,35 +304,153 @@ compact_sstables(std::vector<shared_sstable> sstables, column_family& cf, std::f
         // - add support to merge summary (message: Partition merge counts were {%s}.).
         // - there is no easy way, currently, to know the exact number of total partitions.
         // By the time being, using estimated key count.
-        logger.info("{} {} sstables to [{}]. {} bytes to {} (~{}% of original) in {}ms = {}MB/s. " \
-            "~{} total partitions merged to {}.",
-            (!cleanup) ? "Compacted" : "Cleaned",
-            info->sstables, new_sstables_msg, info->start_size, info->end_size, (int) (ratio * 100),
+        _formatted_msg = sprint("%ld sstables to [%s]. %ld bytes to %ld (~%d%% of original) in %dms = %.2fMB/s. " \
+            "~%ld total partitions merged to %ld.",
+            _info->sstables, new_sstables_msg, _info->start_size, _info->end_size, int(ratio * 100),
             std::chrono::duration_cast<std::chrono::milliseconds>(duration).count(), throughput,
-            info->total_partitions, info->total_keys_written);
+            _info->total_partitions, _info->total_keys_written);
+    }
 
-        // If compaction is running for testing purposes, detect that there is
-        // no query context and skip code that updates compaction history.
+    virtual std::function<api::timestamp_type(const dht::decorated_key&)> max_purgeable_func() {
+        std::unordered_set<shared_sstable> compacting(_sstables.begin(), _sstables.end());
+        return [this, compacting = std::move(compacting)] (const dht::decorated_key& dk) {
+            return get_max_purgeable_timestamp(_cf, _selector, compacting, dk);
+        };
+    }
+
+    virtual std::function<bool(const streamed_mutation& sm)> filter_func() {
+        return [] (const streamed_mutation& sm) {
+            return true;
+        };
+    }
+
+    compacting_sstable_writer get_compacting_sstable_writer() const {
+        return compacting_sstable_writer(*_cf.schema(), _creator, partitions_per_sstable(),
+            _max_sstable_size, _sstable_level, _rp, _ancestors, *_info);
+    }
+
+    const schema_ptr& schema() const {
+        return _cf.schema();
+    }
+
+    ::mutation_reader make_combined_reader() {
+        return ::make_combined_reader(std::move(_readers));
+    }
+
+    lw_shared_ptr<compaction_info>& info() {
+        return _info;
+    }
+};
+
+class regular_compaction final : public compaction_base {
+public:
+    regular_compaction(column_family& cf, std::vector<shared_sstable> sstables, std::function<shared_sstable()> creator,
+            uint64_t max_sstable_size, uint32_t sstable_level)
+        : compaction_base(cf, std::move(sstables), std::move(creator), max_sstable_size, sstable_level)
+    {
+    }
+
+    void setup() override {
+        compaction_base::setup();
+        logger.info("Compacting {}", _formatted_msg);
+    }
+
+    void finish(std::chrono::time_point<db_clock> started_at, std::chrono::time_point<db_clock> ended_at) override {
+        compaction_base::finish(std::move(started_at), ended_at);
+        logger.info("Compacted {}", _formatted_msg);
+
+        // skip update if running without a query context, for example, when running a test case.
         if (!db::qctx) {
-            return std::move(info->new_sstables);
+            return;
         }
-
-        // Skip code that updates compaction history if running on behalf of a cleanup job.
-        if (cleanup) {
-            return std::move(info->new_sstables);
-        }
-
-        auto compacted_at = std::chrono::duration_cast<std::chrono::milliseconds>(end_time.time_since_epoch()).count();
-
         // FIXME: add support to merged_rows. merged_rows is a histogram that
         // shows how many sstables each row is merged from. This information
         // cannot be accessed until we make combined_reader more generic,
         // for example, by adding a reducer method.
-        db::system_keyspace::update_compaction_history(info->ks, info->cf, compacted_at,
-            info->start_size, info->end_size, std::unordered_map<int32_t, int64_t>{}).get0();
+        auto compacted_at = std::chrono::duration_cast<std::chrono::milliseconds>(ended_at.time_since_epoch()).count();
+        db::system_keyspace::update_compaction_history(_info->ks, _info->cf, compacted_at,
+            _info->start_size, _info->end_size, std::unordered_map<int32_t, int64_t>{}).get0();
+    }
 
-        // Return vector with newly created sstable(s).
-        return std::move(info->new_sstables);
+    std::function<bool(const streamed_mutation& sm)> filter_func() override {
+        return [] (const streamed_mutation& sm) {
+            return dht::shard_of(sm.decorated_key().token()) == engine().cpu_id();
+        };
+    }
+};
+
+class cleanup_compaction final : public compaction_base {
+public:
+    cleanup_compaction(column_family& cf, std::vector<shared_sstable> sstables, std::function<shared_sstable()> creator,
+            uint64_t max_sstable_size, uint32_t sstable_level)
+        : compaction_base(cf, std::move(sstables), std::move(creator), max_sstable_size, sstable_level)
+    {
+        _info->type = compaction_type::Cleanup;
+    }
+
+    void setup() override {
+        compaction_base::setup();
+        logger.info("Cleaning {}", _formatted_msg);
+    }
+
+    void finish(std::chrono::time_point<db_clock> started_at, std::chrono::time_point<db_clock> ended_at) override {
+        compaction_base::finish(std::move(started_at), std::move(ended_at));
+        logger.info("Cleaned {}", _formatted_msg);
+    }
+
+    std::function<bool(const streamed_mutation& sm)> filter_func() override {
+        dht::token_range_vector owned_ranges = service::get_local_storage_service().get_local_ranges(_cf.schema()->ks_name());
+
+        return [this, owned_ranges = std::move(owned_ranges)] (const streamed_mutation& sm) {
+            if (dht::shard_of(sm.decorated_key().token()) != engine().cpu_id()) {
+                return false;
+            }
+            if (!belongs_to_current_node(sm.decorated_key().token(), owned_ranges)) {
+                return false;
+            }
+            return true;
+        };
+    }
+};
+
+static std::unique_ptr<compaction_base>
+make_compaction_base(column_family& cf, std::vector<shared_sstable> sstables, std::function<shared_sstable()> creator,
+        uint64_t max_sstable_size, uint32_t sstable_level, bool cleanup) {
+    std::unique_ptr<compaction_base> c;
+    if (!cleanup) {
+        c = std::make_unique<regular_compaction>(cf, std::move(sstables), std::move(creator), max_sstable_size, sstable_level);
+    } else {
+        c = std::make_unique<cleanup_compaction>(cf, std::move(sstables), std::move(creator), max_sstable_size, sstable_level);
+    }
+    return c;
+}
+
+future<std::vector<shared_sstable>>
+compact_sstables(std::vector<shared_sstable> sstables, column_family& cf, std::function<shared_sstable()> creator,
+        uint64_t max_sstable_size, uint32_t sstable_level, bool cleanup) {
+    assert(sstables.size() > 0);
+    auto c = make_compaction_base(cf, std::move(sstables), std::move(creator), max_sstable_size, sstable_level, cleanup);
+
+    return seastar::async([c = std::move(c)] () mutable {
+        c->setup();
+
+        auto cr = c->get_compacting_sstable_writer();
+        auto cfc = make_stable_flattened_mutations_consumer<compact_for_compaction<compacting_sstable_writer>>(
+            *c->schema(), gc_clock::now(), std::move(cr), c->max_purgeable_func());
+
+        auto reader = c->make_combined_reader();
+        auto start_time = db_clock::now();
+        try {
+            consume_flattened_in_thread(reader, cfc, c->filter_func());
+        } catch (...) {
+            auto info = c->info();
+            delete_sstables_for_interrupted_compaction(info->new_sstables, info->ks, info->cf);
+            throw;
+        }
+
+        c->finish(std::move(start_time), db_clock::now());
+
+        return std::move(c->info()->new_sstables);
     });
 }
 
