@@ -804,7 +804,7 @@ void column_family::load_sstable(sstables::shared_sstable& sst, bool reset_level
         // the sstables belonging to this CF, because we need all of
         // them to know which tombstones we can drop, and what
         // generation number is free.
-        _sstables_need_rewrite.push_back(sst);
+        _sstables_need_reshard.insert(sst);
     }
     if (reset_level) {
         // When loading a migrated sstable, set level to 0 because
@@ -817,21 +817,90 @@ void column_family::load_sstable(sstables::shared_sstable& sst, bool reset_level
     add_sstable(sst, std::move(shards));
 }
 
-// load_sstable() wants to start rewriting sstables which are shared between
-// several shards, but we can't start any compaction before all the sstables
-// of this CF were loaded. So call this function to start rewrites, if any.
-void column_family::start_rewrite() {
-    // submit shared sstables in generation order to guarantee that all shards
-    // owning a sstable will agree on its deletion nearly the same time,
-    // therefore, reducing disk space requirements.
-    boost::sort(_sstables_need_rewrite, [] (const sstables::shared_sstable& x, const sstables::shared_sstable& y) {
-        return x->generation() < y->generation();
-    });
-    for (auto sst : _sstables_need_rewrite) {
-        dblog.info("Splitting {} for shard", sst->get_filename());
-        _compaction_manager.submit_sstable_rewrite(this, sst);
+std::unordered_set<sstables::shared_sstable> column_family::sstables_to_reshard() {
+    auto new_resharding_sstables = _resharding_sstables;
+    new_resharding_sstables.insert(_sstables_need_reshard.begin(), _sstables_need_reshard.end());
+    auto sstables_need_reshard = std::move(_sstables_need_reshard);
+    _resharding_sstables = std::move(new_resharding_sstables);
+    return sstables_need_reshard;
+}
+
+future<> column_family::replace_shared_sstable_by_unshared(int64_t shared_sstable_gen, int64_t unshared_sstable_gen) {
+    // FIXME: quadratic on number of shared sstables for this shard. Possibly change structure to map generation to sstables!
+    auto it = boost::find_if(_resharding_sstables, [shared_sstable_gen] (auto& sst) { return sst->generation() == shared_sstable_gen; });
+    if (it == _resharding_sstables.end()) {
+        throw std::runtime_error(sprint("unable to find generation {} for shared sstable at {}.{}", shared_sstable_gen, _schema->ks_name(), _schema->cf_name()));
     }
-    _sstables_need_rewrite.clear();
+    sstables::shared_sstable shared_sst = *it;
+
+    auto unshared_sst = make_lw_shared<sstables::sstable>(_schema, _config.datadir, unshared_sstable_gen,
+            sstables::sstable::version_types::ka,
+            sstables::sstable::format_types::big);
+
+    return unshared_sst->load().then([this, shared_sst, unshared_sst] {
+        auto removed = { shared_sst };
+        auto added = { unshared_sst };
+        _compaction_strategy.notify_completion(removed, added);
+        _resharding_sstables.erase(shared_sst);
+        return this->rebuild_sstable_list(added, removed);
+    });
+}
+
+future<> distributed_loader::reshard(distributed<database>& db, sstring ks_name, sstring cf_name) {
+    return db.invoke_on_all([&db, ks_name = std::move(ks_name), cf_name = std::move(cf_name)] (database& db_local) {
+        auto& cf = db_local.find_column_family(ks_name, cf_name);
+
+        struct work {
+            distributed<database>& db;
+            sstring ks_name;
+            sstring cf_name;
+            std::unordered_set<sstables::shared_sstable> sstables;
+            bool stopped = false;
+        };
+        auto w = make_lw_shared<work>(work{db, std::move(ks_name), std::move(cf_name), cf.sstables_to_reshard()});
+        engine().at_exit([w] () mutable { w->stopped = true; return make_ready_future<>(); });
+
+        do_for_each(w->sstables, [w] (auto& sst) {
+            // attempt to fairly distribute shared sstables across shards.
+            // we don't want them compacted twice at same shard because now
+            // compaction will generate sstable for all owners.
+            if (column_family::calculate_shard_from_sstable_generation(sst->generation()) != engine().cpu_id()) {
+                return make_ready_future<>();
+            }
+            // used to ensure that only one reshard operation will run per shard.
+            static thread_local semaphore sem(1);
+
+            return with_semaphore(sem, 1, [w, sst] {
+                if (w->stopped) {
+                    return make_ready_future<>();
+                }
+
+                auto f = sstables::reshard_sstables(w->db, {sst}, w->ks_name, w->cf_name, std::numeric_limits<uint64_t>::max(), sst->get_sstable_level());
+                return f.then([w, gen = sst->generation()] (auto new_unshared_sstables) {
+                    // now we want to open every sstable created by resharding in the unique shard that owns it.
+                    return parallel_for_each(new_unshared_sstables, [w, gen] (auto& sst) {
+                        auto shard = sst->get_shards_for_this_sstable();
+                        if (shard.size() != 1) {
+                            throw std::runtime_error(sprint("resharded sstable {} doesn't belong to only one shard", sst->get_filename()));
+                        }
+
+                        return w->db.invoke_on(shard.front(), [ks_name = w->ks_name, cf_name = w->cf_name, gen, new_gen = sst->generation()] (auto& db) {
+                            auto& cf = db.find_column_family(ks_name, cf_name);
+                            return cf.replace_shared_sstable_by_unshared(gen, new_gen);
+                        });
+                    });
+                });
+            });
+        }).then_wrapped([w] (future<> f) {
+            try {
+                f.get();
+            } catch (sstables::compaction_stop_exception& e) {
+                dblog.info("resharding was abruptly stopped, reason: {}", e.what());
+            } catch (...) {
+                dblog.error("resharding failed: {}", std::current_exception());
+            }
+        });
+    });
 }
 
 void column_family::update_stats_for_new_sstable(uint64_t disk_space_used_by_sstable, std::vector<unsigned>&& shards_for_the_sstable) {
@@ -1460,6 +1529,11 @@ lw_shared_ptr<sstable_list> column_family::get_sstables() const {
     return _sstables->all();
 }
 
+std::vector<sstables::shared_sstable> column_family::candidates_for_compaction() const {
+    return boost::copy_range<std::vector<sstables::shared_sstable>>(*get_sstables()
+        | boost::adaptors::filtered([this] (auto& s) { return !_sstables_need_reshard.count(s) && !_resharding_sstables.count(s); }));
+}
+
 std::vector<sstables::shared_sstable> column_family::select_sstables(const dht::partition_range& range) const {
     return _sstables->select(range);
 }
@@ -1547,18 +1621,19 @@ future<> distributed_loader::load_new_sstables(distributed<database>& db, sstrin
         };
         return distributed_loader::open_sstable(db, comps, cf_sstable_open);
     }).then([&db, ks = std::move(ks), cf = std::move(cf)] {
-        return db.invoke_on_all([ks = std::move(ks), cfname = std::move(cf)] (database& db) {
+        return db.invoke_on_all([ks, cfname = cf] (database& db) {
             auto& cf = db.find_column_family(ks, cfname);
             // atomically load all opened sstables into column family.
             for (auto& sst : cf._sstables_opened_but_not_loaded) {
                 cf.load_sstable(sst, true);
             }
             cf._sstables_opened_but_not_loaded.clear();
-            cf.start_rewrite();
             cf.trigger_compaction();
             // Drop entire cache for this column family because it may be populated
             // with stale data.
             return cf.get_row_cache().clear();
+        }).then([&db, ks, cf] {
+            return distributed_loader::reshard(db, ks, cf);
         });
     });
 }
