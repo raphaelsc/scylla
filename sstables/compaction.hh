@@ -43,6 +43,12 @@ namespace sstables {
             , max_sstable_bytes(max_sstable_bytes) {}
     };
 
+    struct reshard_descriptor {
+        std::vector<int64_t> generations;
+        shard_id shard;
+        uint32_t level;
+    };
+
     enum class compaction_type {
         Compaction = 0,
         Cleanup = 1,

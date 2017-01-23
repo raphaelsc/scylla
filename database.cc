@@ -775,15 +775,15 @@ static bool belongs_to_current_shard(const std::vector<shard_id>& shards) {
     return boost::find(shards, engine().cpu_id()) != shards.end();
 }
 
-static bool belongs_to_other_shard(const std::vector<shard_id>& shards) {
-    return shards.size() != size_t(belongs_to_current_shard(shards));
+static bool belongs_to_shards(const std::vector<shard_id>& shards) {
+    return shards.size() > 1;
 }
 
 future<sstables::shared_sstable>
 column_family::open_sstable(sstables::foreign_sstable_open_info info, sstring dir, int64_t generation,
         sstables::sstable::version_types v, sstables::sstable::format_types f) {
     auto sst = make_lw_shared<sstables::sstable>(_schema, dir, generation, v, f);
-    if (!belongs_to_current_shard(info.owners)) {
+    if (!belongs_to_shards(info.owners) && !belongs_to_current_shard(info.owners)) {
         dblog.debug("sstable {} not relevant for this shard, ignoring", sst->get_filename());
         sst->mark_for_deletion();
         return make_ready_future<sstables::shared_sstable>();
@@ -795,7 +795,15 @@ column_family::open_sstable(sstables::foreign_sstable_open_info info, sstring di
 
 void column_family::load_sstable(sstables::shared_sstable& sst, bool reset_level) {
     auto shards = sst->get_shards_for_this_sstable();
-    if (belongs_to_other_shard(shards)) {
+
+    // FIXME: ***read*** distributed_loader::reshard() to understand why every shard
+    // is storing all shared sstables. It's temporary, but it wouldn't be that bad now
+    // given that resources from shared sstables are reused. The plan is to store
+    // all shared sstables in shard 0, or maybe a better approach which will merge
+    // shared sstables (using foreign ptr) from all shards.
+    // That's because only one shard will look at all shared sstables and decide which
+    // sstables will be resharded together and at which shard.
+    if (belongs_to_shards(shards)) {
         // If we're here, this sstable is shared by this and other
         // shard(s). Shared sstables cannot be deleted until all
         // shards compacted them, so to reduce disk space usage we
@@ -804,7 +812,7 @@ void column_family::load_sstable(sstables::shared_sstable& sst, bool reset_level
         // the sstables belonging to this CF, because we need all of
         // them to know which tombstones we can drop, and what
         // generation number is free.
-        _sstables_need_rewrite.push_back(sst);
+        _shared_sstables.emplace(sst->generation(), sst);
     }
     if (reset_level) {
         // When loading a migrated sstable, set level to 0 because
@@ -817,21 +825,100 @@ void column_family::load_sstable(sstables::shared_sstable& sst, bool reset_level
     add_sstable(sst, std::move(shards));
 }
 
-// load_sstable() wants to start rewriting sstables which are shared between
-// several shards, but we can't start any compaction before all the sstables
-// of this CF were loaded. So call this function to start rewrites, if any.
-void column_family::start_rewrite() {
-    // submit shared sstables in generation order to guarantee that all shards
-    // owning a sstable will agree on its deletion nearly the same time,
-    // therefore, reducing disk space requirements.
-    boost::sort(_sstables_need_rewrite, [] (const sstables::shared_sstable& x, const sstables::shared_sstable& y) {
-        return x->generation() < y->generation();
+future<> column_family::replace_shared_sstable_by_unshared(std::vector<int64_t> shared_sstable_generations, int64_t unshared_sstable_gen) {
+    // FIXME: temporary. look at distributed_loader::reshard(). I'd like to get ancestors via foreign shared ptr or something.
+    std::vector<sstables::shared_sstable> shared_sstables;
+    boost::transform(shared_sstable_generations, std::back_inserter(shared_sstables), [this] (auto gen) {
+        return _shared_sstables[gen];
     });
-    for (auto sst : _sstables_need_rewrite) {
-        dblog.info("Splitting {} for shard", sst->get_filename());
-        _compaction_manager.submit_sstable_rewrite(this, sst);
-    }
-    _sstables_need_rewrite.clear();
+
+    auto unshared_sst = make_lw_shared<sstables::sstable>(_schema, _config.datadir, unshared_sstable_gen,
+            sstables::sstable::version_types::ka,
+            sstables::sstable::format_types::big);
+
+    // TODO: avoid loading new sstable by getting its open info from caller.
+
+    return unshared_sst->load().then([this, shared_sstables = std::move(shared_sstables), unshared_sst] {
+
+        _compaction_strategy.notify_completion(shared_sstables, { unshared_sst });
+
+        return this->rebuild_sstable_list({ unshared_sst }, shared_sstables);
+    });
+}
+
+static future<> invoke_each_descriptor_on(std::vector<sstables::reshard_descriptor> descriptors, std::function<future<>(sstables::reshard_descriptor)> f) {
+    return do_with(std::move(descriptors), [f = std::move(f)] (auto& descriptors) {
+        return do_for_each(descriptors, [f] (auto& descriptor) {
+            return smp::submit_to(descriptor.shard, [f, descriptor] {
+                return f(descriptor);
+            });
+        });
+    });
+}
+
+future<> distributed_loader::reshard(distributed<database>& db, sstring ks_name, sstring cf_name) {
+    // shard 0 only will decide which sstable(s) to compact and at which shard.
+    auto& cf = db.local().find_column_family(ks_name, cf_name);
+    sstables::compaction_strategy cs = cf.get_compaction_strategy();
+    // FIXME: temporary. Focusing on algorithm to get reshard jobs.
+    auto candidates = boost::copy_range<std::vector<sstables::shared_sstable>>(cf._shared_sstables | boost::adaptors::map_values);
+    auto descriptors = cs.get_reshard_jobs(cf, std::move(candidates));
+
+    return invoke_each_descriptor_on(std::move(descriptors), [&db, ks_name, cf_name] (auto descriptor) {
+        // used to ensure that only one reshard operation will run per shard.
+        static thread_local semaphore sem(1);
+
+        with_semaphore(sem, 1, [&db, ks_name, cf_name, descriptor] {
+            auto& cf = db.local().find_column_family(ks_name, cf_name);
+            if (cf.get_compaction_manager().is_stopped()) {
+                return make_ready_future<>();
+            }
+
+            struct work {
+                distributed<database>& db;
+                sstring ks_name;
+                sstring cf_name;
+                std::vector<int64_t> generations;
+            };
+            auto w = make_lw_shared<work>(work{db, std::move(ks_name), std::move(cf_name), descriptor.generations});
+
+            // FIXME: this is ***very ugly***. To fix it, sstables::reshard_sstables() will need to accept
+            // a set of foreign ptrs.
+            std::vector<sstables::shared_sstable> sstables;
+            boost::transform(descriptor.generations, std::back_inserter(sstables), [&cf] (auto gen) {
+                return cf._shared_sstables[gen];
+            });
+
+            auto f = sstables::reshard_sstables(w->db, sstables, w->ks_name, w->cf_name, std::numeric_limits<uint64_t>::max(), descriptor.level);
+            return f.then([w] (auto new_unshared_sstables) {
+
+                return parallel_for_each(new_unshared_sstables, [w] (auto& sst) {
+                    auto shard = sst->get_shards_for_this_sstable();
+                    if (shard.size() != 1) {
+                        throw std::runtime_error(sprint("resharded sstable {} doesn't belong to only one shard", sst->get_filename()));
+                    }
+
+                    return w->db.invoke_on(shard.front(), [ks_name = w->ks_name, cf_name = w->cf_name, gens = w->generations, new_gen = sst->generation()] (auto& db) {
+                        // FIXME: shared sstables are stored in column_family::_shared_sstables in  all shards,
+                        // so we'd need to clean them, but after reshard_sstables() accept a set of foreign ptr,
+                        // we'll no longer have to do that.
+
+                        auto& cf = db.find_column_family(ks_name, cf_name);
+                        return cf.replace_shared_sstable_by_unshared(gens, new_gen);
+                    });
+                });
+            }).then_wrapped([w] (future<> f) {
+                try {
+                    f.get();
+                } catch (sstables::compaction_stop_exception& e) {
+                    dblog.info("resharding was abruptly stopped, reason: {}", e.what());
+                } catch (...) {
+                    dblog.error("resharding failed: {}", std::current_exception());
+                }
+            });
+        });
+        return make_ready_future<>();
+    });
 }
 
 void column_family::update_stats_for_new_sstable(uint64_t disk_space_used_by_sstable, std::vector<unsigned>&& shards_for_the_sstable) {
@@ -1460,6 +1547,11 @@ lw_shared_ptr<sstable_list> column_family::get_sstables() const {
     return _sstables->all();
 }
 
+std::vector<sstables::shared_sstable> column_family::candidates_for_compaction() const {
+    return boost::copy_range<std::vector<sstables::shared_sstable>>(*get_sstables()
+        | boost::adaptors::filtered([this] (auto& s) { return !_shared_sstables.count(s->generation()); }));
+}
+
 std::vector<sstables::shared_sstable> column_family::select_sstables(const dht::partition_range& range) const {
     return _sstables->select(range);
 }
@@ -1547,18 +1639,19 @@ future<> distributed_loader::load_new_sstables(distributed<database>& db, sstrin
         };
         return distributed_loader::open_sstable(db, comps, cf_sstable_open);
     }).then([&db, ks = std::move(ks), cf = std::move(cf)] {
-        return db.invoke_on_all([ks = std::move(ks), cfname = std::move(cf)] (database& db) {
+        return db.invoke_on_all([ks, cfname = cf] (database& db) {
             auto& cf = db.find_column_family(ks, cfname);
             // atomically load all opened sstables into column family.
             for (auto& sst : cf._sstables_opened_but_not_loaded) {
                 cf.load_sstable(sst, true);
             }
             cf._sstables_opened_but_not_loaded.clear();
-            cf.start_rewrite();
             cf.trigger_compaction();
             // Drop entire cache for this column family because it may be populated
             // with stale data.
             return cf.get_row_cache().clear();
+        }).then([&db, ks, cf] {
+            // FIXME: reshard
         });
     });
 }
