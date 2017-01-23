@@ -293,7 +293,7 @@ public:
 
     sstable_writer get_writer(const schema& s, uint64_t estimated_partitions, uint64_t max_sstable_size,
                               bool backup = false, const io_priority_class& pc = default_priority_class(),
-                              bool leave_unsealed = false);
+                              bool leave_unsealed = false, shard_id shard = engine().cpu_id());
 
     future<> seal_sstable(bool backup);
 
@@ -509,7 +509,7 @@ private:
     void write_compression(const io_priority_class& pc);
 
     future<> read_scylla_metadata(const io_priority_class& pc);
-    void write_scylla_metadata(const io_priority_class& pc);
+    void write_scylla_metadata(const io_priority_class& pc, shard_id shard = engine().cpu_id());
 
     future<> read_filter(const io_priority_class& pc);
 
@@ -805,12 +805,13 @@ class sstable_writer {
     bool _compression_enabled;
     shared_ptr<file_writer> _writer;
     stdx::optional<components_writer> _components_writer;
+    shard_id _shard;
 private:
     void prepare_file_writer();
     void finish_file_writer();
 public:
-    sstable_writer(sstable& sst, const schema& s, uint64_t estimated_partitions,
-                   uint64_t max_sstable_size, bool backup, bool leave_unsealed, const io_priority_class& pc);
+    sstable_writer(sstable& sst, const schema& s, uint64_t estimated_partitions, uint64_t max_sstable_size,
+                   bool backup, bool leave_unsealed, const io_priority_class& pc, shard_id shard = engine().cpu_id());
     void consume_new_partition(const dht::decorated_key& dk) { return _components_writer->consume_new_partition(dk); }
     void consume(tombstone t) { _components_writer->consume(t); }
     stop_iteration consume(static_row&& sr) { return _components_writer->consume(std::move(sr)); }
