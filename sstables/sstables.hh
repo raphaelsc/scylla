@@ -141,8 +141,9 @@ public:
     enum class format_types { big };
 public:
     sstable(schema_ptr schema, sstring dir, int64_t generation, version_types v, format_types f, gc_clock::time_point now = gc_clock::now(),
-            io_error_handler_gen error_handler_gen = default_io_error_handler_gen())
-        : _schema(std::move(schema))
+            io_error_handler_gen error_handler_gen = default_io_error_handler_gen(), shard_id shard = engine().cpu_id())
+        : _shard(shard)
+        , _schema(std::move(schema))
         , _dir(std::move(dir))
         , _generation(generation)
         , _version(v)
@@ -412,8 +413,10 @@ public:
     };
 private:
     sstable(size_t wbuffer_size, schema_ptr schema, sstring dir, int64_t generation, version_types v, format_types f,
-            gc_clock::time_point now = gc_clock::now(), io_error_handler_gen error_handler_gen = default_io_error_handler_gen())
+            gc_clock::time_point now = gc_clock::now(), io_error_handler_gen error_handler_gen = default_io_error_handler_gen(),
+            shard_id shard = engine().cpu_id())
         : sstable_buffer_size(wbuffer_size)
+        , _shard(shard)
         , _single_partition_history(make_lw_shared<file_input_stream_history>())
         , _partition_range_history(make_lw_shared<file_input_stream_history>())
         , _schema(std::move(schema))
@@ -436,6 +439,7 @@ private:
     std::vector<sstring> _unrecognized_components;
 
     foreign_ptr<lw_shared_ptr<shareable_components>> _components = make_foreign(make_lw_shared<shareable_components>());
+    shard_id _shard;
     bool _shared = true;  // across shards; safe default
     // NOTE: _collector and _c_stats are used to generation of statistics file
     // when writing a new sstable.
