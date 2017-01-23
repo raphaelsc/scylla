@@ -1689,13 +1689,13 @@ populate_statistics_offsets(statistics& s) {
 
 static
 sharding_metadata
-create_sharding_metadata(schema_ptr schema, const dht::decorated_key& first_key, const dht::decorated_key& last_key) {
+create_sharding_metadata(schema_ptr schema, const dht::decorated_key& first_key, const dht::decorated_key& last_key, shard_id shard) {
     auto range = dht::partition_range::make(dht::ring_position(first_key), dht::ring_position(last_key));
     auto sharder = dht::ring_position_range_sharder(std::move(range));
     auto sm = sharding_metadata();
     auto rpras = sharder.next(*schema);
     while (rpras) {
-        if (rpras->shard == engine().cpu_id()) {
+        if (rpras->shard == shard) {
             // we know left/right are not infinite
             auto&& left = rpras->ring_range.start()->value();
             auto&& right = rpras->ring_range.end()->value();
@@ -1936,7 +1936,7 @@ void
 sstable::write_scylla_metadata(const io_priority_class& pc) {
     auto&& first_key = get_first_decorated_key();
     auto&& last_key = get_last_decorated_key();
-    auto sm = create_sharding_metadata(_schema, first_key, last_key);
+    auto sm = create_sharding_metadata(_schema, first_key, last_key, _shard);
     _components->scylla_metadata.emplace();
     _components->scylla_metadata->data.set<scylla_metadata_type::Sharding>(std::move(sm));
 
