@@ -1670,7 +1670,7 @@ create_sharding_metadata(schema_ptr schema, const dht::decorated_key& first_key,
     auto sm = sharding_metadata();
     auto rpras = sharder.next(*schema);
     while (rpras) {
-        if (rpras->shard == engine().cpu_id()) {
+        //if (rpras->shard == engine().cpu_id()) {
             // we know left/right are not infinite
             auto&& left = rpras->ring_range.start()->value();
             auto&& right = rpras->ring_range.end()->value();
@@ -1681,7 +1681,7 @@ create_sharding_metadata(schema_ptr schema, const dht::decorated_key& first_key,
             sm.token_ranges.elements.push_back({
                 {left_exclusive, to_bytes(bytes_view(left_token._data))},
                 {right_exclusive, to_bytes(bytes_view(right_token._data))}});
-        }
+        //}
         rpras = sharder.next(*schema);
     }
     return sm;

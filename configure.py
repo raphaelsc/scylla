@@ -193,6 +193,7 @@ scylla_tests = [
     'tests/row_cache_test',
     'tests/test-serialization',
     'tests/sstable_test',
+    'tests/sstable_resharding_test',
     'tests/sstable_mutation_test',
     'tests/memtable_test',
     'tests/commitlog_test',
