@@ -43,6 +43,14 @@ public:
     void add_sstable(lw_shared_ptr<sstables::sstable> sstable) {
         _cf->_sstables->insert(std::move(sstable));
     }
+
+    static void update_sstables_known_generation(column_family& cf, unsigned generation) {
+        cf.update_sstables_known_generation(generation);
+    }
+
+    static int64_t calculate_shard_from_sstable_generation(int64_t generation) {
+        return column_family::calculate_shard_from_sstable_generation(generation);
+    }
 };
 
 namespace sstables {
