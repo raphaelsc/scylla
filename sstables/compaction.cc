@@ -200,6 +200,29 @@ protected:
         uint64_t estimated_sstables = std::max(1UL, uint64_t(ceil(double(_info->start_size) / _max_sstable_size)));
         return ceil(double(_estimated_partitions) / estimated_sstables);
     }
+
+    static int64_t calculate_generation_for_new_table(column_family& cf) {
+        return cf.calculate_generation_for_new_table();
+    }
+    static sstring datadir(column_family& cf) {
+        return cf._config.datadir;
+    }
+
+    void setup_new_sstable(shared_sstable& sst) {
+        _info->new_sstables.push_back(sst);
+        sst->get_metadata_collector().set_replay_position(_rp);
+        sst->get_metadata_collector().sstable_level(_sstable_level);
+        for (auto ancestor : _ancestors) {
+            sst->add_ancestor(ancestor);
+        }
+    }
+
+    void finish_new_sstable(stdx::optional<sstable_writer>& writer, shared_sstable& sst) {
+        writer->consume_end_of_stream();
+        writer = stdx::nullopt;
+        sst->open_data().get0();
+        _info->end_size += sst->data_size();
+    }
 public:
     compaction_base& operator=(const compaction_base&) = delete;
     compaction_base(const compaction_base&) = delete;
@@ -281,12 +304,7 @@ public:
     virtual sstable_writer* select_sstable_writer(const dht::decorated_key& dk) {
         if (!_writer) {
             _sst = _creator();
-            _info->new_sstables.push_back(_sst);
-            _sst->get_metadata_collector().set_replay_position(_rp);
-            _sst->get_metadata_collector().sstable_level(_sstable_level);
-            for (auto ancestor : _ancestors) {
-                _sst->add_ancestor(ancestor);
-            }
+            setup_new_sstable(_sst);
 
             auto&& priority = service::get_local_compaction_priority();
             _writer.emplace(_sst->get_writer(*_cf.schema(), partitions_per_sstable(), _max_sstable_size, false, priority));
@@ -295,10 +313,7 @@ public:
     }
 
     virtual void stop_sstable_writer() {
-        _writer->consume_end_of_stream();
-        _writer = stdx::nullopt;
-        _sst->open_data().get0();
-        _info->end_size += _sst->data_size();
+        finish_new_sstable(_writer, _sst);
     }
 
     virtual void finish_sstable_writer() {
@@ -414,6 +429,83 @@ public:
     }
 };
 
+class resharding_compaction final : public compaction_base {
+    distributed<database>& _db;
+    sstring _ks_name;
+    sstring _cf_name;
+    std::vector<std::pair<shared_sstable, stdx::optional<sstable_writer>>> _sstables;
+    shard_id _shard;
+public:
+    resharding_compaction(distributed<database>& db, std::vector<shared_sstable> sstables, sstring ks_name, sstring cf_name,
+            uint64_t max_sstable_size, uint32_t sstable_level)
+        : compaction_base(db.local().find_column_family(ks_name, cf_name), std::move(sstables), {}, max_sstable_size, sstable_level)
+        , _db(db)
+        , _ks_name(std::move(ks_name))
+        , _cf_name(std::move(cf_name))
+        , _sstables(smp::count)
+    {
+    }
+
+    void report_start(sstring& formatted_msg) override {
+        logger.info("Resharding {}", formatted_msg);
+    }
+
+    void report_finish(sstring& formatted_msg, std::chrono::time_point<db_clock>& ended_at) override {
+        logger.info("Resharded {}", formatted_msg);
+    }
+
+    std::function<api::timestamp_type(const dht::decorated_key&)> max_purgeable_func() override {
+        return [] (const dht::decorated_key& dk) {
+            return api::min_timestamp;
+        };
+    }
+
+    sstable_writer* select_sstable_writer(const dht::decorated_key& dk) override {
+        _shard = dht::shard_of(dk.token());
+        auto& sst = _sstables[_shard].first;
+        auto& writer = _sstables[_shard].second;
+
+        auto creator = [this] () mutable {
+            // we need generation calculated by instance of cf at requested shard,
+            // or resource usage wouldn't be fairly distributed among shards.
+            auto gen = _db.invoke_on(_shard, [ks_name = _ks_name, cf_name = _cf_name] (auto& db) {
+                auto& cf = db.find_column_family(ks_name, cf_name);
+                return calculate_generation_for_new_table(cf);
+            }).get0();
+
+            auto sst = make_lw_shared<sstables::sstable>(_cf.schema(), datadir(_cf), gen,
+                sstables::sstable::version_types::ka, sstables::sstable::format_types::big,
+                gc_clock::now(), default_io_error_handler_gen(), _shard);
+            sst->set_unshared();
+            return sst;
+        };
+
+        if (!writer) {
+            sst = creator();
+            setup_new_sstable(sst);
+
+            auto&& priority = service::get_local_compaction_priority();
+            writer.emplace(sst->get_writer(*_cf.schema(), partitions_per_sstable(), _max_sstable_size, false, priority));
+        }
+        return &*writer;
+    }
+
+    void stop_sstable_writer() override {
+        auto& sst = _sstables[_shard].first;
+        auto& writer = _sstables[_shard].second;
+
+        finish_new_sstable(writer, sst);
+    }
+
+    void finish_sstable_writer() override {
+        for (auto& p : _sstables) {
+            if (p.second) {
+                finish_new_sstable(p.second, p.first);
+            }
+        }
+    }
+};
+
 static std::unique_ptr<compaction_base>
 make_compaction_base(column_family& cf, std::vector<shared_sstable> sstables, std::function<shared_sstable()> creator,
         uint64_t max_sstable_size, uint32_t sstable_level, bool cleanup) {
@@ -426,12 +518,7 @@ make_compaction_base(column_family& cf, std::vector<shared_sstable> sstables, st
     return c;
 }
 
-future<std::vector<shared_sstable>>
-compact_sstables(std::vector<shared_sstable> sstables, column_family& cf, std::function<shared_sstable()> creator,
-        uint64_t max_sstable_size, uint32_t sstable_level, bool cleanup) {
-    assert(sstables.size() > 0);
-    auto c = make_compaction_base(cf, std::move(sstables), std::move(creator), max_sstable_size, sstable_level, cleanup);
-
+static future<std::vector<shared_sstable>> compact(std::unique_ptr<compaction_base> c) {
     return seastar::async([c = std::move(c)] () mutable {
         c->setup();
 
@@ -453,6 +540,22 @@ compact_sstables(std::vector<shared_sstable> sstables, column_family& cf, std::f
 
         return std::move(c->info().new_sstables);
     });
+}
+
+future<std::vector<shared_sstable>>
+compact_sstables(std::vector<shared_sstable> sstables, column_family& cf, std::function<shared_sstable()> creator,
+        uint64_t max_sstable_size, uint32_t sstable_level, bool cleanup) {
+    assert(sstables.size() > 0);
+    auto c = make_compaction_base(cf, std::move(sstables), std::move(creator), max_sstable_size, sstable_level, cleanup);
+    return compact(std::move(c));
+}
+
+future<std::vector<shared_sstable>>
+reshard_sstables(distributed<database>& db, std::vector<shared_sstable> sstables, sstring ks_name, sstring cf_name,
+        uint64_t max_sstable_size, uint32_t sstable_level) {
+    assert(sstables.size() > 0);
+    auto c = std::make_unique<resharding_compaction>(db, std::move(sstables), std::move(ks_name), std::move(cf_name), max_sstable_size, sstable_level);
+    return compact(std::move(c));
 }
 
 std::vector<sstables::shared_sstable>
