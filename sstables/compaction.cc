@@ -155,6 +155,7 @@ class compacting_sstable_writer {
     compaction_info& _info;
     shared_sstable _sst;
     stdx::optional<sstable_writer> _writer;
+    stdx::optional<semaphore_units<>> _permit_opt;
 private:
     void finish_sstable_write() {
         _writer->consume_end_of_stream();
@@ -166,7 +167,7 @@ private:
 public:
     compacting_sstable_writer(const schema& s, std::function<shared_sstable()> creator, uint64_t partitions_per_sstable,
                               uint64_t max_sstable_size, uint32_t sstable_level, db::replay_position rp,
-                              std::vector<unsigned long> ancestors, compaction_info& info)
+                              std::vector<unsigned long> ancestors, compaction_info& info, stdx::optional<semaphore_units<>> permit_opt)
         : _schema(s)
         , _creator(creator)
         , _partitions_per_sstable(partitions_per_sstable)
@@ -175,6 +176,7 @@ public:
         , _rp(rp)
         , _ancestors(std::move(ancestors))
         , _info(info)
+        , _permit_opt(std::move(permit_opt))
     { }
 
     void consume_new_partition(const dht::decorated_key& dk) {
@@ -212,6 +214,8 @@ public:
     }
 
     void consume_end_of_stream() {
+        // if present, permit for this compaction will be released before sealing the sstable.
+        _permit_opt = stdx::nullopt;
         if (_writer) {
             finish_sstable_write();
         }
@@ -223,8 +227,9 @@ public:
 // are created using the "sstable_creator" object passed by the caller.
 future<std::vector<shared_sstable>>
 compact_sstables(std::vector<shared_sstable> sstables, column_family& cf, std::function<shared_sstable()> creator,
-                 uint64_t max_sstable_size, uint32_t sstable_level, bool cleanup) {
-    return seastar::async([sstables = std::move(sstables), &cf, creator = std::move(creator), max_sstable_size, sstable_level, cleanup] () mutable {
+                 uint64_t max_sstable_size, uint32_t sstable_level, bool cleanup, stdx::optional<semaphore_units<>> permit_opt) {
+    return seastar::async([sstables = std::move(sstables), &cf, creator = std::move(creator),
+            max_sstable_size, sstable_level, cleanup, permit_opt = std::move(permit_opt)] () mutable {
         // keep a immutable copy of sstable set because selector needs it alive
         // and also sstables created after compaction shouldn't be considered.
         const sstable_set s = cf.get_sstable_set();
@@ -289,7 +294,8 @@ compact_sstables(std::vector<shared_sstable> sstables, column_family& cf, std::f
         auto get_max_purgeable = [&cf, &selector, &compacting_set] (const dht::decorated_key& dk) {
             return get_max_purgeable_timestamp(cf, selector, compacting_set, dk);
         };
-        auto cr = compacting_sstable_writer(*schema, creator, partitions_per_sstable, max_sstable_size, sstable_level, rp, std::move(ancestors), *info);
+        auto cr = compacting_sstable_writer(*schema, creator, partitions_per_sstable, max_sstable_size, sstable_level,
+            rp, std::move(ancestors), *info, std::move(permit_opt));
         auto cfc = make_stable_flattened_mutations_consumer<compact_for_compaction<compacting_sstable_writer>>(
                 *schema, gc_clock::now(), std::move(cr), get_max_purgeable);
 

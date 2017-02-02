@@ -1329,7 +1329,7 @@ column_family::compact_sstables(sstables::compaction_descriptor descriptor, bool
         return make_ready_future<>();
     }
 
-    return with_lock(_sstables_lock.for_read(), [this, descriptor = std::move(descriptor), cleanup] {
+    return with_lock(_sstables_lock.for_read(), [this, descriptor = std::move(descriptor), cleanup] () mutable {
         auto sstables_to_compact = make_lw_shared<std::vector<sstables::shared_sstable>>(std::move(descriptor.sstables));
 
         auto create_sstable = [this] {
@@ -1342,7 +1342,7 @@ column_family::compact_sstables(sstables::compaction_descriptor descriptor, bool
                 return sst;
         };
         return sstables::compact_sstables(*sstables_to_compact, *this, create_sstable, descriptor.max_sstable_bytes, descriptor.level,
-                cleanup).then([this, sstables_to_compact] (auto new_sstables) {
+                cleanup, std::move(descriptor.permit_opt)).then([this, sstables_to_compact] (auto new_sstables) {
             _compaction_strategy.notify_completion(*sstables_to_compact, new_sstables);
             return this->rebuild_sstable_list(new_sstables, *sstables_to_compact);
         });

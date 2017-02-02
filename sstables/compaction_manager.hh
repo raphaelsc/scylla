@@ -75,6 +75,11 @@ private:
     // Keep track of weight of ongoing compaction for each column family.
     // That's used to allow parallel compaction on the same column family.
     std::unordered_map<column_family*, std::unordered_set<int>> _weight_tracker;
+
+    struct weight_class_control {
+        semaphore sem{1};
+    };
+    std::unordered_map<unsigned, weight_class_control> _weight_semaphores;
 private:
     future<> task_stop(lw_shared_ptr<task> task);
 

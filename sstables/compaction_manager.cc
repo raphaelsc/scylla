@@ -59,6 +59,7 @@ public:
     ~compacting_sstable_registration() {
         if (_cm) {
             _cm->deregister_compacting_sstables(_compacting);
+            _cm = nullptr;
         }
     }
 };
@@ -367,39 +368,68 @@ void compaction_manager::submit(column_family* cf) {
         sstables::compaction_descriptor descriptor = cs.get_sstables_for_compaction(cf, get_candidates(cf));
         int weight = trim_to_compact(&cf, descriptor);
 
-        // Stop compaction task immediately if strategy is satisfied or job cannot run in parallel.
+        // Stop compaction task immediately if strategy is satisfied or job cannot run in parallel
+        // to a compaction running on behalf of the same column family.
         if (descriptor.sstables.empty() || !can_register_weight(&cf, weight, cs.parallel_compaction())) {
             _stats.pending_tasks--;
             cmlog.debug("Refused compaction job ({} sstable(s)) of weight {} for {}.{}",
                 descriptor.sstables.size(), weight, cf.schema()->ks_name(), cf.schema()->cf_name());
             return make_ready_future<stop_iteration>(stop_iteration::yes);
         }
-        auto compacting = compacting_sstable_registration(this, descriptor.sstables);
-        auto c_weight = compaction_weight_registration(this, &cf, weight);
-        cmlog.debug("Accepted compaction job ({} sstable(s)) of weight {} for {}.{}",
-            descriptor.sstables.size(), weight, cf.schema()->ks_name(), cf.schema()->cf_name());
+        auto cwr = compaction_weight_registration(this, &cf, weight);
+        auto csr = compacting_sstable_registration(this, descriptor.sstables);
 
-        _stats.pending_tasks--;
-        _stats.active_tasks++;
-        return cf.run_compaction(std::move(descriptor))
-                .then_wrapped([this, task, compacting = std::move(compacting), c_weight = std::move(c_weight)] (future<> f) mutable {
-            _stats.active_tasks--;
-
-            if (!can_proceed(task)) {
-                check_for_error(std::move(f));
-                return make_ready_future<stop_iteration>(stop_iteration::yes);
+        bool reconsult = false;
+        auto f = get_units(_weight_semaphores[weight].sem, 1);
+        // If unit isn't immediately available, fiber will ask strategy for a new sstable set because
+        // new sstables may be available for compaction.
+        if (!f.available()) {
+            reconsult = true;
+        }
+        return f.then([this, &cf, reconsult, task, weight, descriptor = std::move(descriptor), cwr = std::move(cwr), csr = std::move(csr)] (auto permit) mutable {
+            if (reconsult) {
+                // deregister sstables in descriptor because strategy needs to see them.
+                csr = compacting_sstable_registration(this, {});
+                sstables::compaction_strategy cs = cf.get_compaction_strategy();
+                sstables::compaction_descriptor new_descriptor = cs.get_sstables_for_compaction(cf, this->get_candidates(cf));
+                int new_weight = calculate_weight(descriptor.sstables);
+                // we will run compaction for descriptor obtained previous to sleeping on semaphore
+                // if weight of new job isn't the same.
+                if (new_weight == weight) {
+                    descriptor = std::move(new_descriptor);
+                }
+                csr = compacting_sstable_registration(this, descriptor.sstables);
             }
-            if (check_for_error(std::move(f))) {
-                _stats.errors++;
+            // permit is carried to sstable compaction procedure to allow it to be released earlier.
+            // That way, compaction bandwidth will not remain underutilized when finishing compaction,
+            // which involves sealing sstable and doing some in-memory changes.
+            descriptor.permit_opt.emplace(std::move(permit));
+
+            cmlog.debug("Accepted compaction job ({} sstable(s)) of weight {} for {}.{}",
+                descriptor.sstables.size(), weight, cf.schema()->ks_name(), cf.schema()->cf_name());
+
+            _stats.pending_tasks--;
+            _stats.active_tasks++;
+            return cf.run_compaction(std::move(descriptor))
+                    .then_wrapped([this, task, cwr = std::move(cwr), csr = std::move(csr)] (future<> f) mutable {
+                _stats.active_tasks--;
+
+                if (!this->can_proceed(task)) {
+                    check_for_error(std::move(f));
+                    return make_ready_future<stop_iteration>(stop_iteration::yes);
+                }
+                if (check_for_error(std::move(f))) {
+                    _stats.errors++;
+                    _stats.pending_tasks++;
+                    return this->put_task_to_sleep(task).then([] {
+                        return make_ready_future<stop_iteration>(stop_iteration::no);
+                    });
+                }
                 _stats.pending_tasks++;
-                return put_task_to_sleep(task).then([] {
-                    return make_ready_future<stop_iteration>(stop_iteration::no);
-                });
-            }
-            _stats.pending_tasks++;
-            _stats.completed_tasks++;
-            task->compaction_retry.reset();
-            return make_ready_future<stop_iteration>(stop_iteration::no);
+                _stats.completed_tasks++;
+                task->compaction_retry.reset();
+                return make_ready_future<stop_iteration>(stop_iteration::no);
+            });
         });
     }).finally([this, task] {
         _tasks.remove(task);

@@ -22,8 +22,11 @@
 
 #pragma once
 
+#include "core/semaphore.hh"
 #include "sstables.hh"
 #include <functional>
+#include <experimental/optional>
+#include "stdx.hh"
 
 namespace sstables {
 
@@ -34,6 +37,8 @@ namespace sstables {
         int level;
         // Threshold size for sstable(s) to be created.
         uint64_t max_sstable_bytes;
+        // Used by compaction manager to control ongoing compaction.
+        stdx::optional<semaphore_units<>> permit_opt;
 
         compaction_descriptor() = default;
 
@@ -102,7 +107,8 @@ namespace sstables {
     // cleaning operation, and compaction history will not be updated.
     future<std::vector<shared_sstable>> compact_sstables(std::vector<shared_sstable> sstables,
             column_family& cf, std::function<shared_sstable()> creator,
-            uint64_t max_sstable_size, uint32_t sstable_level, bool cleanup = false);
+            uint64_t max_sstable_size, uint32_t sstable_level, bool cleanup = false,
+            stdx::optional<semaphore_units<>> permit_opt = stdx::nullopt);
 
     // Return the most interesting bucket applying the size-tiered strategy.
     std::vector<sstables::shared_sstable>
