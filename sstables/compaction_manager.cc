@@ -29,13 +29,15 @@ static logging::logger cmlog("compaction_manager");
 
 class compacting_sstable_registration {
     compaction_manager* _cm;
+    column_family* _cf;
     std::vector<sstables::shared_sstable> _compacting;
 public:
-    compacting_sstable_registration(compaction_manager* cm, std::vector<sstables::shared_sstable> compacting)
+    compacting_sstable_registration(compaction_manager* cm, column_family* cf, std::vector<sstables::shared_sstable> compacting)
         : _cm(cm)
+        , _cf(cf)
         , _compacting(std::move(compacting))
     {
-        _cm->register_compacting_sstables(_compacting);
+        _cm->register_compacting_sstables(_cf, _compacting);
     }
 
     compacting_sstable_registration& operator=(const compacting_sstable_registration&) = delete;
@@ -51,14 +53,16 @@ public:
 
     compacting_sstable_registration(compacting_sstable_registration&& other) noexcept
         : _cm(other._cm)
+        , _cf(other._cf)
         , _compacting(std::move(other._compacting))
     {
+        other._cf = nullptr;
         other._cm = nullptr;
     }
 
     ~compacting_sstable_registration() {
         if (_cm) {
-            _cm->deregister_compacting_sstables(_compacting);
+            _cm->deregister_compacting_sstables(_cf, _compacting);
         }
     }
 };
@@ -200,24 +204,25 @@ std::vector<sstables::shared_sstable> compaction_manager::get_candidates(const c
     std::vector<sstables::shared_sstable> candidates;
     candidates.reserve(cf.sstables_count());
     // Filter out sstables that are being compacted.
+    auto& compacting_set = _compacting_sstables[&cf];
     for (auto& sst : *cf.get_sstables()) {
-        if (!_compacting_sstables.count(sst)) {
+        if (!compacting_set.count(sst)) {
             candidates.push_back(sst);
         }
     }
     return candidates;
 }
 
-void compaction_manager::register_compacting_sstables(const std::vector<sstables::shared_sstable>& sstables) {
-    for (auto& sst : sstables) {
-        _compacting_sstables.insert(sst);
-    }
+void compaction_manager::register_compacting_sstables(column_family* cf, const std::vector<sstables::shared_sstable>& sstables) {
+    auto& compacting_set = _compacting_sstables[cf];
+    compacting_set.insert(sstables.begin(), sstables.end());
 }
 
-void compaction_manager::deregister_compacting_sstables(const std::vector<sstables::shared_sstable>& sstables) {
+void compaction_manager::deregister_compacting_sstables(column_family* cf, const std::vector<sstables::shared_sstable>& sstables) {
     // Remove compacted sstables from the set of compacting sstables.
+    auto& compacting_set = _compacting_sstables[cf];
     for (auto& sst : sstables) {
-        _compacting_sstables.erase(sst);
+        compacting_set.erase(sst);
     }
 }
 
@@ -235,12 +240,13 @@ void compaction_manager::submit_sstable_rewrite(column_family* cf, sstables::sha
     static thread_local semaphore sem(1);
     // We cannot, and don't need to, compact an sstable which is already
     // being compacted anyway.
-    if (_stopped || _compacting_sstables.count(sst)) {
+    auto& compacting_set = _compacting_sstables[cf];
+    if (_stopped || compacting_set.count(sst)) {
         return;
     }
     // Conversely, we don't want another compaction job to compact the
     // sstable we are planning to work on:
-    _compacting_sstables.insert(sst);
+    compacting_set.insert(sst);
     auto task = make_lw_shared<compaction_manager::task>();
     _tasks.push_back(task);
     task->compaction_done = with_semaphore(sem, 1, [this, cf, sst] {
@@ -252,8 +258,8 @@ void compaction_manager::submit_sstable_rewrite(column_family* cf, sstables::sha
                 std::vector<sstables::shared_sstable>{sst},
                 sst->get_sstable_level(),
                 std::numeric_limits<uint64_t>::max()), false);
-    }).then_wrapped([this, sst, task] (future<> f) {
-        _compacting_sstables.erase(sst);
+    }).then_wrapped([this, cf, sst, task] (future<> f) {
+        _compacting_sstables[cf].erase(sst);
         _stats.active_tasks--;
         _tasks.remove(task);
         try {
@@ -374,7 +380,7 @@ void compaction_manager::submit(column_family* cf) {
                 descriptor.sstables.size(), weight, cf.schema()->ks_name(), cf.schema()->cf_name());
             return make_ready_future<stop_iteration>(stop_iteration::yes);
         }
-        auto compacting = compacting_sstable_registration(this, descriptor.sstables);
+        auto compacting = compacting_sstable_registration(this, &cf, descriptor.sstables);
         auto c_weight = compaction_weight_registration(this, &cf, weight);
         cmlog.debug("Accepted compaction job ({} sstable(s)) of weight {} for {}.{}",
             descriptor.sstables.size(), weight, cf.schema()->ks_name(), cf.schema()->cf_name());
@@ -433,7 +439,7 @@ future<> compaction_manager::perform_cleanup(column_family* cf) {
         }
         column_family& cf = *task->compacting_cf;
         sstables::compaction_descriptor descriptor = sstables::compaction_descriptor(get_candidates(cf));
-        auto compacting = compacting_sstable_registration(this, descriptor.sstables);
+        auto compacting = compacting_sstable_registration(this, &cf, descriptor.sstables);
 
         _stats.pending_tasks--;
         _stats.active_tasks++;

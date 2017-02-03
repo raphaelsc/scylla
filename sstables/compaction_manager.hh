@@ -70,7 +70,7 @@ private:
 
     // Store sstables that are being compacted at the moment. That's needed to prevent
     // a sstable from being compacted twice.
-    std::unordered_set<sstables::shared_sstable> _compacting_sstables;
+    std::unordered_map<const column_family*, std::unordered_set<sstables::shared_sstable>> _compacting_sstables;
 
     // Keep track of weight of ongoing compaction for each column family.
     // That's used to allow parallel compaction on the same column family.
@@ -95,8 +95,8 @@ private:
     // Get candidates for compaction strategy, which are all sstables but the ones being compacted.
     std::vector<sstables::shared_sstable> get_candidates(const column_family& cf);
 
-    void register_compacting_sstables(const std::vector<sstables::shared_sstable>& sstables);
-    void deregister_compacting_sstables(const std::vector<sstables::shared_sstable>& sstables);
+    void register_compacting_sstables(column_family* cf, const std::vector<sstables::shared_sstable>& sstables);
+    void deregister_compacting_sstables(column_family* cf, const std::vector<sstables::shared_sstable>& sstables);
 
     // Return true if compaction manager and task weren't asked to stop.
     inline bool can_proceed(const lw_shared_ptr<task>& task);
