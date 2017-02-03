@@ -343,6 +343,10 @@ inline future<> compaction_manager::put_task_to_sleep(lw_shared_ptr<task>& task)
     return task->compaction_retry.retry();
 }
 
+const std::unordered_set<sstables::shared_sstable>& compaction_manager::compacting_sstables(const column_family* cf) {
+    return _compacting_sstables[cf];
+}
+
 static inline bool check_for_error(future<> f) {
     bool error = false;
     try {
