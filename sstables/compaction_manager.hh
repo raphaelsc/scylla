@@ -150,6 +150,8 @@ public:
         return _compactions;
     }
 
+    const std::unordered_set<sstables::shared_sstable>& compacting_sstables(const column_family* cf);
+
     // Stops ongoing compaction of a given type.
     void stop_compaction(sstring type);
 
