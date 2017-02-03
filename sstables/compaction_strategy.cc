@@ -723,7 +723,7 @@ compaction_descriptor leveled_compaction_strategy::get_sstables_for_compaction(c
     if (!_last_compacted_keys) {
         generate_last_compacted_keys(manifest);
     }
-    auto candidate = manifest.get_compaction_candidates(*_last_compacted_keys, _compaction_counter);
+    auto candidate = manifest.get_compaction_candidates(cfs, *_last_compacted_keys, _compaction_counter);
 
     if (candidate.sstables.empty()) {
         return sstables::compaction_descriptor();

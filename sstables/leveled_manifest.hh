@@ -232,7 +232,7 @@ public:
      * @return highest-priority sstables to compact, and level to compact them to
      * If no compactions are necessary, will return null
      */
-    sstables::compaction_descriptor get_compaction_candidates(const std::vector<stdx::optional<dht::decorated_key>>& last_compacted_keys,
+    sstables::compaction_descriptor get_compaction_candidates(column_family& cf, const std::vector<stdx::optional<dht::decorated_key>>& last_compacted_keys,
         std::vector<int>& compaction_counter) {
 #if 0
         // during bootstrap we only do size tiering in L0 to make sure
@@ -300,11 +300,11 @@ public:
                     }
                 }
                 // L0 is fine, proceed with this level
-                auto candidates = get_candidates_for(i, last_compacted_keys);
+                auto candidates = get_candidates_for(cf, i, last_compacted_keys);
                 if (!candidates.empty()) {
                     int next_level = get_next_level(candidates);
 
-                    candidates = get_overlapping_starved_sstables(next_level, std::move(candidates), compaction_counter);
+                    candidates = get_overlapping_starved_sstables(cf, next_level, std::move(candidates), compaction_counter);
 #if 0
                     if (logger.isDebugEnabled())
                         logger.debug("Compaction candidates for L{} are {}", i, toString(candidates));
@@ -321,7 +321,7 @@ public:
         if (get_level(0).empty()) {
             return sstables::compaction_descriptor();
         }
-        auto candidates = get_candidates_for(0, last_compacted_keys);
+        auto candidates = get_candidates_for(cf, 0, last_compacted_keys);
         if (candidates.empty()) {
             return sstables::compaction_descriptor();
         }
@@ -354,7 +354,7 @@ public:
      * @return
      */
     std::vector<sstables::shared_sstable>
-    get_overlapping_starved_sstables(int target_level, std::vector<sstables::shared_sstable>&& candidates, std::vector<int>& compaction_counter) {
+    get_overlapping_starved_sstables(column_family& cf, int target_level, std::vector<sstables::shared_sstable>&& candidates, std::vector<int>& compaction_counter) {
         for (int i = _generations.size() - 1; i > 0; i--) {
             compaction_counter[i]++;
         }
@@ -385,11 +385,9 @@ public:
                             max = candidate_last;
                         }
                     }
-#if 0
-                    // NOTE: We don't need to filter out compacting sstables by now because strategy only deals with
-                    // uncompacting sstables and parallel compaction is also disabled for lcs.
-                    Set<SSTableReader> compacting = cfs.getDataTracker().getCompacting();
-#endif
+
+                    auto& compacting = cf.get_compaction_manager().compacting_sstables(&cf);
+
                     auto boundaries = ::range<dht::decorated_key>::make(*min, *max);
                     for (auto& sstable : get_level(i)) {
                         auto r = ::range<dht::decorated_key>::make(sstable->get_first_decorated_key(), sstable->get_last_decorated_key());
@@ -399,7 +397,7 @@ public:
                             auto result = std::find_if(std::begin(candidates), std::end(candidates), [&sstable] (auto& candidate) {
                                 return sstable->generation() == candidate->generation();
                             });
-                            if (result != std::end(candidates)) {
+                            if (result != std::end(candidates) && compacting.count(sstable)) {
                                 continue;
                             }
                             candidates.push_back(sstable);
@@ -457,7 +455,7 @@ public:
     }
 
     template <typename T>
-    static std::vector<sstables::shared_sstable> overlapping(const schema& s, std::vector<sstables::shared_sstable>& candidates, T& others) {
+    static std::vector<sstables::shared_sstable> overlapping(const schema& s, std::vector<sstables::shared_sstable>& candidates, T&& others) {
         assert(!candidates.empty());
         /*
          * Picking each sstable from others that overlap one of the sstable of candidates is not enough
@@ -488,7 +486,7 @@ public:
     }
 
     template <typename T>
-    static std::vector<sstables::shared_sstable> overlapping(const schema& s, sstables::shared_sstable& sstable, T& others) {
+    static std::vector<sstables::shared_sstable> overlapping(const schema& s, sstables::shared_sstable& sstable, T&& others) {
         return overlapping(s, sstable->get_first_decorated_key()._token, sstable->get_last_decorated_key()._token, others);
     }
 
@@ -496,7 +494,7 @@ public:
      * @return sstables from @param sstables that contain keys between @param start and @param end, inclusive.
      */
     template <typename T>
-    static std::vector<sstables::shared_sstable> overlapping(const schema& s, dht::token start, dht::token end, T& sstables) {
+    static std::vector<sstables::shared_sstable> overlapping(const schema& s, dht::token start, dht::token end, T&& sstables) {
         assert(start <= end);
 
         std::vector<sstables::shared_sstable> overlapped;
@@ -526,28 +524,33 @@ public:
      * If no compactions are possible (because of concurrent compactions or because some sstables are blacklisted
      * for prior failure), will return an empty list.  Never returns null.
      */
-    std::vector<sstables::shared_sstable> get_candidates_for(int level, const std::vector<stdx::optional<dht::decorated_key>>& last_compacted_keys) {
+    std::vector<sstables::shared_sstable> get_candidates_for(column_family& cf, int level, const std::vector<stdx::optional<dht::decorated_key>>& last_compacted_keys) {
         const schema& s = *_schema;
         assert(!get_level(level).empty());
 
         logger.debug("Choosing candidates for L{}", level);
-#if 0
-        final Set<SSTableReader> compacting = cfs.getDataTracker().getCompacting();
-#endif
-        if (level == 0) {
-#if 0
-            Set<SSTableReader> compactingL0 = ImmutableSet.copyOf(Iterables.filter(getLevel(0), Predicates.in(compacting)));
 
-            RowPosition lastCompactingKey = null;
-            RowPosition firstCompactingKey = null;
-            for (SSTableReader candidate : compactingL0)
+        auto& compacting = cf.get_compaction_manager().compacting_sstables(&cf);
+
+        if (level == 0) {
+
+            auto compactingL0 =  boost::copy_range<std::unordered_set<sstables::shared_sstable>>(compacting | boost::adaptors::filtered([](auto& sst) {
+                return sst->get_sstable_level() == 0;
+            }));
+
+            stdx::optional<dht::token> last_compacting_token;
+            stdx::optional<dht::token> first_compacting_token;
+            for (auto& candidate : compactingL0)
             {
-                if (firstCompactingKey == null || candidate.first.compareTo(firstCompactingKey) < 0)
-                    firstCompactingKey = candidate.first;
-                if (lastCompactingKey == null || candidate.last.compareTo(lastCompactingKey) > 0)
-                    lastCompactingKey = candidate.last;
+                auto candidate_first = candidate->get_first_decorated_key().token();
+                auto candidate_last = candidate->get_last_decorated_key().token();
+                if (!first_compacting_token || candidate_first < *first_compacting_token) {
+                    first_compacting_token = candidate_first;
+                }
+                if (!last_compacting_token || candidate_last > *last_compacting_token) {
+                    last_compacting_token = candidate_last;
+                }
             }
-#endif
 
             // L0 is the dumping ground for new sstables which thus may overlap each other.
             //
@@ -579,18 +582,20 @@ public:
                     overlappedL0.push_back(sstable);
                 }
 
-#if 0
-                if (!Sets.intersection(overlappedL0, compactingL0).isEmpty())
+                auto intersects = std::count_if(overlappedL0.begin(), overlappedL0.end(), [&compactingL0] (auto& sst) {
+                    return compactingL0.count(sst);
+                });
+                if (intersects) {
                     continue;
-#endif
+                }
 
                 for (auto& new_candidate : overlappedL0) {
-#if 0
-                    if (firstCompactingKey == null || lastCompactingKey == null || overlapping(firstCompactingKey.getToken(), lastCompactingKey.getToken(), Arrays.asList(newCandidate)).size() == 0)
-                        candidates.add(newCandidate);
-#else
-                    candidates.push_back(new_candidate);
-#endif
+                    // we don't want to possibly promote a sstable that overlaps with a compacting sstable that is also level 0,
+                    // or we'd end up with overlapping in level 1 when both compactions complete.
+                    if (!first_compacting_token || !last_compacting_token ||
+                            overlapping(*_schema, *first_compacting_token, *last_compacting_token, std::vector<sstables::shared_sstable>{new_candidate}).empty()) {
+                        candidates.push_back(new_candidate);
+                    }
                     remaining.remove(new_candidate);
                 }
 
@@ -659,9 +664,17 @@ public:
 #if 0
             if (Iterables.any(candidates, suspectP))
                 continue;
-            if (Sets.intersection(candidates, compacting).isEmpty())
-                return candidates;
 #endif
+            auto intersects = std::count_if(candidates.begin(), candidates.end(), [&compacting] (auto& sst) {
+                return compacting.count(sst);
+            });
+            // in level 1 or higher, we assume non-overlapping sstables, so we only need to check
+            // that a given sstable of a level N and the overlapping ones at level N+1 aren't
+            // being compacted.
+            if (intersects) {
+                continue;
+            }
+
             return candidates;
         }
 
