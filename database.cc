@@ -1581,6 +1581,262 @@ future<> distributed_loader::open_sstable(distributed<database>& db, sstables::e
     });
 }
 
+// global_column_family_ptr provides a way to easily retrieve local instance of a given column family.
+class global_column_family_ptr {
+    distributed<database>& _db;
+    utils::UUID _id;
+private:
+    column_family& get() const { return _db.local().find_column_family(_id); }
+public:
+    global_column_family_ptr(distributed<database>& db, sstring ks_name, sstring cf_name)
+        : _db(db)
+        , _id(_db.local().find_column_family(ks_name, cf_name).schema()->id()) {
+    }
+
+    column_family* operator->() const {
+        return &get();
+    }
+    column_family& operator*() const {
+        return get();
+    }
+};
+
+class sstable_merger {
+    schema_ptr _schema;
+    sstring _dir;
+    std::unordered_map<int64_t, sstables::shared_sstable> _result;
+public:
+    sstable_merger(global_column_family_ptr cf)
+        : _schema(cf->schema())
+        , _dir(cf->dir()) {
+    }
+
+    template <typename Pred>
+    static future<std::vector<sstables::shared_sstable>>
+    load_with_open_info(std::vector<sstables::foreign_sstable_open_info> ssts_info, schema_ptr s, sstring dir, Pred&& pred) {
+        return do_with(std::vector<sstables::shared_sstable>(), [ssts_info = std::move(ssts_info), s, dir, pred] (auto& ssts) mutable {
+            return parallel_for_each(std::move(ssts_info), [&ssts, s, dir, pred] (auto& info) mutable {
+                if (!pred(info)) {
+                    return make_ready_future<>();
+                }
+                auto sst = make_lw_shared<sstables::sstable>(s, dir, info.generation, info.version, info.format);
+                return sst->load(std::move(info)).then([&ssts, sst] {
+                    if (sst->get_shards_for_this_sstable().size() == 1) {
+                        sst->set_unshared();
+                    }
+                    ssts.push_back(std::move(sst));
+                    return make_ready_future<>();
+                });
+            }).then([&ssts] () mutable {
+                return std::move(ssts);
+            });
+        });
+    }
+
+    future<> operator()(std::vector<sstables::foreign_sstable_open_info> ssts_info) {
+        return load_with_open_info(std::move(ssts_info), _schema, _dir, [this] (auto& info) {
+            // we only need one instance for each generation
+            return !_result.count(info.generation);
+        }).then([this] (std::vector<sstables::shared_sstable> sstables) {
+            for (auto& sst : sstables) {
+                _result.emplace(sst->generation(), std::move(sst));
+            }
+            return make_ready_future<>();
+        });
+    }
+
+    std::vector<sstables::shared_sstable> get() && {
+        return boost::copy_range<std::vector<sstables::shared_sstable>>(std::move(_result) | boost::adaptors::map_values);
+    }
+
+    // Return all sstables in the system. Only one instance of a shared sstable is returned.
+    static future<std::vector<sstables::shared_sstable>> get_all_sstables(distributed<database>& db, global_column_family_ptr cf) {
+        return db.map_reduce(sstable_merger(cf), [cf] (database& db) mutable {
+            std::vector<sstables::foreign_sstable_open_info> infos;
+            auto sstables = cf->get_sstables();
+            infos.reserve(sstables->size());
+            boost::range::transform(*sstables, std::back_inserter(infos), [] (auto& sstable) {
+                return sstable->get_open_info();
+            });
+            return infos;
+        });
+    }
+};
+
+// checks whether or not a given column family is worth resharding by checking if any of its
+// sstables has more than one owner shard.
+static future<bool> worth_resharding(distributed<database>& db, global_column_family_ptr cf) {
+    return db.map_reduce0([cf] (database& db) {
+        return cf->has_shared_sstables();
+    }, bool(false), std::logical_or<bool>());
+}
+
+// make a set of sstables available at another shard.
+template <typename Func>
+static future<> forward_sstables_to(shard_id shard, std::vector<sstables::shared_sstable> sstables, global_column_family_ptr cf, Func&& func) {
+    std::vector<sstables::foreign_sstable_open_info> infos;
+    infos.reserve(sstables.size());
+
+    boost::range::transform(sstables, std::back_inserter(infos), [] (auto& sstable) {
+        return std::move(*sstable).get_open_info();
+    });
+
+    return smp::submit_to(shard, [cf, func, infos = std::move(infos)] () mutable {
+        return sstable_merger::load_with_open_info(std::move(infos), cf->schema(), cf->dir(), [] (auto& p) {
+            return true;
+        }).then([func] (std::vector<sstables::shared_sstable> sstables) {
+            return func(std::move(sstables));
+        });
+    });
+}
+
+// invokes each descriptor at its target shard, which involves forwarding sstables too.
+template <typename Func>
+static future<> invoke_all_resharding_jobs(global_column_family_ptr cf, std::vector<sstables::resharding_descriptor> jobs, Func&& func) {
+    return parallel_for_each(std::move(jobs), [cf, func] (sstables::resharding_descriptor& job) mutable {
+        return forward_sstables_to(job.reshard_at, std::move(job.sstables), cf, [func, level = job.level] (auto sstables) {
+            // used to ensure that only one reshard operation will run per shard.
+            static thread_local semaphore sem(1);
+            return with_semaphore(sem, 1, [func, sstables = std::move(sstables), level] () mutable {
+                return func(std::move(sstables), level);
+            });
+        });
+    });
+}
+
+// executes a code snippet with compaction disabled for all column family instances.
+template <typename Func>
+static future<> with_compaction_disabled(global_column_family_ptr cf, Func&& func) {
+    return smp::invoke_on_all([cf] () mutable {
+        return cf->disable_compaction();
+    }).then(std::forward<Func>(func)).finally([cf] {
+        return smp::invoke_on_all([cf] () mutable {
+            cf->enable_compaction();
+        });
+    });
+}
+
+class distributed_compacting_sstable_registration {
+    global_column_family_ptr _cf;
+    std::unordered_set<int64_t> _generations;
+    bool _registered;
+private:
+    future<> deregister() {
+        return smp::invoke_on_all([cf = _cf, generations = _generations] () mutable {
+            return cf->get_compaction_manager().deregister_compacting_sstables(&*cf, generations);
+        });
+    }
+public:
+    distributed_compacting_sstable_registration(global_column_family_ptr cf, std::unordered_set<int64_t> generations)
+        : _cf(cf)
+        , _generations(std::move(generations)) {
+    }
+    distributed_compacting_sstable_registration& operator=(const distributed_compacting_sstable_registration&) = delete;
+    distributed_compacting_sstable_registration(const distributed_compacting_sstable_registration&) = delete;
+
+    ~distributed_compacting_sstable_registration() {
+        if (_registered) {
+            dblog.warn("sstables for {}.{} weren't deregistered explicitly from distributed_compacting_sstable_registration",
+                _cf->schema()->ks_name(), _cf->schema()->cf_name());
+            deregister();
+        }
+    }
+
+    future<> start() {
+        return smp::invoke_on_all([cf = _cf, generations = _generations] () mutable {
+            return cf->get_compaction_manager().register_compacting_sstables(&*cf, generations);
+        }).finally([this] {
+            _registered = true;
+        });
+    }
+    future<> stop() {
+        return deregister().then([this] {
+            _registered = false;
+        });
+    }
+
+    static std::unordered_set<int64_t> to_generations(const std::vector<sstables::resharding_descriptor>& jobs) {
+        std::unordered_set<int64_t> gens;
+        for (auto& j : jobs) {
+            boost::range::transform(j.sstables, std::inserter(gens, gens.end()), std::mem_fn(&sstables::sstable::generation));
+        }
+        return gens;
+    }
+};
+
+void distributed_loader::reshard(distributed<database>& db, sstring ks_name, sstring cf_name) {
+    assert(engine().cpu_id() == 0); // NOTE: should always run on shard 0!
+
+    // ensures that only one column family is resharded at a time (that's okay because
+    // actual resharding is parallelized), and that's needed to prevent the same column
+    // family from being resharded in parallel (that could happen, for example, if
+    // refresh (triggers resharding) is issued by user while resharding is going on).
+    static semaphore sem(1);
+
+    with_semaphore(sem, 1, [&db, ks_name = std::move(ks_name), cf_name = std::move(cf_name)] () mutable {
+        return seastar::async([&db, ks_name = std::move(ks_name), cf_name = std::move(cf_name)] () mutable {
+            global_column_family_ptr cf(db, ks_name, cf_name);
+
+            if (cf->get_compaction_manager().stopped()) {
+                return;
+            }
+            // fast path to detect that this column family doesn't need reshard.
+            if (!worth_resharding(db, cf).get0()) {
+                dblog.debug("Nothing to reshard for {}.{}", cf->schema()->ks_name(), cf->schema()->cf_name());
+                return;
+            }
+            std::vector<sstables::resharding_descriptor> jobs;
+            stdx::optional<distributed_compacting_sstable_registration> registration;
+
+            // compaction needs to be disabled when getting resharding jobs, or else we'll select for
+            // resharding sstables that are being compacted. We could filter them out, but that could
+            // not work for LCS for example that may require certain sstables to be resharded together.
+            with_compaction_disabled(cf, [&jobs, &registration, &db, cf] () mutable {
+                return sstable_merger::get_all_sstables(db, cf).then([&jobs, &registration, cf] (auto candidates) mutable {
+                    dblog.debug("{} candidates for resharding for {}.{}", candidates.size(), cf->schema()->ks_name(), cf->schema()->cf_name());
+                    jobs = cf->get_compaction_strategy().get_resharding_jobs(*cf, std::move(candidates));
+
+                    // We will also mark for compaction all sstables involved in this resharding so that
+                    // regular compaction will not pick any of them later on.
+                    registration.emplace(cf, distributed_compacting_sstable_registration::to_generations(jobs));
+                    return registration->start();
+                });
+            }).get();
+
+            dblog.debug("{} resharding jobs for {}.{}", jobs.size(), cf->schema()->ks_name(), cf->schema()->cf_name());
+
+            invoke_all_resharding_jobs(cf, std::move(jobs), [&db, ks_name, cf_name, cf] (auto sstables, auto level) {
+                auto f = sstables::reshard_sstables(db, std::move(sstables), ks_name, cf_name, std::numeric_limits<uint64_t>::max(), level);
+
+                return f.then([cf] (std::vector<sstables::shared_sstable> new_unshared_sstables) mutable {
+                    return parallel_for_each(std::move(new_unshared_sstables), [cf] (auto& sst) {
+                        auto shard = sst->get_shards_for_this_sstable();
+                        if (shard.size() != 1) {
+                            throw std::runtime_error(sprint("resharded sstable {} doesn't belong to only one shard", sst->get_filename()));
+                        }
+
+                        return forward_sstables_to(shard.front(), {sst}, cf, [cf] (auto sstable) {
+                            assert(sstable.size() == 1);
+                            cf->replace_ancestors_by(std::move(sstable.front()));
+                        });
+                    });
+                }).then_wrapped([] (future<> f) {
+                    try {
+                        f.get();
+                    } catch (sstables::compaction_stop_exception& e) {
+                        dblog.info("resharding was abruptly stopped, reason: {}", e.what());
+                    } catch (...) {
+                        dblog.error("resharding failed: {}", std::current_exception());
+                    }
+                });
+            }).finally([&registration] {
+                assert(registration);
+                return registration->stop();
+            }).get();
+        });
+    });
+}
+
 future<> distributed_loader::load_new_sstables(distributed<database>& db, sstring ks, sstring cf, std::vector<sstables::entry_descriptor> new_tables) {
     return parallel_for_each(new_tables, [&db] (auto comps) {
         auto cf_sstable_open = [comps] (column_family& cf, sstables::foreign_sstable_open_info info) {
