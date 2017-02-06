@@ -1331,6 +1331,25 @@ column_family::rebuild_sstable_list(const std::vector<sstables::shared_sstable>&
     });
 }
 
+void column_family::replace_ancestors_by(sstables::shared_sstable new_sstable) {
+    auto ancestors = new_sstable->ancestors();
+    auto sstable_was_rewritten = [&ancestors] (auto& sst) {
+        return ancestors.count(sst->generation());
+    };
+
+    std::vector<sstables::shared_sstable> old_sstables;
+    // FIXME: Possibly quadratic behavior here because this function is called for every sstable created
+    // by resharding. Make the search below O(log(n)).
+    auto all = _sstables->all();
+    std::copy_if(all->begin(), all->end(), std::back_inserter(old_sstables), [&] (auto& sst) {
+        return sstable_was_rewritten(sst);
+    });
+    _sstables_need_rewrite.erase(boost::remove_if(_sstables_need_rewrite, sstable_was_rewritten), _sstables_need_rewrite.end());
+
+    _compaction_strategy.notify_completion(old_sstables, {new_sstable});
+    rebuild_sstable_list({new_sstable}, old_sstables);
+}
+
 future<>
 column_family::compact_sstables(sstables::compaction_descriptor descriptor, bool cleanup) {
     if (!descriptor.sstables.size()) {

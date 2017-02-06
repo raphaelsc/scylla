@@ -572,6 +572,8 @@ private:
     void rebuild_sstable_list(const std::vector<sstables::shared_sstable>& new_sstables,
                               const std::vector<sstables::shared_sstable>& sstables_to_remove);
     void rebuild_statistics();
+
+    void replace_ancestors_by(sstables::shared_sstable new_sstable);
 private:
     using virtual_reader_type = std::function<mutation_reader(schema_ptr, const dht::partition_range&, const query::partition_slice&, const io_priority_class&, tracing::trace_state_ptr)>;
     virtual_reader_type _virtual_reader;
