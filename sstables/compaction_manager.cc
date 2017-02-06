@@ -226,6 +226,29 @@ void compaction_manager::deregister_compacting_sstables(column_family* cf, const
     }
 }
 
+static std::vector<sstables::shared_sstable> generations_to_sstables(column_family* cf, const std::unordered_set<int64_t>& generations) {
+    auto all = cf->get_sstables();
+    std::vector<sstables::shared_sstable> sstables;
+    std::copy_if(all->begin(), all->end(), std::back_inserter(sstables), [&generations] (auto& sst) {
+        return generations.count(sst->generation());
+    });
+    return sstables;
+}
+
+void compaction_manager::register_compacting_sstables(column_family* cf, const std::unordered_set<int64_t>& generations) {
+    auto sstables = generations_to_sstables(cf, generations);
+    auto& compacting_set = _compacting_sstables[cf];
+    compacting_set.insert(sstables.begin(), sstables.end());
+}
+
+void compaction_manager::deregister_compacting_sstables(column_family* cf, const std::unordered_set<int64_t>& generations) {
+    auto sstables = generations_to_sstables(cf, generations);
+    auto& compacting_set = _compacting_sstables[cf];
+    for (auto& sst : sstables) {
+        compacting_set.erase(sst);
+    }
+}
+
 // submit_sstable_rewrite() starts a compaction task, much like submit(),
 // But rather than asking a compaction policy what to compact, this function
 // compacts just a single sstable, and writes one new sstable. This operation
