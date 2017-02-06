@@ -698,6 +698,13 @@ public:
 
     const std::vector<nonwrapping_range<bytes_view>>& clustering_components_ranges() const;
 
+    // get sstable open info from a loaded sstable, which can be used to quickly open a sstable
+    // at another shard.
+    future<foreign_sstable_open_info> get_open_info() &;
+    // variant that achieves the same as function above, but only used when you can sacrifice the
+    // sstable object.
+    foreign_sstable_open_info get_open_info() &&;
+
     // Used to mark a sstable for deletion that is not relevant to the current shard.
     // It doesn't mean that the sstable will be deleted, but that the sstable is not
     // relevant to the current shard, thus can be deleted by the deletion manager.
