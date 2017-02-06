@@ -1295,6 +1295,7 @@ future<> update_schema_version_and_announce(distributed<service::storage_proxy>&
 
 class distributed_loader {
 public:
+    static void reshard(distributed<database>& db, sstring ks_name, sstring cf_name);
     static future<> open_sstable(distributed<database>& db, sstables::entry_descriptor comps,
         std::function<future<> (column_family&, sstables::foreign_sstable_open_info)> func);
     static future<> load_new_sstables(distributed<database>& db, sstring ks, sstring cf, std::vector<sstables::entry_descriptor> new_tables);

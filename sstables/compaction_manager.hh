@@ -162,5 +162,6 @@ public:
 
     friend class compacting_sstable_registration;
     friend class compaction_weight_registration;
+    friend class distributed_compacting_sstable_registration;
 };
 
