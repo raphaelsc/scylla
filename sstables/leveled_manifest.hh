@@ -93,13 +93,17 @@ public:
     }
 #endif
 
-    static leveled_manifest create(column_family& cfs, std::vector<sstables::shared_sstable>& sstables, int max_sstable_size_in_mb) {
+    static leveled_manifest create(column_family& cfs, std::vector<sstables::shared_sstable>& sstables, int max_sstable_size_in_mb,
+            bool repair_overlapping_sstables = true) {
         leveled_manifest manifest = leveled_manifest(cfs, max_sstable_size_in_mb);
 
         // ensure all SSTables are in the manifest
         for (auto& sstable : sstables) {
             // unconditionally add a sstable to a list of its level.
             manifest.add(sstable);
+        }
+        if (!repair_overlapping_sstables) {
+            return manifest;
         }
 
         for (auto i = 1U; i < manifest._generations.size(); i++) {
