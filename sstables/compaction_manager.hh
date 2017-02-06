@@ -87,6 +87,9 @@ private:
     // Deregister weight for a column family.
     void deregister_weight(column_family* cf, int weight);
 
+    void register_compacting_sstables(column_family* cf, const std::unordered_set<int64_t>& generations);
+    void deregister_compacting_sstables(column_family* cf, const std::unordered_set<int64_t>& generations);
+
     // If weight of compaction job is taken, it will be trimmed until its new
     // weight is not taken or its size is equal to minimum threshold.
     // Return weight of compaction job.
