@@ -562,12 +562,6 @@ private:
         return (*_sstable_generation)++ * smp::count + engine().cpu_id();
     }
 
-    // inverse of calculate_generation_for_new_table(), used to determine which
-    // shard a sstable should be opened at.
-    static int64_t calculate_shard_from_sstable_generation(int64_t sstable_generation) {
-        return sstable_generation % smp::count;
-    }
-
     // Rebuild existing _sstables with new_sstables added to it and sstables_to_remove removed from it.
     void rebuild_sstable_list(const std::vector<sstables::shared_sstable>& new_sstables,
                               const std::vector<sstables::shared_sstable>& sstables_to_remove);
@@ -590,6 +584,12 @@ private:
     std::chrono::steady_clock::time_point _sstable_writes_disabled_at;
     void do_trigger_compaction();
 public:
+    // inverse of calculate_generation_for_new_table(), used to determine which
+    // shard a sstable should be opened at.
+    static int64_t calculate_shard_from_sstable_generation(int64_t sstable_generation) {
+        return sstable_generation % smp::count;
+    }
+
     bool has_shared_sstables() const {
         return bool(_sstables_need_rewrite.size());
     }
