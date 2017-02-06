@@ -306,6 +306,7 @@ protected:
 public:
     virtual ~compaction_strategy_impl() {}
     virtual compaction_descriptor get_sstables_for_compaction(column_family& cfs, std::vector<sstables::shared_sstable> candidates) = 0;
+    virtual std::vector<resharding_descriptor> get_resharding_jobs(column_family& cf, std::vector<sstables::shared_sstable> candidates);
     virtual void notify_completion(const std::vector<lw_shared_ptr<sstable>>& removed, const std::vector<lw_shared_ptr<sstable>>& added) { }
     virtual compaction_strategy_type type() const = 0;
     virtual bool parallel_compaction() const {
@@ -319,6 +320,24 @@ public:
         return _use_clustering_key_filter;
     }
 };
+
+std::vector<resharding_descriptor>
+compaction_strategy_impl::get_resharding_jobs(column_family& cf, std::vector<sstables::shared_sstable> candidates) {
+    std::vector<resharding_descriptor> jobs;
+    shard_id reshard_at_current = 0;
+
+    logger.debug("Trying to get resharding jobs for {}.{}...", cf.schema()->ks_name(), cf.schema()->cf_name());
+    for (auto& candidate : candidates) {
+        auto shards = candidate->get_shards_for_this_sstable();
+        if (shards.size() == 1) {
+            logger.debug("Skipped sstable of gen {} from {}.{} with {} shards", candidate->generation(), cf.schema()->ks_name(), cf.schema()->cf_name(), shards.size());
+            continue;
+        }
+        auto level = candidate->get_sstable_level();
+        jobs.push_back(resharding_descriptor{{std::move(candidate)}, reshard_at_current++ % smp::count, level});
+    }
+    return jobs;
+}
 
 //
 // Null compaction strategy is the default compaction strategy.
@@ -693,6 +712,8 @@ public:
 
     virtual compaction_descriptor get_sstables_for_compaction(column_family& cfs, std::vector<sstables::shared_sstable> candidates) override;
 
+    virtual std::vector<resharding_descriptor> get_resharding_jobs(column_family& cf, std::vector<shared_sstable> candidates) override;
+
     virtual void notify_completion(const std::vector<lw_shared_ptr<sstable>>& removed, const std::vector<lw_shared_ptr<sstable>>& added) override;
 
     // for each level > 0, get newest sstable and use its last key as last
@@ -732,6 +753,76 @@ compaction_descriptor leveled_compaction_strategy::get_sstables_for_compaction(c
     logger.debug("leveled: Compacting {} out of {} sstables", candidate.sstables.size(), cfs.get_sstables()->size());
 
     return std::move(candidate);
+}
+
+std::vector<resharding_descriptor> leveled_compaction_strategy::get_resharding_jobs(column_family& cf, std::vector<shared_sstable> candidates) {
+    leveled_manifest manifest = leveled_manifest::create(cf, candidates, _max_sstable_size_in_mb, false);
+
+    std::vector<resharding_descriptor> descriptors;
+    shard_id target_shard = 0;
+    auto get_shard = [&target_shard] { return target_shard++ % smp::count; };
+    const schema& s = *cf.schema();
+
+    // Basically, we'll iterate through all levels, and for each, we'll sort the
+    // sstables by first key because there's a need to reshard together adjacent
+    // sstables. We also want that all overlapping sstables are resharded
+    // together, so that's also guaranteed here.
+    // The shard at which the job will run is chosen in a round-robin fashion.
+    for (auto level = 0U; level <= manifest.get_level_count(); level++) {
+        auto& sstables = manifest.get_level(level);
+        sstables.sort([] (auto& i, auto& j) {
+            return i->compare_by_first_key(*j) < 0;
+        });
+
+        // two sstables overlap if their token range overlap as well as their owner shards.
+        // NOTE: sst1 must precede sst2 in token range order.
+        auto overlaps = [&s] (auto& sst1, auto& sst2) {
+            auto sst1_s = sst1->get_shards_for_this_sstable();
+            auto sst2_s = sst2->get_shards_for_this_sstable();
+            boost::range::sort(sst1_s);
+            boost::range::sort(sst2_s);
+            std::vector<unsigned> overlapping_shards;
+            std::set_intersection(sst1_s.begin(), sst1_s.end(), sst2_s.begin(), sst2_s.end(), std::back_inserter(overlapping_shards));
+
+            auto sst2_first = sst2->get_first_decorated_key();
+            auto sst1_last = sst1->get_last_decorated_key();
+            return sst2_first.tri_compare(s, sst1_last) <= 0 && !overlapping_shards.empty();
+        };
+        resharding_descriptor current_descriptor = resharding_descriptor{{}, get_shard(), level};
+
+        for (auto it = sstables.begin(); it != sstables.end(); it++) {
+            bool unshared = (*it)->get_shards_for_this_sstable().size() == 1;
+            // skip unshared sstables at level 0.
+            if (unshared && level == 0U) {
+                continue;
+            }
+
+            bool overlapping = false;
+            if (it != sstables.begin()) {
+                auto previous = std::prev(it);
+                overlapping = overlaps(*previous, *it);
+            }
+            auto next = std::next(it);
+            if (next != sstables.end()) {
+                overlapping |= overlaps(*it, *next);
+            }
+
+            // an unshared sstable that don't overlap with either of its neighbors can be ignored.
+            if (!overlapping && unshared) {
+                continue;
+            }
+            // add an overlapping unshared or a shared sstable.
+            current_descriptor.sstables.push_back(*it);
+
+            // if current sstable doesn't overlap with previous one and current descriptor reached
+            // its target size, let's seal it and start a new one.
+            if ((!overlapping && current_descriptor.sstables.size() == smp::count) || next == sstables.end()) {
+                descriptors.push_back(std::move(current_descriptor));
+                current_descriptor = resharding_descriptor{{}, get_shard(), level};
+            }
+        }
+    }
+    return descriptors;
 }
 
 void leveled_compaction_strategy::notify_completion(const std::vector<lw_shared_ptr<sstable>>& removed, const std::vector<lw_shared_ptr<sstable>>& added) {
@@ -825,6 +916,10 @@ compaction_strategy_type compaction_strategy::type() const {
 
 compaction_descriptor compaction_strategy::get_sstables_for_compaction(column_family& cfs, std::vector<sstables::shared_sstable> candidates) {
     return _compaction_strategy_impl->get_sstables_for_compaction(cfs, std::move(candidates));
+}
+
+std::vector<resharding_descriptor> compaction_strategy::get_resharding_jobs(column_family& cf, std::vector<sstables::shared_sstable> candidates) {
+    return _compaction_strategy_impl->get_resharding_jobs(cf, std::move(candidates));
 }
 
 void compaction_strategy::notify_completion(const std::vector<lw_shared_ptr<sstable>>& removed, const std::vector<lw_shared_ptr<sstable>>& added) {
