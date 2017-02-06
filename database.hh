@@ -812,15 +812,23 @@ public:
         return _compaction_manager;
     }
 
+    // NOTE: These functions aren't exception safe. Prefer run_with_compaction_disabled().
+    future<> disable_compaction() {
+        ++_compaction_disabled;
+        return _compaction_manager.remove(this);
+    }
+    void enable_compaction() {
+        if (--_compaction_disabled == 0) {
+            // we're turning if on again, use function that does not increment
+            // the counter further.
+            do_trigger_compaction();
+        }
+    }
+
     template<typename Func, typename Result = futurize_t<std::result_of_t<Func()>>>
     Result run_with_compaction_disabled(Func && func) {
-        ++_compaction_disabled;
-        return _compaction_manager.remove(this).then(std::forward<Func>(func)).finally([this] {
-            if (--_compaction_disabled == 0) {
-                // we're turning if on again, use function that does not increment
-                // the counter further.
-                do_trigger_compaction();
-            }
+        return disable_compaction().then(std::forward<Func>(func)).finally([this] {
+            enable_compaction();
         });
     }
 
