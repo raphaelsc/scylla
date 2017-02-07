@@ -3417,3 +3417,43 @@ SEASTAR_TEST_CASE(sstable_set_incremental_selector) {
 
     return make_ready_future<>();
 }
+
+SEASTAR_TEST_CASE(sstable_resharding_strategy_tests) {
+    // FIXME: move it to sstable_resharding_test.cc. Unable to do so now because of linking issues
+    // when using sstables::stats_metadata at sstable_resharding_test.cc.
+
+    auto s = make_lw_shared(schema({}, "ks", "cf", {{"p1", utf8_type}}, {}, {}, {}, utf8_type));
+    auto get_sstable = [&] (int64_t gen, sstring first_key, sstring last_key) mutable {
+        auto sst = make_lw_shared<sstable>(s, "", gen, sstables::sstable::version_types::ka, sstables::sstable::format_types::big);
+        stats_metadata stats = {};
+        stats.sstable_level = 1;
+        sstables::test(sst).set_values(std::move(first_key), std::move(last_key), std::move(stats));
+        return sst;
+    };
+
+    auto cm = make_lw_shared<compaction_manager>();
+    auto cl_stats = make_lw_shared<cell_locker_stats>();
+    auto cf = make_lw_shared<column_family>(s, column_family::config(), column_family::no_commitlog(), *cm, *cl_stats);
+
+    auto tokens = token_generation_for_current_shard(2);
+    auto stcs = sstables::make_compaction_strategy(sstables::compaction_strategy_type::size_tiered, s->compaction_strategy_options());
+    auto lcs = sstables::make_compaction_strategy(sstables::compaction_strategy_type::leveled, s->compaction_strategy_options());
+
+    auto sst1 = get_sstable(1, tokens[0].first, tokens[1].first);
+    auto sst2 = get_sstable(2, tokens[1].first, tokens[1].first);
+
+    {
+        // FIXME: sstable_test runs with smp::count == 1, thus we will not be able to stress it more
+        // until we move this test case to sstable_resharding_test.
+        auto descriptors = stcs.get_resharding_jobs(*cf, { sst1, sst2 });
+        BOOST_REQUIRE(descriptors.size() == 0);
+    }
+    {
+        // check that they are resharded together because their overlap both on owners and token range.
+        auto descriptors = lcs.get_resharding_jobs(*cf, { sst1, sst2 });
+        BOOST_REQUIRE(descriptors.size() == 1);
+        BOOST_REQUIRE(descriptors[0].sstables.size() == 2);
+    }
+
+    return make_ready_future<>();
+}
