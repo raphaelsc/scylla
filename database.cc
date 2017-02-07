@@ -826,23 +826,6 @@ void column_family::load_sstable(sstables::shared_sstable& sst, bool reset_level
     add_sstable(sst, std::move(shards));
 }
 
-// load_sstable() wants to start rewriting sstables which are shared between
-// several shards, but we can't start any compaction before all the sstables
-// of this CF were loaded. So call this function to start rewrites, if any.
-void column_family::start_rewrite() {
-    // submit shared sstables in generation order to guarantee that all shards
-    // owning a sstable will agree on its deletion nearly the same time,
-    // therefore, reducing disk space requirements.
-    boost::sort(_sstables_need_rewrite, [] (const sstables::shared_sstable& x, const sstables::shared_sstable& y) {
-        return x->generation() < y->generation();
-    });
-    for (auto sst : _sstables_need_rewrite) {
-        dblog.info("Splitting {} for shard", sst->get_filename());
-        _compaction_manager.submit_sstable_rewrite(this, sst);
-    }
-    _sstables_need_rewrite.clear();
-}
-
 void column_family::update_stats_for_new_sstable(uint64_t disk_space_used_by_sstable, std::vector<unsigned>&& shards_for_the_sstable) {
     assert(!shards_for_the_sstable.empty());
     if (*boost::min_element(shards_for_the_sstable) == engine().cpu_id()) {
@@ -1835,7 +1818,7 @@ future<> distributed_loader::load_new_sstables(distributed<database>& db, sstrin
             });
         };
         return distributed_loader::open_sstable(db, comps, cf_sstable_open);
-    }).then([&db, ks = std::move(ks), cf = std::move(cf)] {
+    }).then([&db, ks, cf] {
         return db.invoke_on_all([ks = std::move(ks), cfname = std::move(cf)] (database& db) {
             auto& cf = db.find_column_family(ks, cfname);
             // atomically load all opened sstables into column family.
@@ -1843,12 +1826,13 @@ future<> distributed_loader::load_new_sstables(distributed<database>& db, sstrin
                 cf.load_sstable(sst, true);
             }
             cf._sstables_opened_but_not_loaded.clear();
-            cf.start_rewrite();
             cf.trigger_compaction();
             // Drop entire cache for this column family because it may be populated
             // with stale data.
             return cf.get_row_cache().clear();
         });
+    }).then([&db, ks, cf] () mutable {
+        distributed_loader::reshard(db, std::move(ks), std::move(cf));
     });
 }
 
