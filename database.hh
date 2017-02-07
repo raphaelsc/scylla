@@ -1279,6 +1279,7 @@ public:
     }
 
     friend class distributed_loader;
+    friend class database_test;
 };
 
 // FIXME: stub

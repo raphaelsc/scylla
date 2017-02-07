@@ -22,6 +22,7 @@
 
 #pragma once
 
+#include "sstables/writer.hh"
 #include "sstables/sstables.hh"
 #include "database.hh"
 #include "schema.hh"
@@ -42,6 +43,14 @@ public:
 
     void add_sstable(lw_shared_ptr<sstables::sstable> sstable) {
         _cf->_sstables->insert(std::move(sstable));
+    }
+
+    static void update_sstables_known_generation(column_family& cf, unsigned generation) {
+        cf.update_sstables_known_generation(generation);
+    }
+
+    static int64_t calculate_shard_from_sstable_generation(int64_t generation) {
+        return column_family::calculate_shard_from_sstable_generation(generation);
     }
 };
 
@@ -146,6 +155,15 @@ public:
 
     void set_values(sstring first_key, sstring last_key, stats_metadata stats) {
         _sst->_components->statistics.contents[metadata_type::Stats] = std::make_unique<stats_metadata>(std::move(stats));
+        _sst->_components->summary.first_key.value = bytes(reinterpret_cast<const signed char*>(first_key.c_str()), first_key.size());
+        _sst->_components->summary.last_key.value = bytes(reinterpret_cast<const signed char*>(last_key.c_str()), last_key.size());
+        _sst->set_first_and_last_keys();
+    }
+
+    void set_values(sstring first_key, sstring last_key) {
+        sstables::stats_metadata stats = {};
+        stats.sstable_level = 0;
+        _sst->_components->statistics.contents[sstables::metadata_type::Stats] = std::make_unique<sstables::stats_metadata>(std::move(stats));
         _sst->_components->summary.first_key.value = bytes(reinterpret_cast<const signed char*>(first_key.c_str()), first_key.size());
         _sst->_components->summary.last_key.value = bytes(reinterpret_cast<const signed char*>(last_key.c_str()), last_key.size());
         _sst->set_first_and_last_keys();
