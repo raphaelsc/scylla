@@ -2413,6 +2413,19 @@ sstable::~sstable() {
         // log and ignore this failure, because on startup we'll again try to
         // clean up unused sstables, and because we'll never reuse the same
         // generation number anyway.
+
+        auto belongs_to_current_shard = [this] () -> bool {
+            auto shards = get_shards_for_this_sstable();
+            return boost::range::find(shards, engine().cpu_id()) != shards.end();
+        };
+
+        // a sstable that was set unshared should never be deleted by a shard
+        // which it doesn't belong to.
+        if (!_shared && !belongs_to_current_shard()) {
+            sstlog.warn("Detected attempt to delete unshared sstable {} in a shard that it doesn't belong to", get_filename());
+            return;
+        }
+
         try {
             delete_atomically({sstable_to_delete(filename(component_type::TOC), _shared)}).handle_exception(
                         [op = background_jobs().start()] (std::exception_ptr eptr) {
@@ -2683,6 +2696,9 @@ sstable::get_shards_for_this_sstable() const {
     while (rpras) {
         shards.insert(rpras->shard);
         rpras = sharder.next(*_schema);
+    }
+    if (shards.empty()) {
+        throw std::runtime_error(sprint("Unable to get shards for sstable {}", get_filename()));
     }
     return boost::copy_range<std::vector<unsigned>>(shards);
 }
