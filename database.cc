@@ -812,6 +812,8 @@ void column_family::load_sstable(sstables::shared_sstable& sst, bool reset_level
         // them to know which tombstones we can drop, and what
         // generation number is free.
         _sstables_need_rewrite.push_back(sst);
+    } else {
+        sst->set_unshared();
     }
     if (reset_level) {
         // When loading a migrated sstable, set level to 0 because
