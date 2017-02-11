@@ -1239,13 +1239,15 @@ future<foreign_sstable_open_info> sstable::get_open_info() & {
     // we need to retrieve shared ptr from shard which created it so as to create another
     // foreign ptr which will go in open info.
     return _components.copy().then([this] (auto components) {
-        return foreign_sstable_open_info{std::move(components), this->get_shards_for_this_sstable(), _data_file.dup(), _index_file.dup()};
+        return foreign_sstable_open_info{std::move(components), this->get_shards_for_this_sstable(), _data_file.dup(), _index_file.dup(),
+            _generation, _version, _format};
     });
 }
 
 foreign_sstable_open_info sstable::get_open_info() && {
     auto shards = get_shards_for_this_sstable();
-    return foreign_sstable_open_info{std::move(_components), std::move(shards), _data_file.dup(), _index_file.dup()};
+    return foreign_sstable_open_info{std::move(_components), std::move(shards), _data_file.dup(), _index_file.dup(),
+        _generation, _version, _format};
 }
 
 static void output_promoted_index_entry(bytes_ostream& promoted_index,
