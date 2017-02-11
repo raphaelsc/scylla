@@ -347,6 +347,7 @@ public:
 void compacting_sstable_writer::consume_new_partition(const dht::decorated_key& dk) {
     auto& info = _c.info();
     if (info.is_stop_requested()) {
+        _c.finish_sstable_writer();
         // Compaction manager will catch this exception and re-schedule the compaction.
         throw compaction_stop_exception(info.ks, info.cf, info.stop_requested);
     }
