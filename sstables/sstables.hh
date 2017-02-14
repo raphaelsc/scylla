@@ -437,7 +437,7 @@ private:
     std::unordered_set<component_type, enum_hash<component_type>> _recognized_components;
     std::vector<sstring> _unrecognized_components;
 
-    foreign_ptr<lw_shared_ptr<shareable_components>> _components = make_foreign(make_lw_shared<shareable_components>());
+    shared_foreign_ptr<lw_shared_ptr<shareable_components>> _components = make_shared_foreign(make_lw_shared<shareable_components>());
     bool _shared = true;  // across shards; safe default
     // NOTE: _collector and _c_stats are used to generation of statistics file
     // when writing a new sstable.
@@ -826,7 +826,7 @@ public:
 // contains data for loading a sstable using components shared by a single shard;
 // can be moved across shards
 struct foreign_sstable_open_info {
-    foreign_ptr<lw_shared_ptr<sstable::shareable_components>> components;
+    shared_foreign_ptr<lw_shared_ptr<sstable::shareable_components>> components;
     std::vector<shard_id> owners;
     seastar::file_handle data;
     seastar::file_handle index;

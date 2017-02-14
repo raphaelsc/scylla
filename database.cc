@@ -1527,7 +1527,7 @@ inline bool column_family::manifest_json_filter(const sstring& fname) {
 template <typename Service, typename PtrType, typename Func>
 static future<> invoke_all_with_ptr(distributed<Service>& s, PtrType ptr, Func&& func) {
     return parallel_for_each(smp::all_cpus(), [&s, &func, ptr] (unsigned id) {
-        return s.invoke_on(id, [func, foreign = make_foreign(ptr)] (Service& s) mutable {
+        return s.invoke_on(id, [func, foreign = make_shared_foreign(ptr)] (Service& s) mutable {
             return func(s, std::move(foreign));
         });
     });
