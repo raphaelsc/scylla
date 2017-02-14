@@ -1236,12 +1236,14 @@ future<sstable_open_info> sstable::load_shared_components(const schema_ptr& s, s
 }
 
 foreign_sstable_open_info sstable::get_open_info() & {
-    return foreign_sstable_open_info{_components, get_shards_for_this_sstable(), _data_file.dup(), _index_file.dup()};
+    return foreign_sstable_open_info{_components, get_shards_for_this_sstable(), _data_file.dup(), _index_file.dup(),
+        _generation, _version, _format};
 }
 
 foreign_sstable_open_info sstable::get_open_info() && {
     auto shards = get_shards_for_this_sstable();
-    return foreign_sstable_open_info{std::move(_components), std::move(shards), _data_file.dup(), _index_file.dup()};
+    return foreign_sstable_open_info{std::move(_components), std::move(shards), _data_file.dup(), _index_file.dup(),
+        _generation, _version, _format};
 }
 
 static void output_promoted_index_entry(bytes_ostream& promoted_index,
