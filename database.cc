@@ -751,7 +751,7 @@ void column_family::load_sstable(sstables::shared_sstable& sst, bool reset_level
         // the sstables belonging to this CF, because we need all of
         // them to know which tombstones we can drop, and what
         // generation number is free.
-        _sstables_need_rewrite.insert(sst);
+        _sstables_need_rewrite.emplace(sst->generation(), sst);
     }
     if (reset_level) {
         // When loading a migrated sstable, set level to 0 because
@@ -771,7 +771,7 @@ void column_family::start_rewrite() {
     // submit shared sstables in generation order to guarantee that all shards
     // owning a sstable will agree on its deletion nearly the same time,
     // therefore, reducing disk space requirements.
-    auto sstables_need_rewrite = boost::copy_range<std::vector<sstables::shared_sstable>>(_sstables_need_rewrite);
+    auto sstables_need_rewrite = boost::copy_range<std::vector<sstables::shared_sstable>>(_sstables_need_rewrite | boost::adaptors::map_values);
     boost::sort(sstables_need_rewrite, [] (const sstables::shared_sstable& x, const sstables::shared_sstable& y) {
         return x->generation() < y->generation();
     });
@@ -1288,6 +1288,19 @@ column_family::rebuild_sstable_list(const std::vector<sstables::shared_sstable>&
     });
 }
 
+void column_family::replace_ancestors_by(sstables::shared_sstable new_sstable) {
+    std::vector<sstables::shared_sstable> old_sstables;
+    for (auto& ancestor : new_sstable->ancestors()) {
+        auto it = _sstables_need_rewrite.find(ancestor);
+        if (it != _sstables_need_rewrite.end()) {
+            old_sstables.push_back(it->second);
+        }
+        _sstables_need_rewrite.erase(it);
+    }
+    _compaction_strategy.notify_completion(old_sstables, {new_sstable});
+    rebuild_sstable_list({new_sstable}, old_sstables);
+}
+
 future<>
 column_family::compact_sstables(sstables::compaction_descriptor descriptor, bool cleanup) {
     if (!descriptor.sstables.size()) {
@@ -1439,7 +1452,7 @@ std::vector<sstables::shared_sstable> column_family::select_sstables(const dht::
 
 std::vector<sstables::shared_sstable> column_family::candidates_for_compaction() const {
     return boost::copy_range<std::vector<sstables::shared_sstable>>(*get_sstables()
-        | boost::adaptors::filtered([this] (auto& sst) { return !_sstables_need_rewrite.count(sst); }));
+        | boost::adaptors::filtered([this] (auto& sst) { return !_sstables_need_rewrite.count(sst->generation()); }));
 }
 
 // Gets the list of all sstables in the column family, including ones that are
