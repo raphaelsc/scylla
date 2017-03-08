@@ -578,6 +578,8 @@ private:
     void rebuild_sstable_list(const std::vector<sstables::shared_sstable>& new_sstables,
                               const std::vector<sstables::shared_sstable>& sstables_to_remove);
     void rebuild_statistics();
+
+    void replace_ancestors_by(sstables::shared_sstable new_sstable);
 private:
     mutation_source_opt _virtual_reader;
     // Creates a mutation reader which covers sstables.
