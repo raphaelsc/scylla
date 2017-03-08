@@ -506,7 +506,7 @@ private:
     // them (split the data belonging to this shard to a separate sstable),
     // but for correct compaction we need to start the compaction only after
     // reading all sstables.
-    std::unordered_set<sstables::shared_sstable> _sstables_need_rewrite;
+    std::unordered_map<uint64_t, sstables::shared_sstable> _sstables_need_rewrite;
     // Control background fibers waiting for sstables to be deleted
     seastar::gate _sstable_deletion_gate;
     // There are situations in which we need to stop writing sstables. Flushers will take
@@ -577,6 +577,8 @@ private:
     void rebuild_sstable_list(const std::vector<sstables::shared_sstable>& new_sstables,
                               const std::vector<sstables::shared_sstable>& sstables_to_remove);
     void rebuild_statistics();
+
+    void replace_ancestors_needed_rewrite(std::vector<sstables::shared_sstable> new_sstables);
 private:
     mutation_source_opt _virtual_reader;
     // Creates a mutation reader which covers sstables.
