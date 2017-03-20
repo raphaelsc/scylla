@@ -93,6 +93,7 @@ namespace sstables {
 
 class sstable;
 class entry_descriptor;
+class compaction;
 }
 
 namespace db {
@@ -898,6 +899,7 @@ public:
     friend class column_family_test;
 
     friend class distributed_loader;
+    friend class sstables::compaction;
 };
 
 class user_types_metadata {
