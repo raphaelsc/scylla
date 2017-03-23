@@ -102,11 +102,6 @@ public:
             manifest.add(sstable);
         }
 
-        for (auto i = 1U; i < manifest._generations.size(); i++) {
-            // send overlapping sstables (with level > 0) to level 0, if any.
-            manifest.repair_overlapping_sstables(i);
-        }
-
         return manifest;
     }
 
@@ -118,39 +113,6 @@ public:
         }
         logger.debug("Adding {} to L{}", sstable->get_filename(), level);
         _generations[level].push_back(sstable);
-    }
-
-    void repair_overlapping_sstables(int level) {
-        const sstables::sstable *previous = nullptr;
-        const schema& s = *_schema;
-
-        _generations[level].sort([&s] (auto& i, auto& j) {
-            return i->compare_by_first_key(*j) < 0;
-        });
-
-        std::vector<sstables::shared_sstable> out_of_order_sstables;
-
-        for (auto& current : _generations[level]) {
-            auto current_first = current->get_first_decorated_key();
-
-            if (previous != nullptr && current_first.tri_compare(s, previous->get_last_decorated_key()) <= 0) {
-
-                logger.warn("At level {}, {} [{}, {}] overlaps {} [{}, {}]. This could be caused by the fact that you have dropped " \
-                    "sstables from another node into the data directory. Sending back to L0.",
-                    level, previous->get_filename(), previous->get_first_partition_key(), previous->get_last_partition_key(),
-                    current->get_filename(), current->get_first_partition_key(), current->get_last_partition_key());
-
-                out_of_order_sstables.push_back(current);
-            } else {
-                previous = &*current;
-            }
-        }
-
-        if (!out_of_order_sstables.empty()) {
-            for (auto& sstable : out_of_order_sstables) {
-                send_back_to_L0(sstable);
-            }
-        }
     }
 
     /**
