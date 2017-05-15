@@ -101,19 +101,37 @@ future<> await_background_jobs_on_all_shards() {
 }
 
 class random_access_reader {
-    input_stream<char> _in;
+    stdx::optional<input_stream<char>> _in;
+    stdx::optional<promise<>> _done;
+    unsigned _close_in_progress = 0;
 protected:
     virtual input_stream<char> open_at(uint64_t pos) = 0;
 public:
     future<temporary_buffer<char>> read_exactly(size_t n) {
-        return _in.read_exactly(n);
+        return _in->read_exactly(n);
     }
     void seek(uint64_t pos) {
+        if (_in) {
+            auto f = _in->close();
+            _close_in_progress++;
+            f.finally([in = std::move(*_in), this] {
+                --_close_in_progress;
+                if (_done && !_close_in_progress) {
+                    _done->set_value();
+                }
+            });
+        }
         _in = open_at(pos);
     }
-    bool eof() { return _in.eof(); }
+    bool eof() { return _in->eof(); }
     virtual future<> close() {
-        return _in.close();
+        _done.emplace();
+        if (!_close_in_progress) {
+            _done->set_value();
+        }
+        return _done->get_future().then([this] {
+            return _in->close();
+        });
     }
     virtual ~random_access_reader() { }
 };
