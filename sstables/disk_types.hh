@@ -64,6 +64,11 @@ struct disk_hash {
     std::unordered_map<Key, Value, std::hash<Key>> map;
 };
 
+template <typename Size, typename Key, typename Value>
+struct disk_tree {
+    std::map<Key, Value> map;
+};
+
 template <typename TagType, TagType Tag, typename T>
 struct disk_tagged_union_member {
     // stored as: tag, value-size-on-disk, value

@@ -468,8 +468,10 @@ inline void write(file_writer& out, const disk_array<Size, Members>& arr) {
     write(out, arr.elements);
 }
 
-template <typename Size, typename Key, typename Value>
-future<> parse(random_access_reader& in, Size& len, std::unordered_map<Key, Value>& map) {
+template <typename Size, template<class, class...> class MapType, typename Key, typename Value>
+typename std::enable_if_t<std::is_same<MapType<Key, Value>, std::unordered_map<Key, Value>>::value ||
+    std::is_same<MapType<Key, Value>, std::map<Key, Value>>::value, future<>>
+parse(random_access_reader& in, Size& len, MapType<Key, Value>& map) {
     return do_with(Size(), [&in, len, &map] (Size& count) {
         auto eos = [len, &count] { return len == count++; };
         return do_until(eos, [len, &in, &map] {
@@ -496,8 +498,19 @@ future<> parse(random_access_reader& in, disk_hash<Size, Key, Value>& h) {
     });
 }
 
-template <typename Key, typename Value>
-inline void write(file_writer& out, const std::unordered_map<Key, Value>& map) {
+template <typename Size, typename Key, typename Value>
+future<> parse(random_access_reader& in, disk_tree<Size, Key, Value>& h) {
+    auto w = std::make_unique<Size>();
+    auto f = parse(in, *w);
+    return f.then([&in, &h, w = std::move(w)] {
+        return parse(in, *w, h.map);
+    });
+}
+
+template <template<class, class...> class MapType, typename Key, typename Value>
+inline typename std::enable_if_t<std::is_same<MapType<Key, Value>, std::unordered_map<Key, Value>>::value ||
+    std::is_same<MapType<Key, Value>, std::map<Key, Value>>::value, void>
+write(file_writer& out, const MapType<Key, Value>& map) {
     for (auto& val: map) {
         write(out, val.first, val.second);
     };
@@ -505,6 +518,14 @@ inline void write(file_writer& out, const std::unordered_map<Key, Value>& map) {
 
 template <typename Size, typename Key, typename Value>
 inline void write(file_writer& out, const disk_hash<Size, Key, Value>& h) {
+    Size len = 0;
+    check_truncate_and_assign(len, h.map.size());
+    write(out, len);
+    write(out, h.map);
+}
+
+template <typename Size, typename Key, typename Value>
+inline void write(file_writer& out, const disk_tree<Size, Key, Value>& h) {
     Size len = 0;
     check_truncate_and_assign(len, h.map.size());
     write(out, len);
