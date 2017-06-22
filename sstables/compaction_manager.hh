@@ -82,6 +82,12 @@ private:
     semaphore _major_compaction_sem{1};
     // Prevents column family from running major and minor compaction at same time.
     std::unordered_map<column_family*, rwlock> _compaction_locks;
+
+    timer<lowres_clock> _compaction_submission_timer;
+    // value in seconds for manager to submit all registered column families for
+    // regular compaction. Submission is a NO-OP when there's nothing to do, so
+    // it's fine to call it regularly.
+    static constexpr size_t periodic_compaction_submission_interval = 3600;
 private:
     future<> task_stop(lw_shared_ptr<task> task);
 

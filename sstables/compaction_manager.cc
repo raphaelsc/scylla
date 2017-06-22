@@ -344,6 +344,14 @@ void compaction_manager::register_metrics() {
 void compaction_manager::start() {
     _stopped = false;
     register_metrics();
+
+    // periodically submit for compaction registered cfs
+    _compaction_submission_timer.set_callback([this] {
+        for (auto& e: _compaction_locks) {
+            submit(e.first);
+        }
+    });
+    _compaction_submission_timer.arm(gc_clock::duration(periodic_compaction_submission_interval));
 }
 
 future<> compaction_manager::stop() {
@@ -367,6 +375,7 @@ future<> compaction_manager::stop() {
         });
     }).then([this] {
         _weight_tracker.clear();
+        _compaction_submission_timer.cancel();
         cmlog.info("Stopped");
         return make_ready_future<>();
     });
