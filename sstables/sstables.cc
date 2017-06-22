@@ -811,11 +811,43 @@ inline void write(file_writer& out, const utils::estimated_histogram& eh) {
 }
 
 future<> parse(random_access_reader& in, utils::streaming_histogram& sh) {
-    auto bin = std::make_unique<disk_tree<uint32_t, double, uint64_t>>();
-    auto f = parse(in, sh.max_bin_size, *bin);
-    return f.then([&sh, bin = std::move(bin)] {
-        sh.bin = std::move(bin->map);
-        return make_ready_future<>();
+    auto len = std::make_unique<uint32_t>();
+
+    auto f = parse(in, sh.max_bin_size, *len);
+    return f.then([&in, &sh, len = std::move(len)] {
+        uint32_t length = *len;
+
+        if (!length) {
+            return make_ready_future<>();
+        }
+        if (length > sh.max_bin_size) {
+            throw malformed_sstable_exception("Streaming histogram with more entries than allowed. Can't continue!");
+        }
+
+        auto type_size = sizeof(uint64_t) + sizeof(double);
+        return in.read_exactly(length * type_size).then([&sh, length, type_size] (auto buf) {
+            check_buf_size(buf, length * type_size);
+
+            // Find bad histogram which incorrectly had elements merged due to use
+            // of unordered map. The keys will be unordered. Histogram which size is
+            // less than max allowed will be correct because no entries needed to be
+            // merged, so we can avoid discarding those.
+            // look for commit with title 'streaming_histogram: fix update' for more details.
+            bool check_key_order = length == sh.max_bin_size;
+            auto *nr = reinterpret_cast<const net::packed<uint64_t> *>(buf.get());
+            auto last_key = std::numeric_limits<double>::min();
+            for (size_t i = 0; i < length; ++i) {
+                auto key = convert<double>(net::ntoh(*nr++));
+                uint64_t value = net::ntoh(*nr++);
+                if (check_key_order && key < last_key) {
+                    sh.bin.clear();
+                    break;
+                }
+                sh.bin.emplace(key, value);
+                last_key = key;
+            }
+            return make_ready_future<>();
+        });
     });
 }
 
