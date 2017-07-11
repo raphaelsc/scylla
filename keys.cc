@@ -1,4 +1,4 @@
-/*
+/*test
  * Copyright (C) 2015 ScyllaDB
  */
 
