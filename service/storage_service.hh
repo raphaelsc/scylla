@@ -127,6 +127,7 @@ private:
     bool _force_remove_completion = false;
     bool _ms_stopped = false;
     bool _stream_manager_stopped = false;
+    bool _sstable_data_integrity_check = false;
 public:
     storage_service(distributed<database>& db);
     void isolate_on_error();
@@ -2241,6 +2242,14 @@ public:
 
     bool cluster_supports_digest_multipartition_reads() const {
         return bool(_digest_multipartition_read_feature);
+    }
+
+    bool sstable_data_integrity_check() const {
+        return _sstable_data_integrity_check;
+    }
+
+    void set_sstable_data_integrity_check(bool enabled) {
+        _sstable_data_integrity_check = enabled;
     }
 };
 

@@ -2095,6 +2095,42 @@
                ]
             }
          ]
+      },
+      {
+         "path":"/storage_service/sstable_data_integrity_check",
+         "operations":[
+            {
+               "method":"GET",
+               "summary":"Return true if sstable data integrity check is enabled",
+               "type":"boolean",
+               "nickname":"get_sstable_data_integrity_check",
+               "produces":[
+                  "application/json"
+               ],
+               "parameters":[
+
+               ]
+            },
+            {
+               "method":"POST",
+               "summary":"Set sstable data integrity check status",
+               "type":"void",
+               "nickname":"set_sstable_data_integrity_check",
+               "produces":[
+                  "application/json"
+               ],
+               "parameters":[
+                  {
+                     "name":"enable",
+                     "description":"Set to true to enable sstable data integrity check",
+                     "required":true,
+                     "allowMultiple":false,
+                     "type":"boolean",
+                     "paramType":"query"
+                  }
+               ]
+            }
+         ]
       }
    ],
    "models":{

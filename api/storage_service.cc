@@ -836,6 +836,19 @@ void set_storage_service(http_context& ctx, routes& r) {
             return make_ready_future<json::json_return_type>(map_to_key_value(ownership, res));
         });
     });
+
+    ss::set_sstable_data_integrity_check.set(r, [](std::unique_ptr<request> req)  {
+        auto enable = strcasecmp(req->get_query_param("enable").c_str(), "true") == 0;
+        return service::get_storage_service().invoke_on_all([enable] (auto& ss) {
+            ss.set_sstable_data_integrity_check(enable);
+        }).then([] {
+            return make_ready_future<json::json_return_type>(json_void());
+        });
+    });
+
+    ss::get_sstable_data_integrity_check.set(r, [](std::unique_ptr<request> req)  {
+        return make_ready_future<json::json_return_type>(service::get_local_storage_service().sstable_data_integrity_check());
+    });
 }
 
 }
