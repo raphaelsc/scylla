@@ -68,6 +68,8 @@ namespace sstables {
 
 logging::logger sstlog("sstable");
 
+static const db::config& get_config();
+
 seastar::shared_ptr<write_monitor> default_write_monitor() {
     static thread_local seastar::shared_ptr<write_monitor> monitor = seastar::make_shared<noop_write_monitor>();
     return monitor;
@@ -1875,7 +1877,6 @@ static void seal_statistics(statistics& s, metadata_collector& collector,
 
 void components_writer::maybe_add_summary_entry(const dht::token& token, bytes_view key) {
     static constexpr size_t target_index_interval_size = 65536;
-    static constexpr size_t summary_byte_cost = 2000; // TODO: use configuration file for it.
 
     auto& s = _sst._components->summary;
     auto min_index_interval = s.header.min_index_interval;
@@ -1892,7 +1893,7 @@ void components_writer::maybe_add_summary_entry(const dht::token& token, bytes_v
     if (++_keys_in_current_summary_entry == min_index_interval || !_next_data_offset_to_write_summary ||
             (index_size_for_current_entry >= target_index_interval_size && data_offset >= _next_data_offset_to_write_summary)) {
         _keys_in_current_summary_entry = 0;
-        _next_data_offset_to_write_summary += summary_byte_cost * key.size();
+        _next_data_offset_to_write_summary += _summary_byte_cost * key.size();
         s.entries.push_back({ token, bytes(key.data(), key.size()), _index.offset() });
     }
 }
@@ -1943,6 +1944,9 @@ components_writer::components_writer(sstable& sst, const schema& s, file_writer&
     _sst._pi_write.desired_block_size = cfg.promoted_index_block_size.value_or(get_config().column_index_size_in_kb() * 1024);
 
     prepare_summary(_sst._components->summary, estimated_partitions, _schema.min_index_interval());
+
+    auto summary_ratio = get_config().sstable_summary_ratio();
+    _summary_byte_cost = summary_ratio ? (1 / summary_ratio) : _summary_byte_cost;
 
     // FIXME: we may need to set repaired_at stats at this point.
 }
