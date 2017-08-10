@@ -797,7 +797,10 @@ class components_writer {
     // Remember first and last keys, which we need for the summary file.
     stdx::optional<key> _first_key, _last_key;
     stdx::optional<key> _partition_key;
+    uint64_t _next_data_offset_to_write_summary = 0;
+    size_t _keys_in_current_summary_entry = 0;
 private:
+    void maybe_add_summary_entry(const dht::token& token, bytes_view key);
     uint64_t get_offset() const;
     file_writer index_file_writer(sstable& sst, const io_priority_class& pc);
     void ensure_tombstone_is_written() {
@@ -810,7 +813,9 @@ public:
     ~components_writer();
     components_writer(components_writer&& o) : _sst(o._sst), _schema(o._schema), _out(o._out), _index(std::move(o._index)),
             _index_needs_close(o._index_needs_close), _max_sstable_size(o._max_sstable_size), _tombstone_written(o._tombstone_written),
-            _first_key(std::move(o._first_key)), _last_key(std::move(o._last_key)), _partition_key(std::move(o._partition_key)) {
+            _first_key(std::move(o._first_key)), _last_key(std::move(o._last_key)), _partition_key(std::move(o._partition_key)),
+            _next_data_offset_to_write_summary(o._next_data_offset_to_write_summary),
+            _keys_in_current_summary_entry(o._keys_in_current_summary_entry) {
         o._index_needs_close = false;
     }
 

@@ -1873,6 +1873,30 @@ static void seal_statistics(statistics& s, metadata_collector& collector,
     populate_statistics_offsets(s);
 }
 
+void components_writer::maybe_add_summary_entry(const dht::token& token, bytes_view key) {
+    static constexpr size_t target_index_interval_size = 65536;
+    static constexpr size_t summary_byte_cost = 2000; // TODO: use configuration file for it.
+
+    auto& s = _sst._components->summary;
+    auto min_index_interval = s.header.min_index_interval;
+    // if compression is enabled, it's the offset in compressed data file
+    auto data_offset = get_offset();
+    auto index_size_for_current_entry = _index.offset() - (s.entries.size() ? s.entries.back().position : 0);
+
+    // generates a summary entry after 128 index entries, or 64 KB of index data, whichever comes *first*.
+    // For 64k boundary condition, there's also a ratio of summary and data that must be respected.
+    // target_index_interval_size is very desired because there's no need to generate 1 summary entry for
+    // each partition with a huge blob that barely takes any index space.
+    // TODO: possibly get rid of min_index_interval condition by getting rid of quantity (calculated using
+    // downsampling) in index_reader.
+    if (++_keys_in_current_summary_entry == min_index_interval || !_next_data_offset_to_write_summary ||
+            (index_size_for_current_entry >= target_index_interval_size && data_offset >= _next_data_offset_to_write_summary)) {
+        _keys_in_current_summary_entry = 0;
+        _next_data_offset_to_write_summary += summary_byte_cost * key.size();
+        s.entries.push_back({ token, bytes(key.data(), key.size()), _index.offset() });
+    }
+}
+
 // Returns offset into data component.
 uint64_t components_writer::get_offset() const {
     if (_sst.has_component(sstable::component_type::CompressionInfo)) {
@@ -1929,7 +1953,7 @@ void components_writer::consume_new_partition(const dht::decorated_key& dk) {
 
     _partition_key = key::from_partition_key(_schema, dk.key());
 
-    maybe_add_summary_entry(_sst._components->summary, dk.token(), bytes_view(*_partition_key), _index.offset());
+    maybe_add_summary_entry(dk.token(), bytes_view(*_partition_key));
     _sst._components->filter->add(bytes_view(*_partition_key));
     _sst._collector.add_key(bytes_view(*_partition_key));
 
