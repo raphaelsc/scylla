@@ -777,6 +777,8 @@ public:
     val(virtual_dirty_soft_limit, double, 0.6, Used, "Soft limit of virtual dirty memory expressed as a portion of the hard limit") \
     val(sstable_summary_ratio, double, 0.0005, Used, "Enforces that 1 byte of summary is written for every N (2000 by default) " \
         "bytes written to data file. Value must be between 0 and 1.") \
+    val(enable_sstable_data_integrity_check, bool, false, Used, "Enable interposer which checks for integrity of every sstable write." \
+        " Performance is affected to some extent as a result. Useful to help debugging problems that may arise from lower-level layers.") \
     /* done! */
 
 #define _make_value_member(name, type, deflt, status, desc, ...)    \
