@@ -60,6 +60,7 @@ public:
         ~incremental_selector();
         incremental_selector(std::unique_ptr<incremental_selector_impl> impl);
         incremental_selector(incremental_selector&&) noexcept;
+        incremental_selector& operator=(incremental_selector&&) noexcept;
 
         struct selection {
             const std::vector<shared_sstable>& sstables;

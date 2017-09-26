@@ -138,6 +138,9 @@ sstable_set::incremental_selector::~incremental_selector() = default;
 
 sstable_set::incremental_selector::incremental_selector(sstable_set::incremental_selector&&) noexcept = default;
 
+sstable_set::incremental_selector&
+sstable_set::incremental_selector::operator=(sstable_set::incremental_selector&&) noexcept = default;
+
 sstable_set::incremental_selector::selection
 sstable_set::incremental_selector::select(const dht::token& t) const {
     if (!_current_token_range || !_current_token_range->contains(t, dht::token_comparator())) {
