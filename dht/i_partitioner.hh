@@ -399,6 +399,14 @@ public:
         return { maximum_token(), token_bound::end };
     }
 
+    bool is_min() const {
+        return _token.is_minimum() && _token_bound == token_bound::start && !_key;
+    }
+
+    bool is_max() const {
+        return _token.is_maximum() && _token_bound == token_bound::end && !_key;
+    }
+
     static ring_position starting_at(dht::token token) {
         return { std::move(token), token_bound::start };
     }
