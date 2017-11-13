@@ -164,8 +164,9 @@ public:
 
     // Return the most interesting bucket for a set of sstables
     static std::vector<sstables::shared_sstable>
-    most_interesting_bucket(const std::vector<sstables::shared_sstable>& candidates, int min_threshold, int max_threshold) {
-        size_tiered_compaction_strategy cs;
+    most_interesting_bucket(const std::vector<sstables::shared_sstable>& candidates, int min_threshold, int max_threshold,
+            size_tiered_compaction_strategy_options options = {}) {
+        size_tiered_compaction_strategy cs(options);
 
         auto buckets = cs.get_buckets(candidates);
 
