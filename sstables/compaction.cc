@@ -555,12 +555,12 @@ get_fully_expired_sstables(column_family& cf, const std::vector<sstables::shared
     int64_t min_timestamp = std::numeric_limits<int64_t>::max();
 
     auto gc_before_value = gc_before.time_since_epoch().count();
-    auto can_gc = [gc_before_value = gc_before.time_since_epoch().count()] (auto deletion_time) -> bool {
-        return deletion_time < gc_before_value;
+    auto can_gc = [gc_before_value = gc_before.time_since_epoch().count()] (auto& sst) -> bool {
+        return sst->has_correct_max_deletion_time() && sst->get_stats_metadata().max_local_deletion_time < gc_before_value;
     };
 
     for (auto& sstable : overlapping) {
-        if (!can_gc(sstable->get_stats_metadata().max_local_deletion_time)) {
+        if (!can_gc(sstable)) {
             min_timestamp = std::min(min_timestamp, sstable->get_stats_metadata().min_timestamp);
         }
     }
@@ -580,7 +580,7 @@ get_fully_expired_sstables(column_family& cf, const std::vector<sstables::shared
         // A fully expired sstable which has an ancestor undeleted shouldn't be compacted because
         // expired data won't be purged because undeleted sstables are taken into account when
         // calculating max purgeable timestamp, and not doing it could lead to a compaction loop.
-        if (can_gc(candidate->get_stats_metadata().max_local_deletion_time) && !has_undeleted_ancestor(candidate)) {
+        if (can_gc(candidate) && !has_undeleted_ancestor(candidate)) {
             clogger.debug("Adding candidate of generation {} to list of possibly expired sstables", candidate->generation());
             candidates.insert(candidate);
         } else {
