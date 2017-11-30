@@ -701,6 +701,11 @@ public:
         return _schema->is_compound() || !has_scylla_component() || _components->scylla_metadata->has_feature(sstable_feature::NonCompoundRangeTombstones);
     }
 
+    // Commit cc6c3832496159b1 fixes the max deletion time stat.
+    bool has_correct_max_deletion_time() const {
+        return has_scylla_component();
+    }
+
     bool filter_has_key(const key& key) {
         return _components->filter->is_present(bytes_view(key));
     }
