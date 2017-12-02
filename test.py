@@ -94,6 +94,7 @@ boost_tests = [
     'big_decimal_test',
     'aggregate_fcts_test',
     'role_manager_test',
+    'sstable_resharding_test',
 ]
 
 other_tests = [
