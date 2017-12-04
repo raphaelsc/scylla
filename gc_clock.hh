@@ -27,6 +27,7 @@
 
 #include <chrono>
 #include <experimental/optional>
+#include <iomanip>
 
 // FIXME: wraps around in 2038
 class gc_clock final {
@@ -49,6 +50,14 @@ public:
 
     static time_point now() {
         return time_point(std::chrono::duration_cast<duration>(base::now().time_since_epoch())) + get_clocks_offset();
+    }
+
+   friend inline std::ostream&
+    operator<<(std::ostream& os, gc_clock::time_point tp) {
+        auto sec = std::chrono::duration_cast<std::chrono::seconds>(tp.time_since_epoch()).count();
+        std::ostream tmp(os.rdbuf());
+        tmp << std::setw(12) << sec;
+        return os;
     }
 };
 
