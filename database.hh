@@ -849,7 +849,19 @@ using sstable_reader_factory_type = std::function<mutation_reader(sstables::shar
     streamed_mutation::forwarding fwd,
     mutation_reader::forwarding fwd_mr)>;
 
+// Range sstable reader that filters out mutation that doesn't belong to current shard.
 mutation_reader make_range_sstable_reader(schema_ptr s,
+        lw_shared_ptr<sstables::sstable_set> sstables,
+        const dht::partition_range& pr,
+        const query::partition_slice& slice,
+        const io_priority_class& pc,
+        reader_resource_tracker resource_tracker,
+        tracing::trace_state_ptr trace_state,
+        streamed_mutation::forwarding fwd,
+        mutation_reader::forwarding fwd_mr);
+
+// Range sstable reader that never filter out mutation.
+mutation_reader make_non_filtering_range_sstable_reader(schema_ptr s,
         lw_shared_ptr<sstables::sstable_set> sstables,
         const dht::partition_range& pr,
         const query::partition_slice& slice,
