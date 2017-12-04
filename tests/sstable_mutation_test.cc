@@ -312,7 +312,7 @@ future<> test_range_reads(const dht::token& min, const dht::token& max, std::vec
         auto stop = make_lw_shared<bool>(false);
         return do_with(dht::partition_range::make(dht::ring_position::starting_at(min),
                                                               dht::ring_position::ending_at(max)), [&, sstp, s] (auto& pr) {
-            auto mutations = sstp->read_range_rows(s, pr);
+            auto mutations = sstp->read_range_rows(pr);
             return do_until([stop] { return *stop; },
                 // Note: The data in the following lambda, including
                 // "mutations", continues to live until after the last

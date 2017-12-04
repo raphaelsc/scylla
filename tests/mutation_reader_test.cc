@@ -422,7 +422,6 @@ SEASTAR_TEST_CASE(combined_mutation_reader_test) {
             sstables->insert(table);
 
             sstable_mutation_readers.emplace_back(table->read_range_rows(
-                    s.schema(),
                     query::full_partition_range,
                     s.schema()->full_slice(),
                     seastar::default_priority_class(),
@@ -518,7 +517,6 @@ class tracking_reader : public mutation_reader::impl {
 public:
     tracking_reader(semaphore* resources_sem, schema_ptr schema, lw_shared_ptr<sstables::sstable> sst)
         : _reader(sst->read_range_rows(
-                        schema,
                         query::full_partition_range,
                         schema->full_slice(),
                         default_priority_class(),
