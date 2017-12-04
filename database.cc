@@ -240,6 +240,11 @@ bool belongs_to_current_shard(const streamed_mutation& m) {
     return dht::shard_of(m.decorated_key().token()) == engine().cpu_id();
 }
 
+static
+bool sm_belongs_to_current_shard(const streamed_mutation& m) {
+    return belongs_to_current_shard(m);
+}
+
 // Stores ranges for all components of the same clustering key, index 0 referring to component
 // range 0, and so on.
 using ck_filter_clustering_key_components = std::vector<nonwrapping_range<bytes_view>>;
@@ -387,14 +392,11 @@ class incremental_reader_selector : public reader_selector {
     mutation_reader::forwarding _fwd_mr;
     sstables::sstable_set::incremental_selector _selector;
     std::unordered_set<sstables::shared_sstable> _read_sstables;
+    sstable_reader_factory_type _fn;
 
     mutation_reader create_reader(sstables::shared_sstable sst) {
         tracing::trace(_trace_state, "Reading partition range {} from sstable {}", *_pr, seastar::value_of([&sst] { return sst->get_filename(); }));
-        mutation_reader reader = sst->read_range_rows(*_pr, _slice, _pc, _resource_tracker, _fwd, _fwd_mr);
-        if (sst->is_shared()) {
-            reader = make_filtering_reader(std::move(reader), belongs_to_current_shard);
-        }
-        return std::move(reader);
+        return _fn(sst, *_pr, _slice, _pc, _resource_tracker, _fwd, _fwd_mr);
     }
 
 public:
@@ -406,7 +408,8 @@ public:
             reader_resource_tracker resource_tracker,
             tracing::trace_state_ptr trace_state,
             streamed_mutation::forwarding fwd,
-            mutation_reader::forwarding fwd_mr)
+            mutation_reader::forwarding fwd_mr,
+            sstable_reader_factory_type fn)
         : _s(s)
         , _pr(&pr)
         , _sstables(std::move(sstables))
@@ -416,7 +419,8 @@ public:
         , _trace_state(std::move(trace_state))
         , _fwd(fwd)
         , _fwd_mr(fwd_mr)
-        , _selector(_sstables->make_incremental_selector()) {
+        , _selector(_sstables->make_incremental_selector())
+        , _fn(std::move(fn)) {
         _selector_position = _pr->start() ? _pr->start()->value().token() : dht::minimum_token();
 
         dblog.trace("incremental_reader_selector {}: created for range: {} with {} sstables",
@@ -4263,6 +4267,21 @@ mutation_reader make_range_sstable_reader(schema_ptr s,
         streamed_mutation::forwarding fwd,
         mutation_reader::forwarding fwd_mr)
 {
+    auto reader_factory_fn = [] (sstables::shared_sstable& sst,
+            const dht::partition_range& pr,
+            const query::partition_slice& slice,
+            const io_priority_class& pc,
+            reader_resource_tracker resource_tracker,
+            streamed_mutation::forwarding fwd,
+            mutation_reader::forwarding fwd_mr) mutable {
+        mutation_reader reader = sst->read_range_rows(pr, slice, pc, resource_tracker, fwd, fwd_mr);
+        if (sst->is_shared()) {
+            // FIXME: switch to overloaded belongs_to_current_shard by making compiler able to deduce it,
+            // and then remove sm_belongs_to_current_shard.
+            reader = make_filtering_reader(std::move(reader), sm_belongs_to_current_shard);
+        }
+        return std::move(reader);
+    };
     return make_mutation_reader<combined_mutation_reader>(std::make_unique<incremental_reader_selector>(std::move(s),
                 std::move(sstables),
                 pr,
@@ -4271,7 +4290,8 @@ mutation_reader make_range_sstable_reader(schema_ptr s,
                 std::move(resource_tracker),
                 std::move(trace_state),
                 fwd,
-                fwd_mr), fwd_mr);
+                fwd_mr,
+                std::move(reader_factory_fn)), fwd_mr);
 }
 
 future<>
