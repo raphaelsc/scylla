@@ -1333,6 +1333,12 @@ future<> sstable::update_info_for_opened_data() {
                 return engine().file_size(this->filename(c));
             }).then([this] (uint64_t bytes) {
                 _bytes_on_disk += bytes;
+            }).handle_exception([this, c] (auto ep) {
+                // ignore exception on missing summary that was recreated.
+                if (c == component_type::Summary && _components->summary.memory_footprint()) {
+                    return make_ready_future<>();
+                }
+                std::rethrow_exception(ep);
             });
         });
     });
