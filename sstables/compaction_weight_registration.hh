@@ -41,4 +41,9 @@ public:
     compaction_weight_registration(compaction_weight_registration&& other) noexcept;
 
     ~compaction_weight_registration();
+
+    // releases the ownership of registered weight
+    void release();
+
+    int weight() const;
 };
