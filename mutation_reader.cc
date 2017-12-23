@@ -36,9 +36,10 @@ class list_reader_selector : public reader_selector {
     std::vector<flat_mutation_reader> _readers;
 
 public:
-    explicit list_reader_selector(std::vector<flat_mutation_reader> readers)
+    explicit list_reader_selector(schema_ptr s, std::vector<flat_mutation_reader> readers)
         : _readers(std::move(readers)) {
-        _selector_position = dht::minimum_token();
+        _s = std::move(s);
+        _selector_position = dht::ring_position::min();
     }
 
     list_reader_selector(const list_reader_selector&) = delete;
@@ -48,7 +49,7 @@ public:
     list_reader_selector& operator=(list_reader_selector&&) = default;
 
     virtual std::vector<flat_mutation_reader> create_new_readers(const dht::token* const) override {
-        _selector_position = dht::maximum_token();
+        _selector_position = dht::ring_position::max();
         return std::exchange(_readers, {});
     }
 
@@ -304,7 +305,7 @@ flat_mutation_reader make_combined_reader(schema_ptr schema,
         streamed_mutation::forwarding fwd_sm,
         mutation_reader::forwarding fwd_mr) {
     return make_flat_mutation_reader<combined_mutation_reader>(schema,
-            std::make_unique<list_reader_selector>(std::move(readers)),
+            std::make_unique<list_reader_selector>(schema, std::move(readers)),
             fwd_sm,
             fwd_mr);
 }
