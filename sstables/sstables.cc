@@ -976,27 +976,27 @@ future<> sstable::read_toc() {
 
 }
 
-void sstable::generate_toc(compressor c, double filter_fp_chance) {
+void sstable_writer::generate_toc(sstable& sst, compressor c, double filter_fp_chance) {
     // Creating table of components.
-    _recognized_components.insert(component_type::TOC);
-    _recognized_components.insert(component_type::Statistics);
-    _recognized_components.insert(component_type::Digest);
-    _recognized_components.insert(component_type::Index);
-    _recognized_components.insert(component_type::Summary);
-    _recognized_components.insert(component_type::Data);
+    sst._recognized_components.insert(sstable::component_type::TOC);
+    sst._recognized_components.insert(sstable::component_type::Statistics);
+    sst._recognized_components.insert(sstable::component_type::Digest);
+    sst._recognized_components.insert(sstable::component_type::Index);
+    sst._recognized_components.insert(sstable::component_type::Summary);
+    sst._recognized_components.insert(sstable::component_type::Data);
     if (filter_fp_chance != 1.0) {
-        _recognized_components.insert(component_type::Filter);
+        sst._recognized_components.insert(sstable::component_type::Filter);
     }
     if (c == compressor::none) {
-        _recognized_components.insert(component_type::CRC);
+        sst._recognized_components.insert(sstable::component_type::CRC);
     } else {
-        _recognized_components.insert(component_type::CompressionInfo);
+        sst._recognized_components.insert(sstable::component_type::CompressionInfo);
     }
-    _recognized_components.insert(component_type::Scylla);
+    sst._recognized_components.insert(sstable::component_type::Scylla);
 }
 
-void sstable::write_toc(const io_priority_class& pc) {
-    auto file_path = filename(sstable::component_type::TemporaryTOC);
+void sstable_writer::write_toc(sstable& sst, const io_priority_class& pc) {
+    auto file_path = sst.filename(sstable::component_type::TemporaryTOC);
 
     sstlog.debug("Writing TOC file {} ", file_path);
 
@@ -1004,15 +1004,16 @@ void sstable::write_toc(const io_priority_class& pc) {
     // If creation of temporary TOC failed, it implies that that boot failed to
     // delete a sstable with temporary for this column family, or there is a
     // sstable being created in parallel with the same generation.
-    file f = new_sstable_component_file(_write_error_handler, file_path, open_flags::wo | open_flags::create | open_flags::exclusive).get0();
+    file f = new_sstable_component_file(sst._write_error_handler, file_path, open_flags::wo | open_flags::create | open_flags::exclusive).get0();
 
-    bool toc_exists = file_exists(filename(sstable::component_type::TOC)).get0();
+    bool toc_exists = file_exists(sst.filename(sstable::component_type::TOC)).get0();
     if (toc_exists) {
         // TOC will exist at this point if write_components() was called with
         // the generation of a sstable that exists.
         f.close().get();
         remove_file(file_path).get();
-        throw std::runtime_error(sprint("SSTable write failed due to existence of TOC file for generation %ld of %s.%s", _generation, _schema->ks_name(), _schema->cf_name()));
+        throw std::runtime_error(sprint("SSTable write failed due to existence of TOC file for generation %ld of %s.%s", sst._generation,
+            sst._schema->ks_name(), sst._schema->cf_name()));
     }
 
     file_output_stream_options options;
@@ -1020,9 +1021,9 @@ void sstable::write_toc(const io_priority_class& pc) {
     options.io_priority_class = pc;
     auto w = file_writer(std::move(f), std::move(options));
 
-    for (auto&& key : _recognized_components) {
+    for (auto&& key : sst._recognized_components) {
             // new line character is appended to the end of each component name.
-        auto value = _component_map[key] + "\n";
+        auto value = sst._component_map[key] + "\n";
         bytes b = bytes(reinterpret_cast<const bytes::value_type *>(value.c_str()), value.size());
         write(w, b);
     }
@@ -1031,8 +1032,8 @@ void sstable::write_toc(const io_priority_class& pc) {
 
     // Flushing parent directory to guarantee that temporary TOC file reached
     // the disk.
-    file dir_f = open_checked_directory(_write_error_handler, _dir).get0();
-    sstable_write_io_check([&] {
+    file dir_f = open_checked_directory(sst._write_error_handler, sst._dir).get0();
+    sst.sstable_write_io_check([&] {
         dir_f.flush().get();
         dir_f.close().get();
     });
@@ -1124,13 +1125,13 @@ future<> sstable::read_simple(T& component, const io_priority_class& pc) {
 }
 
 template <sstable::component_type Type, typename T>
-void sstable::write_simple(const T& component, const io_priority_class& pc) {
-    auto file_path = filename(Type);
-    sstlog.debug(("Writing " + _component_map[Type] + " file {} ").c_str(), file_path);
-    file f = new_sstable_component_file(_write_error_handler, file_path, open_flags::wo | open_flags::create | open_flags::exclusive).get0();
+void sstable_writer::write_simple(const T& component, const io_priority_class& pc) {
+    auto file_path = _sst.filename(Type);
+    sstlog.debug(("Writing " + _sst._component_map[Type] + " file {} ").c_str(), file_path);
+    file f = new_sstable_component_file(_sst._write_error_handler, file_path, open_flags::wo | open_flags::create | open_flags::exclusive).get0();
 
     file_output_stream_options options;
-    options.buffer_size = sstable_buffer_size;
+    options.buffer_size = _sst.sstable_buffer_size;
     options.io_priority_class = pc;
     auto w = file_writer(std::move(f), std::move(options));
     write(w, component);
@@ -1139,7 +1140,7 @@ void sstable::write_simple(const T& component, const io_priority_class& pc) {
 }
 
 template future<> sstable::read_simple<sstable::component_type::Filter>(sstables::filter& f, const io_priority_class& pc);
-template void sstable::write_simple<sstable::component_type::Filter>(const sstables::filter& f, const io_priority_class& pc);
+template void sstable_writer::write_simple<sstable::component_type::Filter>(const sstables::filter& f, const io_priority_class& pc);
 
 future<> sstable::read_compression(const io_priority_class& pc) {
      // FIXME: If there is no compression, we should expect a CRC file to be present.
@@ -1150,12 +1151,12 @@ future<> sstable::read_compression(const io_priority_class& pc) {
     return read_simple<component_type::CompressionInfo>(_components->compression, pc);
 }
 
-void sstable::write_compression(const io_priority_class& pc) {
-    if (!has_component(sstable::component_type::CompressionInfo)) {
+void sstable_writer::write_compression(const io_priority_class& pc) {
+    if (!_sst.has_component(sstable::component_type::CompressionInfo)) {
         return;
     }
 
-    write_simple<component_type::CompressionInfo>(_components->compression, pc);
+    write_simple<sstable::component_type::CompressionInfo>(_sst._components->compression, pc);
 }
 
 void sstable::validate_min_max_metadata() {
@@ -1258,8 +1259,8 @@ future<> sstable::read_statistics(const io_priority_class& pc) {
     return read_simple<component_type::Statistics>(_components->statistics, pc);
 }
 
-void sstable::write_statistics(const io_priority_class& pc) {
-    write_simple<component_type::Statistics>(_components->statistics, pc);
+void sstable_writer::write_statistics(const io_priority_class& pc) {
+    write_simple<sstable::component_type::Statistics>(_sst._components->statistics, pc);
 }
 
 void sstable::rewrite_statistics(const io_priority_class& pc) {
@@ -1382,12 +1383,12 @@ future<> sstable::read_filter(const io_priority_class& pc) {
     });
 }
 
-void sstable::write_filter(const io_priority_class& pc) {
-    if (!has_component(sstable::component_type::Filter)) {
+void sstable_writer::write_filter(const io_priority_class& pc) {
+    if (!_sst.has_component(sstable::component_type::Filter)) {
         return;
     }
 
-    auto f = static_cast<utils::filter::murmur3_bloom_filter *>(_components->filter.get());
+    auto f = static_cast<utils::filter::murmur3_bloom_filter *>(_sst._components->filter.get());
 
     auto&& bs = f->bits();
     utils::chunked_vector<uint64_t> v(align_up(bs.size(), size_t(64)) / 64);
@@ -1976,10 +1977,10 @@ populate_statistics_offsets(statistics& s) {
 
 static
 sharding_metadata
-create_sharding_metadata(schema_ptr schema, const dht::decorated_key& first_key, const dht::decorated_key& last_key, shard_id shard) {
+create_sharding_metadata(const schema& schema, const dht::decorated_key& first_key, const dht::decorated_key& last_key, shard_id shard) {
     auto prange = dht::partition_range::make(dht::ring_position(first_key), dht::ring_position(last_key));
     auto sm = sharding_metadata();
-    for (auto&& range : dht::split_range_to_single_shard(*schema, prange, shard)) {
+    for (auto&& range : dht::split_range_to_single_shard(schema, prange, shard)) {
         if (true) { // keep indentation
             // we know left/right are not infinite
             auto&& left = range.start()->value();
@@ -2249,20 +2250,20 @@ sstable::read_scylla_metadata(const io_priority_class& pc) {
 }
 
 void
-sstable::write_scylla_metadata(const io_priority_class& pc, shard_id shard, sstable_enabled_features features) {
-    auto&& first_key = get_first_decorated_key();
-    auto&& last_key = get_last_decorated_key();
+sstable_writer::write_scylla_metadata(const io_priority_class& pc, shard_id shard, sstable_enabled_features features) {
+    auto&& first_key = _sst.get_first_decorated_key();
+    auto&& last_key = _sst.get_last_decorated_key();
     auto sm = create_sharding_metadata(_schema, first_key, last_key, shard);
     // sstable write may fail to generate empty metadata if mutation source has only data from other shard.
     // see https://github.com/scylladb/scylla/issues/2932 for details on how it can happen.
     if (sm.token_ranges.elements.empty()) {
-        throw std::runtime_error(sprint("Failed to generate sharding metadata for %s", get_filename()));
+        throw std::runtime_error(sprint("Failed to generate sharding metadata for %s", _sst.get_filename()));
     }
-    _components->scylla_metadata.emplace();
-    _components->scylla_metadata->data.set<scylla_metadata_type::Sharding>(std::move(sm));
-    _components->scylla_metadata->data.set<scylla_metadata_type::Features>(std::move(features));
+    _sst._components->scylla_metadata.emplace();
+    _sst._components->scylla_metadata->data.set<scylla_metadata_type::Sharding>(std::move(sm));
+    _sst._components->scylla_metadata->data.set<scylla_metadata_type::Features>(std::move(features));
 
-    write_simple<component_type::Scylla>(*_components->scylla_metadata, pc);
+    write_simple<sstable::component_type::Scylla>(*_sst._components->scylla_metadata, pc);
 }
 
 void sstable_writer::prepare_file_writer()
@@ -2314,8 +2315,8 @@ sstable_writer::sstable_writer(sstable& sst, const schema& s, uint64_t estimated
     , _shard(shard)
     , _monitor(cfg.monitor)
 {
-    _sst.generate_toc(_schema.get_compressor_params().get_compressor(), _schema.bloom_filter_fp_chance());
-    _sst.write_toc(_pc);
+    generate_toc(sst, _schema.get_compressor_params().get_compressor(), _schema.bloom_filter_fp_chance());
+    write_toc(sst, _pc);
     _sst.create_data().get();
     _compression_enabled = !_sst.has_component(sstable::component_type::CRC);
     prepare_file_writer();
@@ -2331,15 +2332,15 @@ void sstable_writer::consume_end_of_stream()
     _components_writer->consume_end_of_stream();
     _components_writer = stdx::nullopt;
     finish_file_writer();
-    _sst.write_summary(_pc);
-    _sst.write_filter(_pc);
-    _sst.write_statistics(_pc);
-    _sst.write_compression(_pc);
+    write_summary(_pc);
+    write_filter(_pc);
+    write_statistics(_pc);
+    write_compression(_pc);
     auto features = all_features();
     if (!_components_writer->_correctly_serialize_non_compound_range_tombstones) {
         features.disable(sstable_feature::NonCompoundRangeTombstones);
     }
-    _sst.write_scylla_metadata(_pc, _shard, std::move(features));
+    write_scylla_metadata(_pc, _shard, std::move(features));
 
     _monitor->on_write_completed();
 

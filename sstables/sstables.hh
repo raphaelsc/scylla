@@ -496,35 +496,18 @@ private:
     template <sstable::component_type Type, typename T>
     future<> read_simple(T& comp, const io_priority_class& pc);
 
-    template <sstable::component_type Type, typename T>
-    void write_simple(const T& comp, const io_priority_class& pc);
-
-    void generate_toc(compressor c, double filter_fp_chance);
-    void write_toc(const io_priority_class& pc);
     future<> seal_sstable();
 
     future<> read_compression(const io_priority_class& pc);
-    void write_compression(const io_priority_class& pc);
-
     future<> read_scylla_metadata(const io_priority_class& pc);
-    void write_scylla_metadata(const io_priority_class& pc, shard_id shard, sstable_enabled_features features);
-
     future<> read_filter(const io_priority_class& pc);
-
-    void write_filter(const io_priority_class& pc);
-
     future<> read_summary(const io_priority_class& pc);
-
-    void write_summary(const io_priority_class& pc) {
-        write_simple<component_type::Summary>(_components->summary, pc);
-    }
 
     // To be called when we try to load an SSTable that lacks a Summary. Could
     // happen if old tools are being used.
     future<> generate_summary(const io_priority_class& pc);
 
     future<> read_statistics(const io_priority_class& pc);
-    void write_statistics(const io_priority_class& pc);
     // Rewrite statistics component by creating a temporary Statistics and
     // renaming it into place of existing one.
     void rewrite_statistics(const io_priority_class& pc);
@@ -883,6 +866,22 @@ public:
     metadata_collector& get_metadata_collector() {
         return _components_writer->_collector;
     }
+private:
+    template <sstable::component_type Type, typename T>
+    void write_simple(const T& comp, const io_priority_class& pc);
+
+    static void generate_toc(sstable& sst, compressor c, double filter_fp_chance);
+    static void write_toc(sstable& sst, const io_priority_class& pc);
+
+    void write_compression(const io_priority_class& pc);
+    void write_scylla_metadata(const io_priority_class& pc, shard_id shard, sstable_enabled_features features);
+    void write_filter(const io_priority_class& pc);
+    void write_summary(const io_priority_class& pc) {
+        write_simple<sstable::component_type::Summary>(_sst._components->summary, pc);
+    }
+    void write_statistics(const io_priority_class& pc);
+
+    friend class test;
 };
 
 // contains data for loading a sstable using components shared by a single shard;

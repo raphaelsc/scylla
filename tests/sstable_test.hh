@@ -149,12 +149,18 @@ public:
     future<> store() {
         _sst->_recognized_components.erase(sstable::component_type::Index);
         _sst->_recognized_components.erase(sstable::component_type::Data);
-        return seastar::async([sst = _sst] {
-            sst->write_toc(default_priority_class());
-            sst->write_statistics(default_priority_class());
-            sst->write_compression(default_priority_class());
-            sst->write_filter(default_priority_class());
-            sst->write_summary(default_priority_class());
+        return seastar::async([sst = _sst] () mutable {
+            storage_service_for_tests ssft;
+            sstables::sstable_writer_config cfg;
+            auto partition_estimation = sst->get_estimated_key_count();
+            auto c = std::move(sst->_components);
+            sst->_components = make_foreign(make_lw_shared<sstable::shareable_components>());
+            sstables::sstable_writer w(*sst, *(sst->_schema), partition_estimation, cfg, default_priority_class());
+            sst->_components = std::move(c);
+            w.write_statistics(default_priority_class());
+            w.write_compression(default_priority_class());
+            w.write_filter(default_priority_class());
+            w.write_summary(default_priority_class());
             sst->seal_sstable().get();
         });
     }
@@ -191,7 +197,7 @@ public:
     void rewrite_toc_without_scylla_component() {
         _sst->_recognized_components.erase(sstable::component_type::Scylla);
         remove_file(_sst->filename(sstable::component_type::TOC)).get();
-        _sst->write_toc(default_priority_class());
+        sstable_writer::write_toc(*_sst, default_priority_class());
         _sst->seal_sstable().get();
     }
 
