@@ -359,10 +359,6 @@ public:
         return _marked_for_deletion;
     }
 
-    void add_ancestor(int64_t generation) {
-        _collector.add_ancestor(generation);
-    }
-
     std::unordered_set<uint64_t> ancestors() const;
 
     // Returns true iff this sstable contains data which belongs to many shards.
@@ -419,10 +415,6 @@ public:
     }
     sstring toc_filename() const;
 
-    metadata_collector& get_metadata_collector() {
-        return _collector;
-    }
-
     std::vector<std::pair<component_type, sstring>> all_components() const;
 
     future<> create_links(sstring dir, int64_t generation) const;
@@ -467,10 +459,6 @@ private:
     foreign_ptr<lw_shared_ptr<shareable_components>> _components = make_foreign(make_lw_shared<shareable_components>());
     shared_index_lists _index_lists;
     bool _shared = true;  // across shards; safe default
-    // NOTE: _collector and _c_stats are used to generation of statistics file
-    // when writing a new sstable.
-    metadata_collector _collector;
-    column_stats _c_stats;
     file _index_file;
     file _data_file;
     uint64_t _data_file_size;
@@ -782,6 +770,8 @@ class components_writer {
     // Enforces ratio of summary to data of 1 to N.
     size_t _summary_byte_cost = default_summary_byte_cost;
     bool _correctly_serialize_non_compound_range_tombstones;
+    metadata_collector _collector;
+    column_stats _c_stats;
 private:
     void maybe_add_summary_entry(const dht::token& token, bytes_view key);
     uint64_t get_offset() const;
@@ -799,7 +789,7 @@ public:
             _first_key(std::move(o._first_key)), _last_key(std::move(o._last_key)), _partition_key(std::move(o._partition_key)),
             _next_data_offset_to_write_summary(o._next_data_offset_to_write_summary), _summary_byte_cost(o._summary_byte_cost),
             _correctly_serialize_non_compound_range_tombstones(o._correctly_serialize_non_compound_range_tombstones),
-            _pi_write(std::move(o._pi_write)) {
+            _collector(std::move(o._collector)), _c_stats(std::move(o._c_stats)), _pi_write(std::move(o._pi_write)) {
         o._index_needs_close = false;
     }
 
@@ -889,6 +879,10 @@ public:
     stop_iteration consume(range_tombstone&& rt) { return _components_writer->consume(std::move(rt)); }
     stop_iteration consume_end_of_partition() { return _components_writer->consume_end_of_partition(); }
     void consume_end_of_stream();
+
+    metadata_collector& get_metadata_collector() {
+        return _components_writer->_collector;
+    }
 };
 
 // contains data for loading a sstable using components shared by a single shard;

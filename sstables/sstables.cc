@@ -1620,7 +1620,7 @@ void components_writer::maybe_flush_pi_block(file_writer& out,
         output_promoted_index_entry(_pi_write.data,
                 _pi_write.block_first_colname,
                 _pi_write.block_last_colname,
-                _pi_write.block_start_offset - _sst._c_stats.start_offset,
+                _pi_write.block_start_offset - _c_stats.start_offset,
                 out.offset() - _pi_write.block_start_offset);
         _pi_write.numblocks++;
         _pi_write.block_start_offset = out.offset();
@@ -1660,7 +1660,7 @@ static inline void update_cell_stats(column_stats& c_stats, uint64_t timestamp) 
 void components_writer::write_cell(file_writer& out, atomic_cell_view cell, const column_definition& cdef) {
     uint64_t timestamp = cell.timestamp();
 
-    update_cell_stats(_sst._c_stats, timestamp);
+    update_cell_stats(_c_stats, timestamp);
 
     if (cell.is_dead(_sst._now)) {
         // tombstone cell
@@ -1669,8 +1669,8 @@ void components_writer::write_cell(file_writer& out, atomic_cell_view cell, cons
         uint32_t deletion_time_size = sizeof(uint32_t);
         uint32_t deletion_time = cell.deletion_time().time_since_epoch().count();
 
-        _sst._c_stats.update_max_local_deletion_time(deletion_time);
-        _sst._c_stats.tombstone_histogram.update(deletion_time);
+        _c_stats.update_max_local_deletion_time(deletion_time);
+        _c_stats.tombstone_histogram.update(deletion_time);
 
         write(out, mask, timestamp, deletion_time_size, deletion_time);
     } else if (cdef.is_counter()) {
@@ -1707,7 +1707,7 @@ void components_writer::write_cell(file_writer& out, atomic_cell_view cell, cons
             }
         }
 
-        _sst._c_stats.update_max_local_deletion_time(std::numeric_limits<int>::max());
+        _c_stats.update_max_local_deletion_time(std::numeric_limits<int>::max());
     } else if (cell.is_live_and_has_ttl()) {
         // expiring cell
 
@@ -1716,11 +1716,11 @@ void components_writer::write_cell(file_writer& out, atomic_cell_view cell, cons
         uint32_t expiration = cell.expiry().time_since_epoch().count();
         disk_string_view<uint32_t> cell_value { cell.value() };
 
-        _sst._c_stats.update_max_local_deletion_time(expiration);
+        _c_stats.update_max_local_deletion_time(expiration);
         // tombstone histogram is updated with expiration time because if ttl is longer
         // than gc_grace_seconds for all data, sstable will be considered fully expired
         // when actually nothing is expired.
-        _sst._c_stats.tombstone_histogram.update(expiration);
+        _c_stats.tombstone_histogram.update(expiration);
 
         write(out, mask, ttl, expiration, timestamp, cell_value);
     } else {
@@ -1729,7 +1729,7 @@ void components_writer::write_cell(file_writer& out, atomic_cell_view cell, cons
         column_mask mask = column_mask::none;
         disk_string_view<uint32_t> cell_value { cell.value() };
 
-        _sst._c_stats.update_max_local_deletion_time(std::numeric_limits<int>::max());
+        _c_stats.update_max_local_deletion_time(std::numeric_limits<int>::max());
 
         write(out, mask, timestamp, cell_value);
     }
@@ -1744,14 +1744,14 @@ void components_writer::maybe_write_row_marker(file_writer& out, const schema& s
     uint64_t timestamp = marker.timestamp();
     uint32_t value_length = 0;
 
-    update_cell_stats(_sst._c_stats, timestamp);
+    update_cell_stats(_c_stats, timestamp);
 
     if (marker.is_dead(_sst._now)) {
         column_mask mask = column_mask::deletion;
         uint32_t deletion_time_size = sizeof(uint32_t);
         uint32_t deletion_time = marker.deletion_time().time_since_epoch().count();
 
-        _sst._c_stats.tombstone_histogram.update(deletion_time);
+        _c_stats.tombstone_histogram.update(deletion_time);
 
         write(out, mask, timestamp, deletion_time_size, deletion_time);
     } else if (marker.is_expiring()) {
@@ -1769,9 +1769,9 @@ void components_writer::write_deletion_time(file_writer& out, const tombstone t)
     uint64_t timestamp = t.timestamp;
     uint32_t deletion_time = t.deletion_time.time_since_epoch().count();
 
-    update_cell_stats(_sst._c_stats, timestamp);
-    _sst._c_stats.update_max_local_deletion_time(deletion_time);
-    _sst._c_stats.tombstone_histogram.update(deletion_time);
+    update_cell_stats(_c_stats, timestamp);
+    _c_stats.update_max_local_deletion_time(deletion_time);
+    _c_stats.tombstone_histogram.update(deletion_time);
 
     write(out, deletion_time, timestamp);
 }
@@ -1837,7 +1837,7 @@ void components_writer::write_clustered_row(file_writer& out, const schema& sche
     maybe_write_row_tombstone(out, clustering_key, clustered_row);
 
     if (schema.clustering_key_size()) {
-        column_name_helper::min_max_components(schema, _sst._collector.min_column_names(), _sst._collector.max_column_names(),
+        column_name_helper::min_max_components(schema, _collector.min_column_names(), _collector.max_column_names(),
             clustered_row.key().components());
     }
 
@@ -2087,6 +2087,9 @@ components_writer::components_writer(sstable& sst, const schema& s, file_writer&
 {
     _sst._components->filter = utils::i_filter::get_filter(estimated_partitions, _schema.bloom_filter_fp_chance());
     _pi_write.desired_block_size = cfg.promoted_index_block_size.value_or(get_config().column_index_size_in_kb() * 1024);
+    if (cfg.replay_position) {
+        _collector.set_replay_position(cfg.replay_position.value());
+    }
 
     prepare_summary(_sst._components->summary, estimated_partitions, _schema.min_index_interval());
 
@@ -2095,13 +2098,13 @@ components_writer::components_writer(sstable& sst, const schema& s, file_writer&
 
 void components_writer::consume_new_partition(const dht::decorated_key& dk) {
     // Set current index of data to later compute row size.
-    _sst._c_stats.start_offset = _out.offset();
+    _c_stats.start_offset = _out.offset();
 
     _partition_key = key::from_partition_key(_schema, dk.key());
 
     maybe_add_summary_entry(dk.token(), bytes_view(*_partition_key));
     _sst._components->filter->add(bytes_view(*_partition_key));
-    _sst._collector.add_key(bytes_view(*_partition_key));
+    _collector.add_key(bytes_view(*_partition_key));
 
     auto p_key = disk_string_view<uint16_t>();
     p_key.value = bytes_view(*_partition_key);
@@ -2132,10 +2135,10 @@ void components_writer::consume(tombstone t) {
         d.local_deletion_time = t.deletion_time.time_since_epoch().count();
         d.marked_for_delete_at = t.timestamp;
 
-        _sst._c_stats.tombstone_histogram.update(d.local_deletion_time);
-        _sst._c_stats.update_max_local_deletion_time(d.local_deletion_time);
-        _sst._c_stats.update_min_timestamp(d.marked_for_delete_at);
-        _sst._c_stats.update_max_timestamp(d.marked_for_delete_at);
+        _c_stats.tombstone_histogram.update(d.local_deletion_time);
+        _c_stats.update_max_local_deletion_time(d.local_deletion_time);
+        _c_stats.update_min_timestamp(d.marked_for_delete_at);
+        _c_stats.update_max_timestamp(d.marked_for_delete_at);
     } else {
         // Default values for live, undeleted rows.
         d.local_deletion_time = std::numeric_limits<int32_t>::max();
@@ -2179,7 +2182,7 @@ stop_iteration components_writer::consume_end_of_partition() {
         output_promoted_index_entry(_pi_write.data,
             _pi_write.block_first_colname,
             _pi_write.block_last_colname,
-            _pi_write.block_start_offset - _sst._c_stats.start_offset,
+            _pi_write.block_start_offset - _c_stats.start_offset,
             _out.offset() - _pi_write.block_start_offset);
         _pi_write.numblocks++;
     }
@@ -2193,10 +2196,10 @@ stop_iteration components_writer::consume_end_of_partition() {
     write(_out, end_of_row);
 
     // compute size of the current row.
-    _sst._c_stats.row_size = _out.offset() - _sst._c_stats.start_offset;
+    _c_stats.row_size = _out.offset() - _c_stats.start_offset;
     // update is about merging column_stats with the data being stored by collector.
-    _sst._collector.update(_schema, std::move(_sst._c_stats));
-    _sst._c_stats.reset();
+    _collector.update(_schema, std::move(_c_stats));
+    _c_stats.reset();
 
     if (!_first_key) {
         _first_key = *_partition_key;
@@ -2213,11 +2216,11 @@ void components_writer::consume_end_of_stream() {
     _index.close().get();
 
     if (_sst.has_component(sstable::component_type::CompressionInfo)) {
-        _sst._collector.add_compression_ratio(_sst._components->compression.compressed_file_length(), _sst._components->compression.uncompressed_file_length());
+        _collector.add_compression_ratio(_sst._components->compression.compressed_file_length(), _sst._components->compression.uncompressed_file_length());
     }
 
     _sst.set_first_and_last_keys();
-    seal_statistics(_sst._components->statistics, _sst._collector, dht::global_partitioner().name(), _schema.bloom_filter_fp_chance(),
+    seal_statistics(_sst._components->statistics, _collector, dht::global_partitioner().name(), _schema.bloom_filter_fp_chance(),
             _sst._schema, _sst.get_first_decorated_key(), _sst.get_last_decorated_key());
 }
 
@@ -2371,9 +2374,6 @@ future<> sstable::write_components(
         schema_ptr schema,
         const sstable_writer_config& cfg,
         const io_priority_class& pc) {
-    if (cfg.replay_position) {
-        _collector.set_replay_position(cfg.replay_position.value());
-    }
     seastar::thread_attributes attr;
     attr.scheduling_group = cfg.thread_scheduling_group;
     return seastar::async(std::move(attr), [this, mr = std::move(mr), estimated_partitions, schema = std::move(schema), cfg, &pc] () mutable {

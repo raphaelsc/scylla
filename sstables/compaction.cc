@@ -174,12 +174,13 @@ protected:
         return ceil(double(_estimated_partitions) / estimated_sstables);
     }
 
-    void setup_new_sstable(shared_sstable& sst) {
+    void setup_new_sstable(stdx::optional<sstable_writer>& writer, shared_sstable& sst) {
         _info->new_sstables.push_back(sst);
-        sst->get_metadata_collector().set_replay_position(_rp);
-        sst->get_metadata_collector().sstable_level(_sstable_level);
+        auto& collector = writer->get_metadata_collector();
+        collector.set_replay_position(_rp);
+        collector.sstable_level(_sstable_level);
         for (auto ancestor : _ancestors) {
-            sst->add_ancestor(ancestor);
+            collector.add_ancestor(ancestor);
         }
     }
 
@@ -392,12 +393,12 @@ public:
     virtual sstable_writer* select_sstable_writer(const dht::decorated_key& dk) override {
         if (!_writer) {
             _sst = _creator();
-            setup_new_sstable(_sst);
 
             auto&& priority = service::get_local_compaction_priority();
             sstable_writer_config cfg;
             cfg.max_sstable_size = _max_sstable_size;
             _writer.emplace(_sst->get_writer(*_cf.schema(), partitions_per_sstable(), cfg, priority));
+            setup_new_sstable(_writer, _sst);
         }
         return &*_writer;
     }
@@ -496,12 +497,12 @@ public:
 
         if (!writer) {
             sst = _sstable_creator(_shard);
-            setup_new_sstable(sst);
 
             sstable_writer_config cfg;
             cfg.max_sstable_size = _max_sstable_size;
             auto&& priority = service::get_local_compaction_priority();
             writer.emplace(sst->get_writer(*_cf.schema(), partitions_per_sstable(), cfg, priority, _shard));
+            setup_new_sstable(writer, sst);
         }
         return &*writer;
     }
