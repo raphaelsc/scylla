@@ -3916,7 +3916,7 @@ future<std::vector<sstables::shared_sstable>> column_family::flush_streaming_big
         return entry->flush_in_progress.close();
     }).then([this, entry] {
         return parallel_for_each(entry->sstables, [this] (auto& sst) {
-            return sst->seal_sstable(this->incremental_backups_enabled()).then([sst] {
+            return sstables::sstable_writer::seal_sstable(*sst, this->incremental_backups_enabled()).then([sst] {
                 return sst->open_data();
             });
         }).then([this, entry] {

@@ -1039,25 +1039,37 @@ void sstable_writer::write_toc(sstable& sst, const io_priority_class& pc) {
     });
 }
 
-future<> sstable::seal_sstable() {
+future<> sstable_writer::seal_sstable(sstable& sst) {
     // SSTable sealing is about renaming temporary TOC file after guaranteeing
     // that each component reached the disk safely.
-    return open_checked_directory(_write_error_handler, _dir).then([this] (file dir_f) {
+    return open_checked_directory(sst._write_error_handler, sst._dir).then([&] (file dir_f) {
         // Guarantee that every component of this sstable reached the disk.
-        return sstable_write_io_check([&] { return dir_f.flush(); }).then([this] {
+        return sst.sstable_write_io_check([&] { return dir_f.flush(); }).then([&] {
             // Rename TOC because it's no longer temporary.
-            return sstable_write_io_check([&] {
-                return engine().rename_file(filename(sstable::component_type::TemporaryTOC), filename(sstable::component_type::TOC));
+            return sst.sstable_write_io_check([&] {
+                return engine().rename_file(sst.filename(sstable::component_type::TemporaryTOC), sst.filename(sst.sstable::component_type::TOC));
             });
-        }).then([this, dir_f] () mutable {
+        }).then([&, dir_f] () mutable {
             // Guarantee that the changes above reached the disk.
-            return sstable_write_io_check([&] { return dir_f.flush(); });
-        }).then([this, dir_f] () mutable {
-            return sstable_write_io_check([&] { return dir_f.close(); });
-        }).then([this, dir_f] {
+            return sst.sstable_write_io_check([&] { return dir_f.flush(); });
+        }).then([&, dir_f] () mutable {
+            return sst.sstable_write_io_check([&] { return dir_f.close(); });
+        }).then([&, dir_f] {
             // If this point was reached, sstable should be safe in disk.
-            sstlog.debug("SSTable with generation {} of {}.{} was sealed successfully.", _generation, _schema->ks_name(), _schema->cf_name());
+            sstlog.debug("SSTable with generation {} of {}.{} was sealed successfully.", sst._generation, sst._schema->ks_name(), sst._schema->cf_name());
         });
+    });
+}
+
+future<> sstable_writer::seal_sstable(sstable& sst, bool backup) {
+    return seal_sstable(sst).then([&, backup] {
+        if (backup) {
+            auto dir = sst.get_dir() + "/backups/";
+            return sst.sstable_write_io_check(touch_directory, dir).then([&, dir] {
+                return sst.create_links(dir);
+            });
+        }
+        return make_ready_future<>();
     });
 }
 
@@ -2345,23 +2357,10 @@ void sstable_writer::consume_end_of_stream()
     _monitor->on_write_completed();
 
     if (!_leave_unsealed) {
-        _sst.seal_sstable(_backup).get();
+        seal_sstable(_sst, _backup).get();
     }
 
     _monitor->on_flush_completed();
-}
-
-future<> sstable::seal_sstable(bool backup)
-{
-    return seal_sstable().then([this, backup] {
-        if (backup) {
-            auto dir = get_dir() + "/backups/";
-            return sstable_write_io_check(touch_directory, dir).then([this, dir] {
-                return create_links(dir);
-            });
-        }
-        return make_ready_future<>();
-    });
 }
 
 sstable_writer sstable::get_writer(const schema& s, uint64_t estimated_partitions, const sstable_writer_config& cfg, const io_priority_class& pc, shard_id shard)

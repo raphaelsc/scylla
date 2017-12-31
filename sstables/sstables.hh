@@ -335,8 +335,6 @@ public:
         const io_priority_class& pc = default_priority_class(),
         shard_id shard = engine().cpu_id());
 
-    future<> seal_sstable(bool backup);
-
     uint64_t get_estimated_key_count() const {
         return ((uint64_t)_components->summary.header.size_at_full_sampling + 1) *
                 _components->summary.header.min_index_interval;
@@ -495,8 +493,6 @@ private:
 
     template <sstable::component_type Type, typename T>
     future<> read_simple(T& comp, const io_priority_class& pc);
-
-    future<> seal_sstable();
 
     future<> read_compression(const io_priority_class& pc);
     future<> read_scylla_metadata(const io_priority_class& pc);
@@ -864,6 +860,9 @@ public:
     metadata_collector& get_metadata_collector() {
         return _components_writer->_collector;
     }
+
+    static future<> seal_sstable(sstable& sst);
+    static future<> seal_sstable(sstable& sst, bool backup);
 private:
     template <sstable::component_type Type, typename T>
     void write_simple(const T& comp, const io_priority_class& pc);
