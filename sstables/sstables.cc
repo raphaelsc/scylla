@@ -1352,19 +1352,19 @@ future<> sstable::update_info_for_opened_data() {
     });
 }
 
-future<> sstable::create_data() {
+future<> sstable_writer::create_data() {
     auto oflags = open_flags::wo | open_flags::create | open_flags::exclusive;
     file_open_options opt;
     opt.extent_allocation_size_hint = 32 << 20;
     opt.sloppy_size = true;
-    return when_all(new_sstable_component_file(_write_error_handler, filename(component_type::Index), oflags, opt),
-                    new_sstable_component_file(_write_error_handler, filename(component_type::Data), oflags, opt)).then([this] (auto files) {
+    return when_all(new_sstable_component_file(_sst._write_error_handler, _sst.filename(sstable::component_type::Index), oflags, opt),
+                    new_sstable_component_file(_sst._write_error_handler, _sst.filename(sstable::component_type::Data), oflags, opt)).then([this] (auto files) {
         // FIXME: If both files could not be created, the first get below will
         // throw an exception, and second get() will not be attempted, and
         // we'll get a warning about the second future being destructed
         // without its exception being examined.
-        _index_file = std::get<file>(std::get<0>(files).get());
-        _data_file  = std::get<file>(std::get<1>(files).get());
+        _sst._index_file = std::get<file>(std::get<0>(files).get());
+        _sst._data_file  = std::get<file>(std::get<1>(files).get());
     });
 }
 
@@ -2317,7 +2317,7 @@ sstable_writer::sstable_writer(sstable& sst, const schema& s, uint64_t estimated
 {
     generate_toc(sst, _schema.get_compressor_params().get_compressor(), _schema.bloom_filter_fp_chance());
     write_toc(sst, _pc);
-    _sst.create_data().get();
+    create_data().get();
     _compression_enabled = !_sst.has_component(sstable::component_type::CRC);
     prepare_file_writer();
     _components_writer.emplace(_sst, _schema, *_writer, estimated_partitions, cfg, _pc);

@@ -529,8 +529,6 @@ private:
     // to be called when loading an existing sstable or after writing a new one.
     void set_clustering_components_ranges();
 
-    future<> create_data();
-
     // Return an input_stream which reads exactly the specified byte range
     // from the data file (after uncompression, if the file is compressed).
     // Unlike data_read() below, this method does not read the entire byte
@@ -880,6 +878,8 @@ private:
         write_simple<sstable::component_type::Summary>(_sst._components->summary, pc);
     }
     void write_statistics(const io_priority_class& pc);
+
+    future<> create_data();
 
     friend class test;
 };
