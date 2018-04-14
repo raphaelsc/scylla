@@ -34,11 +34,12 @@ using namespace std::chrono_literals;
 
 class compacting_sstable_registration {
     compaction_manager* _cm;
-    std::vector<sstables::shared_sstable> _compacting;
+    std::vector<sstables::sstable*> _compacting;
 public:
     compacting_sstable_registration(compaction_manager* cm, std::vector<sstables::shared_sstable> compacting)
         : _cm(cm)
-        , _compacting(std::move(compacting))
+        , _compacting(boost::copy_range<std::vector<sstables::sstable*>>(compacting
+                | boost::adaptors::transformed([] (sstables::shared_sstable& sst) { return &*sst; })))
     {
         _cm->register_compacting_sstables(_compacting);
     }
@@ -196,20 +197,18 @@ std::vector<sstables::shared_sstable> compaction_manager::get_candidates(const c
     candidates.reserve(cf.sstables_count());
     // Filter out sstables that are being compacted.
     for (auto& sst : cf.candidates_for_compaction()) {
-        if (!_compacting_sstables.count(sst)) {
+        if (!_compacting_sstables.count(&*sst)) {
             candidates.push_back(sst);
         }
     }
     return candidates;
 }
 
-void compaction_manager::register_compacting_sstables(const std::vector<sstables::shared_sstable>& sstables) {
-    for (auto& sst : sstables) {
-        _compacting_sstables.insert(sst);
-    }
+void compaction_manager::register_compacting_sstables(const std::vector<sstables::sstable*>& sstables) {
+    _compacting_sstables.insert(sstables.begin(), sstables.end());
 }
 
-void compaction_manager::deregister_compacting_sstables(const std::vector<sstables::shared_sstable>& sstables) {
+void compaction_manager::deregister_compacting_sstables(const std::vector<sstables::sstable*>& sstables) {
     // Remove compacted sstables from the set of compacting sstables.
     for (auto& sst : sstables) {
         _compacting_sstables.erase(sst);

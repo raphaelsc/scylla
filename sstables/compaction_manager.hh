@@ -74,7 +74,7 @@ private:
 
     // Store sstables that are being compacted at the moment. That's needed to prevent
     // a sstable from being compacted twice.
-    std::unordered_set<sstables::shared_sstable> _compacting_sstables;
+    std::unordered_set<sstables::sstable*> _compacting_sstables;
 
     future<> _waiting_reevalution = make_ready_future<>();
     condition_variable _postponed_reevaluation;
@@ -116,8 +116,8 @@ private:
     // Get candidates for compaction strategy, which are all sstables but the ones being compacted.
     std::vector<sstables::shared_sstable> get_candidates(const column_family& cf);
 
-    void register_compacting_sstables(const std::vector<sstables::shared_sstable>& sstables);
-    void deregister_compacting_sstables(const std::vector<sstables::shared_sstable>& sstables);
+    void register_compacting_sstables(const std::vector<sstables::sstable*>& sstables);
+    void deregister_compacting_sstables(const std::vector<sstables::sstable*>& sstables);
 
     // Return true if compaction manager and task weren't asked to stop.
     inline bool can_proceed(const lw_shared_ptr<task>& task);
