@@ -1411,13 +1411,12 @@ column_family::compact_sstables(sstables::compaction_descriptor descriptor, bool
                 sst->set_unshared();
                 return sst;
         };
-        auto sstables_to_compact = descriptor.sstables;
-        return sstables::compact_sstables(std::move(descriptor), *this, create_sstable,
-                cleanup).then([this, sstables_to_compact = std::move(sstables_to_compact)] (auto info) {
-            _compaction_strategy.notify_completion(sstables_to_compact, info.new_sstables);
-            this->on_compaction_completion(info.new_sstables, sstables_to_compact);
-            return info;
-        });
+        auto replace_sstables = [this] (std::vector<sstables::shared_sstable> old_ssts, std::vector<sstables::shared_sstable> new_ssts) {
+            _compaction_strategy.notify_completion(old_ssts, new_ssts);
+            this->rebuild_sstable_list(new_ssts, old_ssts);
+        };
+
+        return sstables::compact_sstables(std::move(descriptor), *this, create_sstable, replace_sstables, cleanup);
     }).then([this] (auto info) {
         if (info.type != sstables::compaction_type::Compaction) {
             return make_ready_future<>();

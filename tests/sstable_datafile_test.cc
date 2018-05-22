@@ -65,6 +65,10 @@
 
 using namespace sstables;
 
+static auto replacer_fn_no_op() {
+    return [](std::vector<shared_sstable> removed, std::vector<shared_sstable> added) -> void {};
+}
+
 static sstring some_keyspace("ks");
 static sstring some_column_family("cf");
 
@@ -1132,7 +1136,7 @@ SEASTAR_TEST_CASE(compact) {
                 return sstables::make_sstable(s, tmpdir_path,
                         generation, sstables::sstable::version_types::la, sstables::sstable::format_types::big);
             };
-            return sstables::compact_sstables(sstables::compaction_descriptor(std::move(sstables)), *cf, new_sstable).then([s, generation, cf, cm, tmpdir_path] (auto) {
+            return sstables::compact_sstables(sstables::compaction_descriptor(std::move(sstables)), *cf, new_sstable, replacer_fn_no_op()).then([s, generation, cf, cm, tmpdir_path] (auto) {
                 // Verify that the compacted sstable has the right content. We expect to see:
                 //  name  | age | height
                 // -------+-----+--------
@@ -1281,7 +1285,7 @@ static future<std::vector<unsigned long>> compact_sstables(sstring tmpdir_path, 
             auto sstables_to_compact = sstables::size_tiered_compaction_strategy::most_interesting_bucket(*sstables, min_threshold, max_threshold);
             // We do expect that all candidates were selected for compaction (in this case).
             BOOST_REQUIRE(sstables_to_compact.size() == sstables->size());
-            return sstables::compact_sstables(sstables::compaction_descriptor(std::move(sstables_to_compact)), *cf, new_sstable).then([generation] (auto) {});
+            return sstables::compact_sstables(sstables::compaction_descriptor(std::move(sstables_to_compact)), *cf, new_sstable, replacer_fn_no_op()).then([generation] (auto) {});
         } else if (strategy == compaction_strategy_type::leveled) {
             for (auto& sst : *sstables) {
                 BOOST_REQUIRE(sst->get_sstable_level() == 0);
@@ -1299,7 +1303,7 @@ static future<std::vector<unsigned long>> compact_sstables(sstring tmpdir_path, 
             BOOST_REQUIRE(candidate.max_sstable_bytes == 1024*1024);
 
             return sstables::compact_sstables(sstables::compaction_descriptor(std::move(candidate.sstables), candidate.level, 1024*1024),
-                *cf, new_sstable).then([generation] (auto) {});
+                *cf, new_sstable, replacer_fn_no_op()).then([generation] (auto) {});
         } else {
             throw std::runtime_error("unexpected strategy");
         }
@@ -2353,7 +2357,7 @@ SEASTAR_TEST_CASE(tombstone_purge_test) {
             for (auto&& sst : all) {
                 column_family_test(cf).add_sstable(sst);
             }
-            return sstables::compact_sstables(sstables::compaction_descriptor(to_compact), *cf, sst_gen).get0().new_sstables;
+            return sstables::compact_sstables(sstables::compaction_descriptor(to_compact), *cf, sst_gen, replacer_fn_no_op()).get0().new_sstables;
         };
 
         auto next_timestamp = [] {
@@ -2615,7 +2619,7 @@ SEASTAR_TEST_CASE(sstable_rewrite) {
             std::vector<shared_sstable> sstables;
             sstables.push_back(std::move(sstp));
 
-            return sstables::compact_sstables(sstables::compaction_descriptor(std::move(sstables)), *cf, creator).then([s, key, new_tables] (auto) {
+            return sstables::compact_sstables(sstables::compaction_descriptor(std::move(sstables)), *cf, creator, replacer_fn_no_op()).then([s, key, new_tables] (auto) {
                 BOOST_REQUIRE(new_tables->size() == 1);
                 auto newsst = (*new_tables)[0];
                 BOOST_REQUIRE(newsst->generation() == 52);
@@ -2992,7 +2996,7 @@ SEASTAR_TEST_CASE(test_sstable_max_local_deletion_time_2) {
             BOOST_REQUIRE(now.time_since_epoch().count() == sst2->get_stats_metadata().max_local_deletion_time);
 
             auto creator = [s, tmpdir_path] { return sstables::make_sstable(s, tmpdir_path, 56, la, big); };
-            auto info = sstables::compact_sstables(sstables::compaction_descriptor({ sst1, sst2 }), *cf, creator).get0();
+            auto info = sstables::compact_sstables(sstables::compaction_descriptor({ sst1, sst2 }), *cf, creator, replacer_fn_no_op()).get0();
             BOOST_REQUIRE(info.new_sstables.size() == 1);
             BOOST_REQUIRE(((now + gc_clock::duration(100)).time_since_epoch().count()) == info.new_sstables.front()->get_stats_metadata().max_local_deletion_time);
         });
@@ -3094,7 +3098,7 @@ SEASTAR_TEST_CASE(compaction_with_fully_expired_table) {
         expired = get_fully_expired_sstables(*cf, ssts, gc_clock::now());
         BOOST_REQUIRE(expired.size() == 0);
 
-        auto ret = sstables::compact_sstables(sstables::compaction_descriptor(ssts), *cf, sst_gen).get0();
+        auto ret = sstables::compact_sstables(sstables::compaction_descriptor(ssts), *cf, sst_gen, replacer_fn_no_op()).get0();
         BOOST_REQUIRE(ret.start_size == sst->bytes_on_disk());
         BOOST_REQUIRE(ret.total_keys_written == 0);
         BOOST_REQUIRE(ret.new_sstables.empty());
@@ -3550,7 +3554,7 @@ SEASTAR_TEST_CASE(min_max_clustering_key_test_2) {
         check_min_max_column_names(sst2, { "9ck101" }, { "9ck298" });
 
         auto creator = [s, tmp] { return sstables::make_sstable(s, tmp->path, 3, la, big); };
-        auto info = sstables::compact_sstables(sstables::compaction_descriptor({ sst, sst2 }), *cf, creator).get0();
+        auto info = sstables::compact_sstables(sstables::compaction_descriptor({ sst, sst2 }), *cf, creator, replacer_fn_no_op()).get0();
         BOOST_REQUIRE(info.new_sstables.size() == 1);
         check_min_max_column_names(info.new_sstables.front(), { "0ck100" }, { "9ck298" });
     });
@@ -4166,7 +4170,7 @@ SEASTAR_TEST_CASE(sstable_expired_data_ratio) {
             sst->set_unshared();
             return sst;
         };
-        auto info = sstables::compact_sstables(sstables::compaction_descriptor({ sst }), *cf, creator).get0();
+        auto info = sstables::compact_sstables(sstables::compaction_descriptor({ sst }), *cf, creator, replacer_fn_no_op()).get0();
         BOOST_REQUIRE(info.new_sstables.size() == 1);
         BOOST_REQUIRE(info.new_sstables.front()->estimate_droppable_tombstone_ratio(gc_before) == 0.0f);
         BOOST_REQUIRE_CLOSE(info.new_sstables.front()->data_size(), uncompacted_size*(1-expired), 5);
@@ -4443,7 +4447,7 @@ SEASTAR_TEST_CASE(compaction_correctness_with_partitioned_sstable_set) {
             auto cf = make_lw_shared<column_family>(s, column_family_test_config(), column_family::no_commitlog(), *cm, cl_stats);
             cf->mark_ready_for_writes();
             return sstables::compact_sstables(sstables::compaction_descriptor(std::move(all), 0, 0 /*std::numeric_limits<uint64_t>::max()*/),
-                *cf, sst_gen).get0().new_sstables;
+                *cf, sst_gen, replacer_fn_no_op()).get0().new_sstables;
         };
 
         auto make_insert = [&] (auto p) {
