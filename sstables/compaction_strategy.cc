@@ -201,6 +201,9 @@ private:
     schema_ptr _schema;
     std::vector<shared_sstable> _unleveled_sstables;
     interval_map_type _leveled_sstables;
+    // Change counter on interval map for leveled sstables which is used by
+    // incremental selector to determine whether or not to invalidate iterators.
+    uint64_t _leveled_sstables_change_cnt = 0;
 private:
     static interval_type make_interval(const schema& s, const dht::partition_range& range) {
         return interval_type::closed(
@@ -254,6 +257,7 @@ public:
             auto first = sst->get_first_decorated_key().token();
             auto last = sst->get_last_decorated_key().token();
             using bound = dht::partition_range::bound;
+            _leveled_sstables_change_cnt++;
             _leveled_sstables.add({
                     make_interval(
                             dht::partition_range(
@@ -269,6 +273,7 @@ public:
             auto first = sst->get_first_decorated_key().token();
             auto last = sst->get_last_decorated_key().token();
             using bound = dht::partition_range::bound;
+            _leveled_sstables_change_cnt++;
             _leveled_sstables.subtract({
                     make_interval(
                             dht::partition_range(
@@ -284,21 +289,38 @@ public:
 class partitioned_sstable_set::incremental_selector : public incremental_selector_impl {
     schema_ptr _schema;
     const std::vector<shared_sstable>& _unleveled_sstables;
+    const interval_map_type& _leveled_sstables;
+    const uint64_t& _leveled_sstables_change_cnt;
+    uint64_t _last_known_leveled_sstables_change_cnt;
     map_iterator _it;
-    const map_iterator _end;
+    map_iterator _end;
 private:
     static dht::token_range to_token_range(const interval_type& i) {
         return dht::token_range::make({i.lower().token(), boost::icl::is_left_closed(i.bounds())},
             {i.upper().token(), boost::icl::is_right_closed(i.bounds())});
     }
+
+    void maybe_invalidate_iterators() {
+        if (_last_known_leveled_sstables_change_cnt != _leveled_sstables_change_cnt) {
+            _it = _leveled_sstables.begin();
+            _end = _leveled_sstables.end();
+            _last_known_leveled_sstables_change_cnt = _leveled_sstables_change_cnt;
+        }
+    }
 public:
-    incremental_selector(schema_ptr schema, const std::vector<shared_sstable>& unleveled_sstables, const interval_map_type& leveled_sstables)
+    incremental_selector(schema_ptr schema, const std::vector<shared_sstable>& unleveled_sstables, const interval_map_type& leveled_sstables,
+            const uint64_t& leveled_sstables_change_cnt)
         : _schema(std::move(schema))
         , _unleveled_sstables(unleveled_sstables)
+        , _leveled_sstables(leveled_sstables)
+        , _leveled_sstables_change_cnt(leveled_sstables_change_cnt)
+        , _last_known_leveled_sstables_change_cnt(leveled_sstables_change_cnt)
         , _it(leveled_sstables.begin())
         , _end(leveled_sstables.end()) {
     }
     virtual std::tuple<dht::token_range, std::vector<shared_sstable>, dht::ring_position> select(const dht::token& token) override {
+        maybe_invalidate_iterators();
+
         auto pr = dht::partition_range::make(dht::ring_position::starting_at(token), dht::ring_position::ending_at(token));
         auto interval = make_interval(*_schema, std::move(pr));
         auto ssts = _unleveled_sstables;
@@ -337,7 +359,7 @@ public:
 };
 
 std::unique_ptr<incremental_selector_impl> partitioned_sstable_set::make_incremental_selector() const {
-    return std::make_unique<incremental_selector>(_schema, _unleveled_sstables, _leveled_sstables);
+    return std::make_unique<incremental_selector>(_schema, _unleveled_sstables, _leveled_sstables, _leveled_sstables_change_cnt);
 }
 
 std::unique_ptr<sstable_set_impl> compaction_strategy_impl::make_sstable_set(schema_ptr schema) const {

@@ -49,8 +49,7 @@ public:
     void erase(shared_sstable sst);
 
     // Used to incrementally select sstables from sstable set using tokens.
-    // sstable set must be alive and cannot be modified while incremental
-    // selector is used.
+    // sstable set must be alive during the lifetime of the selector.
     class incremental_selector {
         std::unique_ptr<incremental_selector_impl> _impl;
         mutable stdx::optional<dht::token_range> _current_token_range;
