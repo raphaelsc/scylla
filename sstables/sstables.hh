@@ -427,6 +427,7 @@ private:
     std::vector<unsigned> _shards;
     stdx::optional<dht::decorated_key> _first;
     stdx::optional<dht::decorated_key> _last;
+    utils::UUID _run_identifier;
 
     lw_shared_ptr<file_input_stream_history> _single_partition_history = make_lw_shared<file_input_stream_history>();
     lw_shared_ptr<file_input_stream_history> _partition_range_history = make_lw_shared<file_input_stream_history>();
@@ -620,7 +621,7 @@ public:
     }
 
     utils::UUID run_identifier() const {
-        return _components->scylla_metadata->get_run_identifier();
+        return _run_identifier;
     }
 
     bool has_correct_max_deletion_time() const {
