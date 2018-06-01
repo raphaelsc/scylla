@@ -31,11 +31,21 @@ namespace sstables {
 class sstable_set_impl;
 class incremental_selector_impl;
 
+class sstable_run {
+    sstable_list _all;
+public:
+    void insert(shared_sstable sst);
+    void erase(shared_sstable sst);
+    uint64_t data_size() const;
+    const sstable_list& all() const { return _all; }
+};
+
 class sstable_set {
     std::unique_ptr<sstable_set_impl> _impl;
     // used to support column_family::get_sstable(), which wants to return an sstable_list
     // that has a reference somewhere
     lw_shared_ptr<sstable_list> _all;
+    std::unordered_map<utils::UUID, sstable_run> _all_runs;
 public:
     ~sstable_set();
     sstable_set(std::unique_ptr<sstable_set_impl> impl, lw_shared_ptr<sstable_list> all);
@@ -44,6 +54,7 @@ public:
     sstable_set& operator=(const sstable_set&);
     sstable_set& operator=(sstable_set&&) noexcept;
     std::vector<shared_sstable> select(const dht::partition_range& range) const;
+    std::vector<sstable_run> select(const std::vector<shared_sstable>& sstables) const;
     lw_shared_ptr<sstable_list> all() const { return _all; }
     void insert(shared_sstable sst);
     void erase(shared_sstable sst);
