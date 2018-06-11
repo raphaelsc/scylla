@@ -496,11 +496,17 @@ public:
 
         dblog.trace("incremental_reader_selector {}: {} new sstables to consider, advancing selector to {}", this, selection.sstables.size(), _selector_position);
 
-        return boost::copy_range<std::vector<flat_mutation_reader>>(selection.sstables
+        auto ret = boost::copy_range<std::vector<flat_mutation_reader>>(selection.sstables
                 | boost::adaptors::filtered([this] (auto& sst) { return _read_sstables.emplace(&*sst).second; })
                 | boost::adaptors::transformed([this] (auto& sst) {
                     return this->create_reader(sst);
                 }));
+        // prevents sstable_set::incremental_selector::_current_sstables from holding reference to
+        // sstables when done selecting.
+        if (_selector_position.is_max()) {
+            _selector = _sstables->make_incremental_selector();
+        }
+        return ret;
     }
 
     virtual std::vector<flat_mutation_reader> fast_forward_to(const dht::partition_range& pr, db::timeout_clock::time_point timeout) override {
