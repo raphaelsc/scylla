@@ -1419,6 +1419,7 @@ column_family::compact_sstables(sstables::compaction_descriptor descriptor, bool
         };
         auto replace_sstables = [this] (std::vector<sstables::shared_sstable> old_ssts, std::vector<sstables::shared_sstable> new_ssts) {
             _compaction_strategy.notify_completion(old_ssts, new_ssts);
+            _compaction_manager.propagate_replacement(this, old_ssts, new_ssts);
             this->rebuild_sstable_list(new_ssts, old_ssts);
         };
 

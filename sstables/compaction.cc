@@ -591,6 +591,7 @@ public:
             // TODO: calculate encoding_stats based on statistics of compacted sstables
             _writer.emplace(_sst->get_writer(*_cf.schema(), partitions_per_sstable(), cfg, encoding_stats{}, priority));
         }
+        do_pending_replacements();
         return &*_writer;
     }
 
@@ -626,9 +627,6 @@ private:
             // The goal is that exhausted sstables will be deleted as soon as possible,
             // so we need to release reference to them.
             std::for_each(exhausted, _sstables.end(), [this] (shared_sstable& sst) {
-                if (!_set.all()->empty()) {
-                    _set.erase(sst);
-                }
                 _compacting_for_max_purgeable_func.erase(sst);
                 _compacting->erase(sst);
                 _monitor_generator.remove_sstable(_info->tracking, sst);
@@ -644,6 +642,26 @@ private:
             std::move(_sstables.begin(), _sstables.end(), std::back_inserter(sstables_compacted));
             _replacer(std::move(sstables_compacted), std::move(_unreplaced_new_tables));
         }
+    }
+
+    void do_pending_replacements() {
+        if (_set.all()->empty() || _info->pending_replacements.empty()) {
+            return;
+        }
+        auto set = _set;
+        // Releases reference to sstables compacted by this compaction or another, both of which belongs
+        // to the same column family
+        for (auto& pending_replacement : _info->pending_replacements) {
+            for (auto& sst : pending_replacement.removed) {
+                set.erase(sst);
+            }
+            for (auto& sst : pending_replacement.added) {
+                set.insert(sst);
+            }
+        }
+        _set = std::move(set);
+        _selector = _set.make_incremental_selector();
+        _info->pending_replacements.clear();
     }
 };
 
