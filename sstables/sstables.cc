@@ -3838,6 +3838,10 @@ sstable::~sstable() {
         }
 
     }
+
+    if (_on_closed) {
+        _on_closed(*this);
+    }
 }
 
 sstring

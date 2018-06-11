@@ -386,6 +386,10 @@ public:
     }
     std::vector<sstring> component_filenames() const;
 
+    void set_on_closed(std::function<void (sstable&)> on_closed) noexcept {
+        _on_closed = std::move(on_closed);
+    }
+
     template<typename Func, typename... Args>
     auto sstable_write_io_check(Func&& func, Args&&... args) const {
         return do_io_check(_write_error_handler, func, std::forward<Args>(args)...);
@@ -427,6 +431,7 @@ private:
     stdx::optional<dht::decorated_key> _first;
     stdx::optional<dht::decorated_key> _last;
     utils::UUID _run_identifier;
+    std::function<void (sstable&)> _on_closed;
 
     lw_shared_ptr<file_input_stream_history> _single_partition_history = make_lw_shared<file_input_stream_history>();
     lw_shared_ptr<file_input_stream_history> _partition_range_history = make_lw_shared<file_input_stream_history>();
