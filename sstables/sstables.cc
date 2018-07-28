@@ -2882,9 +2882,9 @@ public:
         , _enc_stats(enc_stats)
         , _shard(shard)
         , _range_tombstones(_schema)
-        , _run_identifier(cfg.run_identifier)
         , _static_columns(get_indexed_columns_partitioned_by_atomicity(s.static_columns()))
         , _regular_columns(get_indexed_columns_partitioned_by_atomicity(s.regular_columns()))
+        , _run_identifier(cfg.run_identifier)
     {
         _sst.generate_toc(_schema.get_compressor_params().get_compressor(), _schema.bloom_filter_fp_chance());
         _sst.write_toc(_pc);
