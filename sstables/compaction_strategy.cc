@@ -662,6 +662,10 @@ compaction_descriptor compaction_strategy::get_sstables_for_compaction(column_fa
     return _compaction_strategy_impl->get_sstables_for_compaction(cfs, std::move(candidates));
 }
 
+compaction_descriptor compaction_strategy::get_sstables_for_major_compaction(column_family& cf, std::vector<sstables::shared_sstable> candidates) {
+    return _compaction_strategy_impl->get_sstables_for_major_compaction(cf, std::move(candidates));
+}
+
 std::vector<resharding_descriptor> compaction_strategy::get_resharding_jobs(column_family& cf, std::vector<sstables::shared_sstable> candidates) {
     return _compaction_strategy_impl->get_resharding_jobs(cf, std::move(candidates));
 }
