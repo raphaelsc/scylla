@@ -728,6 +728,10 @@ bool compaction_strategy::use_clustering_key_filter() const {
     return _compaction_strategy_impl->use_clustering_key_filter();
 }
 
+bool compaction_strategy::ignore_partial_runs() const {
+    return _compaction_strategy_impl->ignore_partial_runs();
+}
+
 sstable_set
 compaction_strategy::make_sstable_set(schema_ptr schema) const {
     return sstable_set(

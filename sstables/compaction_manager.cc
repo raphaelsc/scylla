@@ -203,10 +203,11 @@ std::vector<sstables::shared_sstable> compaction_manager::get_candidates(const c
     // selected for compaction, which could potentially result in wrong behavior.
     auto partial_run_identifiers = boost::copy_range<std::unordered_set<utils::UUID>>(_compactions
             | boost::adaptors::transformed(std::mem_fn(&sstables::compaction_info::run_identifier)));
+    auto& cs = cf.get_compaction_strategy();
 
     // Filter out sstables that are being compacted.
     for (auto& sst : cf.candidates_for_compaction()) {
-        if (!_compacting_sstables.count(sst) && !partial_run_identifiers.count(sst->run_identifier())) {
+        if (!_compacting_sstables.count(sst) && (!cs.ignore_partial_runs() || !partial_run_identifiers.count(sst->run_identifier()))) {
             candidates.push_back(sst);
         }
     }
