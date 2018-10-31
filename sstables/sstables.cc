@@ -69,6 +69,7 @@
 #include "vint-serialization.hh"
 #include "db/large_partition_handler.hh"
 #include "sstables/random_access_reader.hh"
+#include "utils/UUID_gen.hh"
 
 thread_local disk_error_signal_type sstable_read_error;
 thread_local disk_error_signal_type sstable_write_error;
@@ -328,6 +329,18 @@ inline void write(sstable_version_types v, file_writer& out, const vint<T>& t) {
 template <class T>
 future<> parse(sstable_version_types v, random_access_reader& in, vint<T>& t) {
     return read_vint(in, t.value);
+}
+
+future<> parse(sstable_version_types, random_access_reader& in, utils::UUID& uuid) {
+    return in.read_exactly(uuid.serialized_size()).then([&uuid] (temporary_buffer<char> buf) {
+        check_buf_size(buf, utils::UUID::serialized_size());
+
+        uuid = utils::UUID_gen::get_UUID(const_cast<int8_t*>(reinterpret_cast<const int8_t*>(buf.get())));
+    });
+}
+
+inline void write(sstable_version_types v, file_writer& out, const utils::UUID& uuid) {
+    out.write(uuid.serialize()).get();
 }
 
 template <class T>
@@ -2431,7 +2444,7 @@ sstable::read_scylla_metadata(const io_priority_class& pc) {
 }
 
 void
-sstable::write_scylla_metadata(const io_priority_class& pc, shard_id shard, sstable_enabled_features features) {
+sstable::write_scylla_metadata(const io_priority_class& pc, shard_id shard, sstable_enabled_features features, struct run_identifier identifier) {
     auto&& first_key = get_first_decorated_key();
     auto&& last_key = get_last_decorated_key();
     auto sm = create_sharding_metadata(_schema, first_key, last_key, shard);
@@ -2448,6 +2461,7 @@ sstable::write_scylla_metadata(const io_priority_class& pc, shard_id shard, ssta
 
     _components->scylla_metadata->data.set<scylla_metadata_type::Sharding>(std::move(sm));
     _components->scylla_metadata->data.set<scylla_metadata_type::Features>(std::move(features));
+    _components->scylla_metadata->data.set<scylla_metadata_type::RunIdentifier>(std::move(identifier));
 
     write_simple<component_type::Scylla>(*_components->scylla_metadata, pc);
 }
@@ -2484,6 +2498,7 @@ class sstable_writer_k_l : public sstable_writer::writer_impl {
     shard_id _shard; // Specifies which shard new sstable will belong to.
     write_monitor* _monitor;
     bool _correctly_serialize_non_compound_range_tombstones;
+    utils::UUID _run_identifier;
 private:
     void prepare_file_writer();
     void finish_file_writer();
@@ -2494,7 +2509,8 @@ public:
     sstable_writer_k_l(sstable_writer_k_l&& o) : writer_impl(o._sst, o._schema, o._pc, o._cfg), _backup(o._backup),
             _leave_unsealed(o._leave_unsealed), _compression_enabled(o._compression_enabled), _writer(std::move(o._writer)),
             _components_writer(std::move(o._components_writer)), _shard(o._shard), _monitor(o._monitor),
-            _correctly_serialize_non_compound_range_tombstones(o._correctly_serialize_non_compound_range_tombstones) { }
+            _correctly_serialize_non_compound_range_tombstones(o._correctly_serialize_non_compound_range_tombstones),
+            _run_identifier(o._run_identifier) { }
     void consume_new_partition(const dht::decorated_key& dk) override { return _components_writer->consume_new_partition(dk); }
     void consume(tombstone t) override { _components_writer->consume(t); }
     stop_iteration consume(static_row&& sr) override { return _components_writer->consume(std::move(sr)); }
@@ -2551,6 +2567,7 @@ sstable_writer_k_l::sstable_writer_k_l(sstable& sst, const schema& s, uint64_t e
     , _shard(shard)
     , _monitor(cfg.monitor)
     , _correctly_serialize_non_compound_range_tombstones(cfg.correctly_serialize_non_compound_range_tombstones)
+    , _run_identifier(cfg.run_identifier)
 {
     _sst.generate_toc(_schema.get_compressor_params().get_compressor(), _schema.bloom_filter_fp_chance());
     _sst.write_toc(_pc);
@@ -2582,7 +2599,8 @@ void sstable_writer_k_l::consume_end_of_stream()
     if (!_correctly_serialize_non_compound_range_tombstones) {
         features.disable(sstable_feature::NonCompoundRangeTombstones);
     }
-    _sst.write_scylla_metadata(_pc, _shard, std::move(features));
+    run_identifier identifier{_run_identifier};
+    _sst.write_scylla_metadata(_pc, _shard, std::move(features), std::move(identifier));
 
     _monitor->on_write_completed();
 
@@ -2768,6 +2786,7 @@ private:
         size_t desired_block_size;
     } _pi_write_m;
     column_stats _c_stats;
+    utils::UUID _run_identifier;
 
     void init_file_writers();
     void close_data_writer();
@@ -2862,6 +2881,7 @@ public:
         , _enc_stats(enc_stats)
         , _shard(shard)
         , _range_tombstones(_schema)
+        , _run_identifier(cfg.run_identifier)
         , _static_columns(get_indexed_columns_partitioned_by_atomicity(s.static_columns()))
         , _regular_columns(get_indexed_columns_partitioned_by_atomicity(s.regular_columns()))
     {
@@ -3538,7 +3558,8 @@ void sstable_writer_m::consume_end_of_stream() {
     if (!_cfg.correctly_serialize_non_compound_range_tombstones) {
         features.disable(sstable_feature::NonCompoundRangeTombstones);
     }
-    _sst.write_scylla_metadata(_pc, _shard, std::move(features));
+    run_identifier identifier{_run_identifier};
+    _sst.write_scylla_metadata(_pc, _shard, std::move(features), std::move(identifier));
     _cfg.monitor->on_write_completed();
     if (!_cfg.leave_unsealed) {
         _sst.seal_sstable(_cfg.backup).get();
