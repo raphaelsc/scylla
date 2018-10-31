@@ -4089,6 +4089,8 @@ sstable::~sstable() {
         }
 
     }
+
+    _on_closed(*this);
 }
 
 sstring
