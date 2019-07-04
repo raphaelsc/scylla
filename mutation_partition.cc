@@ -1799,23 +1799,36 @@ row row::difference(const schema& s, column_kind kind, const row& other) const
     return r;
 }
 
-bool row_marker::compact_and_expire(tombstone tomb, gc_clock::time_point now,
+std::pair<bool, row_marker> row_marker::do_compact_and_expire(tombstone tomb, gc_clock::time_point now,
         can_gc_fn& can_gc, gc_clock::time_point gc_before) {
+    row_marker purged_marker{};
     if (is_missing()) {
-        return false;
+        return {false, purged_marker};
     }
     if (_timestamp <= tomb.timestamp) {
         _timestamp = api::missing_timestamp;
-        return false;
+        return {false, purged_marker};
     }
     if (_ttl > no_ttl && _expiry < now) {
         _expiry -= _ttl;
         _ttl = dead;
     }
     if (_ttl == dead && _expiry < gc_before && can_gc(tombstone(_timestamp, _expiry))) {
+        purged_marker = *this;
         _timestamp = api::missing_timestamp;
     }
-    return !is_missing() && _ttl != dead;
+    return {!is_missing() && _ttl != dead, purged_marker};
+}
+
+bool row_marker::compact_and_expire(tombstone tomb, gc_clock::time_point now,
+        can_gc_fn& can_gc, gc_clock::time_point gc_before) {
+    return do_compact_and_expire(tomb, now, can_gc, gc_before).first;
+}
+
+row_marker::compaction_result row_marker::compact_expire_and_collect_purged_tombstones(tombstone tomb, gc_clock::time_point now,
+        can_gc_fn& can_gc, gc_clock::time_point gc_before) {
+    auto [is_live, rm] = do_compact_and_expire(tomb, now, can_gc, gc_before);
+    return {is_live, rm};
 }
 
 mutation_partition mutation_partition::difference(schema_ptr s, const mutation_partition& other) const

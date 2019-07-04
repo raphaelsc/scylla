@@ -413,12 +413,22 @@ class row_marker;
 int compare_row_marker_for_merge(const row_marker& left, const row_marker& right) noexcept;
 
 class row_marker {
+public:
+    struct compaction_result;
+
+private:
     static constexpr gc_clock::duration no_ttl { 0 };
     static constexpr gc_clock::duration dead { -1 };
     static constexpr gc_clock::time_point no_expiry { gc_clock::duration(0) };
     api::timestamp_type _timestamp = api::missing_timestamp;
     gc_clock::duration _ttl = no_ttl;
     gc_clock::time_point _expiry = no_expiry;
+private:
+    // .first is true iff the marker is live.
+    // .second contains the row_marker in its pre-purge state. Only set
+    // when the marker is expired and purged.
+    std::pair<bool, row_marker> do_compact_and_expire(tombstone tomb, gc_clock::time_point now,
+            can_gc_fn& can_gc, gc_clock::time_point gc_before);
 public:
     row_marker() = default;
     explicit row_marker(api::timestamp_type created_at) : _timestamp(created_at) { }
@@ -481,6 +491,8 @@ public:
     // Returns true if row marker is live.
     bool compact_and_expire(tombstone tomb, gc_clock::time_point now,
             can_gc_fn& can_gc, gc_clock::time_point gc_before);
+    compaction_result compact_expire_and_collect_purged_tombstones(tombstone tomb, gc_clock::time_point now,
+            can_gc_fn& can_gc, gc_clock::time_point gc_before);
     // Consistent with feed_hash()
     bool operator==(const row_marker& other) const {
         if (_timestamp != other._timestamp) {
@@ -509,6 +521,11 @@ public:
         }
     }
     friend std::ostream& operator<<(std::ostream& os, const row_marker& rm);
+};
+
+struct row_marker::compaction_result {
+    bool is_alive;
+    row_marker purged_marker;
 };
 
 template<>
