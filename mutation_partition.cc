@@ -1643,20 +1643,21 @@ static bool dead_marker_shadows_row(const schema& s, column_kind kind, const row
             && kind == column_kind::regular_column; // not applicable to static rows
 }
 
-bool row::compact_and_expire(
+std::pair<bool, std::optional<row>> row::do_compact_and_expire(
         const schema& s,
         column_kind kind,
         row_tombstone tomb,
         gc_clock::time_point query_time,
         can_gc_fn& can_gc,
         gc_clock::time_point gc_before,
-        const row_marker& marker)
+        const row_marker& marker,
+        bool collect_purged_tombstones)
 {
     if (dead_marker_shadows_row(s, kind, marker)) {
         tomb.apply(shadowable_tombstone(api::max_timestamp, gc_clock::time_point::max()), row_marker());
     }
     bool any_live = false;
-    remove_if([&] (column_id id, atomic_cell_or_collection& c) {
+    auto remove_condition = [&] (column_id id, atomic_cell_or_collection& c) {
         bool erase = false;
         const column_definition& def = s.column_at(kind, id);
         if (def.is_atomic()) {
@@ -1688,14 +1689,33 @@ bool row::compact_and_expire(
             any_live |= m.compact_and_expire(tomb, query_time, can_gc, gc_before);
             if (m.cells.empty() && m.tomb <= tomb.tomb()) {
                 erase = true;
-            } else {
-                c = ctype->serialize_mutation_form(m);
             }
+            c = ctype->serialize_mutation_form(m);
           });
         }
         return erase;
-    });
-    return any_live;
+    };
+    if (collect_purged_tombstones) {
+        row purged_tombstones;
+        remove_if(std::move(remove_condition), [&] (column_id id, atomic_cell_or_collection&& c) {
+            purged_tombstones.apply(s.column_at(kind, id), std::move(c));
+        });
+        return {any_live, std::move(purged_tombstones)};
+    } else {
+        remove_if(std::move(remove_condition), [&] (column_id id, atomic_cell_or_collection&& c) {});
+        return {any_live, std::nullopt};
+    }
+}
+
+bool row::compact_and_expire(
+        const schema& s,
+        column_kind kind,
+        row_tombstone tomb,
+        gc_clock::time_point query_time,
+        can_gc_fn& can_gc,
+        gc_clock::time_point gc_before,
+        const row_marker& marker) {
+    return do_compact_and_expire(s, kind, tomb, query_time, can_gc, gc_before, marker, false).first;
 }
 
 bool row::compact_and_expire(
@@ -1706,7 +1726,31 @@ bool row::compact_and_expire(
         can_gc_fn& can_gc,
         gc_clock::time_point gc_before) {
     row_marker m;
-    return compact_and_expire(s, kind, tomb, query_time, can_gc, gc_before, m);
+    return do_compact_and_expire(s, kind, tomb, query_time, can_gc, gc_before, m, false).first;
+}
+
+row::compaction_result row::compact_expire_and_collect_purged_tombstones(
+        const schema& s,
+        column_kind kind,
+        row_tombstone tomb,
+        gc_clock::time_point query_time,
+        can_gc_fn& can_gc,
+        gc_clock::time_point gc_before,
+        const row_marker& marker) {
+    auto [is_live, purged_tombstones_opt] = do_compact_and_expire(s, kind, tomb, query_time, can_gc, gc_before, marker, true);
+    return {is_live, std::move(*purged_tombstones_opt)};
+}
+
+row::compaction_result row::compact_expire_and_collect_purged_tombstones(
+        const schema& s,
+        column_kind kind,
+        row_tombstone tomb,
+        gc_clock::time_point query_time,
+        can_gc_fn& can_gc,
+        gc_clock::time_point gc_before) {
+    row_marker m;
+    auto [is_live, purged_tombstones_opt] = do_compact_and_expire(s, kind, tomb, query_time, can_gc, gc_before, m, true);
+    return {is_live, std::move(*purged_tombstones_opt)};
 }
 
 deletable_row deletable_row::difference(const schema& s, column_kind kind, const deletable_row& other) const

@@ -174,6 +174,9 @@ private:
         vector_storage vector;
     } _storage;
 public:
+    struct compaction_result;
+
+public:
     row();
     ~row();
     row(const schema&, column_kind, const row&);
@@ -191,24 +194,27 @@ public:
     // Returns a pointer to cell's value and hash or nullptr if column is not set.
     const cell_and_hash* find_cell_and_hash(column_id id) const;
 private:
-    template<typename Func>
-    void remove_if(Func&& func) {
+    // Removes entries for which `condition` returns true. Removed
+    // entries are passed to `collect`.
+    template<typename ConditionFunc, typename CollectFunc>
+    void remove_if(ConditionFunc&& condition, CollectFunc collect) {
         if (_type == storage_type::vector) {
             for (unsigned i = 0; i < _storage.vector.v.size(); i++) {
                 if (!_storage.vector.present.test(i)) {
                     continue;
                 }
                 auto& c = _storage.vector.v[i].cell;
-                if (func(i, c)) {
-                    c = atomic_cell_or_collection();
+                if (condition(i, c)) {
+                    collect(i, std::exchange(c, atomic_cell_or_collection()));
                     _storage.vector.present.reset(i);
                     _size--;
                 }
             }
         } else {
             for (auto it = _storage.set.begin(); it != _storage.set.end();) {
-                if (func(it->id(), it->cell())) {
+                if (condition(it->id(), it->cell())) {
                     auto& entry = *it;
+                    collect(entry.id(), std::move(entry.cell()));
                     it = _storage.set.erase(it);
                     current_allocator().destroy(&entry);
                     _size--;
@@ -218,6 +224,19 @@ private:
             }
         }
     }
+
+    // .first is true iff there are any live cells left.
+    // .second is a row that contains all the purged atoms. Only engaged iff
+    // `collect_purged_tombstones` is true.
+    std::pair<bool, std::optional<row>> do_compact_and_expire(
+            const schema& s,
+            column_kind kind,
+            row_tombstone tomb,
+            gc_clock::time_point query_time,
+            can_gc_fn&,
+            gc_clock::time_point gc_before,
+            const row_marker& marker,
+            bool collect_purged_tombstones);
 
 private:
     auto get_range_vector() const {
@@ -341,6 +360,23 @@ public:
             can_gc_fn&,
             gc_clock::time_point gc_before);
 
+    compaction_result compact_expire_and_collect_purged_tombstones(
+            const schema& s,
+            column_kind kind,
+            row_tombstone tomb,
+            gc_clock::time_point query_time,
+            can_gc_fn&,
+            gc_clock::time_point gc_before,
+            const row_marker& marker);
+
+    compaction_result compact_expire_and_collect_purged_tombstones(
+            const schema& s,
+            column_kind kind,
+            row_tombstone tomb,
+            gc_clock::time_point query_time,
+            can_gc_fn&,
+            gc_clock::time_point gc_before);
+
     row difference(const schema&, column_kind, const row& other) const;
 
     bool equal(column_kind kind, const schema& this_schema, const row& other, const schema& other_schema) const;
@@ -366,6 +402,11 @@ public:
         friend std::ostream& operator<<(std::ostream& os, const printer& p);
     };
     friend std::ostream& operator<<(std::ostream& os, const printer& p);
+};
+
+struct row::compaction_result {
+    bool is_live;
+    row erased_cells;
 };
 
 class row_marker;
