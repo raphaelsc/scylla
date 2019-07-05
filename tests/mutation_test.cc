@@ -50,6 +50,7 @@
 #include "tests/test_services.hh"
 #include "tests/failure_injecting_allocation_strategy.hh"
 #include "tests/sstable_utils.hh"
+#include "tests/random_schema.hh"
 #include "mutation_source_test.hh"
 #include "cell_locking.hh"
 #include "flat_mutation_reader_assertions.hh"
@@ -59,6 +60,8 @@
 #include "types/map.hh"
 #include "types/list.hh"
 #include "types/set.hh"
+
+logging::logger tlog("mutation_test");
 
 using namespace std::chrono_literals;
 
@@ -1859,4 +1862,713 @@ SEASTAR_THREAD_TEST_CASE(test_collection_compaction) {
     BOOST_CHECK(!any_live);
     BOOST_CHECK(!cmut.tomb);
     BOOST_CHECK(cmut.cells.empty());
+}
+
+namespace {
+
+using row_summary = std::set<column_id>;
+
+struct static_row_summary {
+    row_summary cells;
+};
+
+struct clustering_row_summary {
+    row_marker marker;
+    row_tombstone tomb;
+    row_summary cells;
+};
+
+class range_tombstone_less_compare {
+    position_in_partition::tri_compare _pip_cmp;
+    bound_view::compare _bv_cmp;
+
+public:
+    range_tombstone_less_compare(const schema& s) : _pip_cmp(s), _bv_cmp(s) {
+    }
+    bool operator()(const range_tombstone& a, const range_tombstone& b) const {
+        auto start_bound_cmp = _pip_cmp(a.position(), b.position());
+        if (start_bound_cmp) {
+            return start_bound_cmp < 0;
+        }
+        // Range tombstones can have the same start position. In this case use
+        // the end bound to decide who's "less".
+        return _bv_cmp(a.end_bound(), b.end_bound());
+    }
+};
+
+struct partition_summary {
+    dht::decorated_key key;
+    tombstone tomb;
+    std::optional<static_row_summary> static_row;
+    std::map<position_in_partition, clustering_row_summary, position_in_partition::less_compare> clustering_rows;
+    std::set<range_tombstone, range_tombstone_less_compare> range_tombstones;
+
+    partition_summary(const schema& s, dht::decorated_key dk)
+        : key(std::move(dk))
+        , clustering_rows(position_in_partition::less_compare(s))
+        , range_tombstones(range_tombstone_less_compare(s)) {
+    }
+    partition_summary(
+            dht::decorated_key dk,
+            tombstone tomb,
+            std::optional<static_row_summary> static_row,
+            std::map<position_in_partition, clustering_row_summary, position_in_partition::less_compare> clustering_rows,
+            std::set<range_tombstone, range_tombstone_less_compare> range_tombstones)
+        : key(std::move(dk))
+        , tomb(tomb)
+        , static_row(std::move(static_row))
+        , clustering_rows(std::move(clustering_rows))
+        , range_tombstones(std::move(range_tombstones)) {
+    }
+};
+
+template <bool Purged>
+class basic_compacted_fragments_consumer_base {
+    const schema& _schema;
+    gc_clock::time_point _query_time;
+    gc_clock::time_point _gc_before;
+    std::function<api::timestamp_type(const dht::decorated_key&)> _get_max_purgeable;
+    api::timestamp_type _max_purgeable;
+
+    std::vector<partition_summary> _partition_summaries;
+    std::optional<partition_summary> _partition_summary;
+
+private:
+    bool can_gc(tombstone t) {
+        if (!t) {
+            return false;
+        }
+        return t.timestamp < _max_purgeable;
+    }
+    bool is_tombstone_purgeable(const tombstone& t) {
+        return t.deletion_time < _gc_before && can_gc(t);
+    }
+    bool is_tombstone_purgeable(const row_tombstone& t) {
+        return t.max_deletion_time() < _gc_before && can_gc(t.tomb());
+    }
+    bool is_marker_purgeable(const row_marker& marker, tombstone tomb) {
+        return marker.timestamp() <= tomb.timestamp ||
+            (marker.is_dead(_query_time) && marker.expiry() < _gc_before && can_gc(tombstone(marker.timestamp(), marker.expiry())));
+    }
+    bool is_cell_purgeable(const column_definition& cdef, const atomic_cell_or_collection& cell_or_collection, const row_tombstone& tomb) {
+        if (cdef.type->is_atomic()) {
+            atomic_cell_view cell = cell_or_collection.as_atomic_cell(cdef);
+            auto can_erase_cell = [&] {
+                return cell.deletion_time() < _gc_before && can_gc(tombstone(cell.timestamp(), cell.deletion_time()));
+            };
+            return cell.is_covered_by(tomb.regular(), cdef.is_counter()) ||
+                    cell.is_covered_by(tomb.shadowable().tomb(), cdef.is_counter()) ||
+                    (cell.has_expired(_query_time) && can_erase_cell()) ||
+                    (!cell.is_live() && can_erase_cell());
+        } else if (cdef.type->is_collection()) {
+            auto cell = cell_or_collection.as_collection_mutation();
+            auto ctype = static_pointer_cast<const collection_type_impl>(cdef.type);
+            bool can_purge;
+            cell.data.with_linearized([&] (bytes_view cell_bv) {
+                auto m_view = ctype->deserialize_mutation_form(cell_bv);
+                collection_type_impl::mutation m = m_view.materialize(*ctype);
+                can_purge = m.cells.empty() && m.tomb <= tomb.tomb();
+            });
+            return can_purge;
+        }
+        throw std::runtime_error(fmt::format("Cannot check cell {} of unknown type {}", cdef.name_as_text(), cdef.type->name()));
+    }
+    row_summary examine_row(column_kind kind, const row& r, const row_tombstone& tomb) {
+        row_summary cr;
+        r.for_each_cell([&, this, kind] (column_id id, const atomic_cell_or_collection& cell) {
+            const auto can_purge = is_cell_purgeable(_schema.column_at(kind, id), cell, tomb);
+            BOOST_REQUIRE_EQUAL(can_purge, Purged);
+            cr.emplace(id);
+        });
+        return cr;
+    }
+
+public:
+    basic_compacted_fragments_consumer_base(const schema& schema, gc_clock::time_point query_time,
+            std::function<api::timestamp_type(const dht::decorated_key&)> get_max_purgeable)
+        : _schema(schema)
+        , _query_time(query_time)
+        , _gc_before(saturating_subtract(query_time, _schema.gc_grace_seconds()))
+        , _get_max_purgeable(std::move(get_max_purgeable)) {
+    }
+    void consume_new_partition(const dht::decorated_key& dk) {
+        _max_purgeable = _get_max_purgeable(dk);
+        BOOST_REQUIRE(!_partition_summary);
+        _partition_summary.emplace(_schema, dk);
+    }
+    void consume(tombstone t) {
+        BOOST_REQUIRE(t);
+        BOOST_REQUIRE_EQUAL(is_tombstone_purgeable(t), Purged);
+
+        BOOST_REQUIRE(_partition_summary);
+        _partition_summary->tomb = t;
+    }
+    stop_iteration consume(static_row&& sr, tombstone tomb, bool is_live) {
+        BOOST_REQUIRE(!Purged || !is_live);
+
+        auto compacted_cells = examine_row(column_kind::static_column, sr.cells(), row_tombstone(tomb));
+
+        BOOST_REQUIRE(_partition_summary);
+        _partition_summary->static_row.emplace(static_row_summary{std::move(compacted_cells)});
+
+        return stop_iteration::no;
+    }
+    stop_iteration consume(clustering_row&& cr, row_tombstone tomb, bool is_live) {
+        BOOST_REQUIRE(!Purged || !is_live);
+
+        if (!cr.marker().is_missing()) {
+            BOOST_REQUIRE_EQUAL(is_marker_purgeable(cr.marker(), tomb.tomb()), Purged);
+        }
+        if (cr.tomb().regular()) {
+            BOOST_REQUIRE_EQUAL(is_tombstone_purgeable(cr.tomb()), Purged);
+        }
+        auto compacted_cells = examine_row(column_kind::regular_column, cr.cells(), tomb);
+
+        BOOST_REQUIRE(_partition_summary);
+        _partition_summary->clustering_rows.emplace(cr.position(), clustering_row_summary{cr.marker(), cr.tomb(), std::move(compacted_cells)});
+
+        return stop_iteration::no;
+    }
+    stop_iteration consume(range_tombstone&& rt) {
+        BOOST_REQUIRE_EQUAL(is_tombstone_purgeable(rt.tomb), Purged);
+
+        BOOST_REQUIRE(_partition_summary);
+        _partition_summary->range_tombstones.emplace(rt);
+
+        return stop_iteration::no;
+    }
+    stop_iteration consume_end_of_partition() {
+        BOOST_REQUIRE(_partition_summary);
+        _partition_summaries.emplace_back(std::move(*_partition_summary));
+        _partition_summary.reset();
+
+        return stop_iteration::no;
+    }
+    std::vector<partition_summary> consume_end_of_stream() {
+        BOOST_REQUIRE(!_partition_summary);
+
+        return _partition_summaries;
+    }
+};
+
+using survived_compacted_fragments_consumer = basic_compacted_fragments_consumer_base<false>;
+using purged_compacted_fragments_consumer = basic_compacted_fragments_consumer_base<true>;
+
+row_summary merge(row_summary a, row_summary b) {
+    a.merge(std::move(b));
+    return std::move(a);
+}
+
+std::optional<static_row_summary> merge(std::optional<static_row_summary> a, std::optional<static_row_summary> b) {
+    if (!a && !b) {
+        return {};
+    }
+    if (!a || !b) {
+        return a ? std::move(a) : std::move(b);
+    }
+    return static_row_summary{merge(std::move(a->cells), std::move(b->cells))};
+}
+
+std::set<range_tombstone, range_tombstone_less_compare> merge(std::set<range_tombstone, range_tombstone_less_compare> a,
+        std::set<range_tombstone, range_tombstone_less_compare> b) {
+    a.merge(std::move(b));
+    return std::move(a);
+}
+
+template <typename Container, typename OutputIt>
+void merge_container(
+        Container a,
+        Container b,
+        OutputIt oit,
+        std::function<int(const typename Container::value_type&, const typename Container::value_type&)> tri_cmp,
+        std::function<typename Container::value_type(typename Container::value_type, typename Container::value_type)> merge_func) {
+    auto it_a = a.begin();
+    auto a_end = a.end();
+    auto it_b = b.begin();
+    auto b_end = b.end();
+
+    while (it_a != a_end && it_b != b_end) {
+        const auto res = tri_cmp(*it_a, *it_b);
+        if (res < 0) {
+            *oit++ = std::move(*it_a++);
+        } else if (res == 0) {
+            *oit++ = merge_func(std::move(*it_a++), std::move(*it_b++));
+        } else { // res > 0
+            *oit++ = std::move(*it_b++);
+        }
+    }
+
+    for (; it_a != a_end; ++it_a) {
+        *oit++ = std::move(*it_a);
+    }
+    for (; it_b != b_end; ++it_b) {
+        *oit++ = std::move(*it_b);
+    }
+}
+
+std::map<position_in_partition, clustering_row_summary, position_in_partition::less_compare> merge(
+        const schema& s,
+        std::map<position_in_partition, clustering_row_summary, position_in_partition::less_compare> a,
+        std::map<position_in_partition, clustering_row_summary, position_in_partition::less_compare> b) {
+    std::map<position_in_partition, clustering_row_summary, position_in_partition::less_compare> merged(s);
+    merge_container(
+            std::move(a),
+            std::move(b),
+            std::inserter(merged, merged.end()),
+            [tri_cmp = position_in_partition::tri_compare(s)] (const std::pair<const position_in_partition, clustering_row_summary>& a,
+                    const std::pair<const position_in_partition, clustering_row_summary>& b) {
+                return tri_cmp(a.first, b.first);
+            },
+            [&s] (std::pair<const position_in_partition, clustering_row_summary> a, std::pair<const position_in_partition, clustering_row_summary> b) {
+                if (!a.second.marker.is_missing() || !b.second.marker.is_missing()) {
+                    BOOST_REQUIRE(a.second.marker.is_missing() != b.second.marker.is_missing());
+                }
+                if (a.second.tomb.regular() || b.second.tomb.regular()) {
+                    BOOST_REQUIRE(bool(a.second.tomb.regular()) != bool(b.second.tomb.regular()));
+                }
+                clustering_row_summary r{
+                        (a.second.marker.is_missing() ? b.second.marker : a.second.marker),
+                        (a.second.tomb.regular() ? a.second.tomb : b.second.tomb),
+                        merge(std::move(a.second.cells), std::move(b.second.cells))};
+                std::pair<const position_in_partition, clustering_row_summary> e{a.first, std::move(r)};
+                return e;
+            });
+    return merged;
+}
+
+std::vector<partition_summary> merge(const schema& s, std::vector<partition_summary> a, std::vector<partition_summary> b) {
+    std::vector<partition_summary> merged;
+    merge_container(
+            std::move(a),
+            std::move(b),
+            std::back_inserter(merged),
+            [&s] (const partition_summary& a, const partition_summary& b) {
+                return a.key.tri_compare(s, b.key);
+            },
+            [&s] (partition_summary a, partition_summary b) {
+                if (a.tomb || b.tomb) {
+                    BOOST_REQUIRE(bool(a.tomb) != bool(b.tomb));
+                }
+                partition_summary p{
+                        a.key,
+                        (a.tomb ? a.tomb : b.tomb),
+                        merge(std::move(a.static_row), std::move(b.static_row)),
+                        merge(s, std::move(a.clustering_rows), std::move(b.clustering_rows)),
+                        merge(std::move(a.range_tombstones), std::move(b.range_tombstones))};
+                return p;
+            });
+    return merged;
+}
+
+row_summary summarize_row(const row& r) {
+    row_summary summary;
+    r.for_each_cell([&] (column_id id, const atomic_cell_or_collection&) {
+        summary.emplace(id);
+    });
+    return summary;
+}
+
+std::map<position_in_partition, clustering_row_summary, position_in_partition::less_compare> summarize_clustering_rows(
+        const schema& s,
+        const mutation_partition::rows_type& clustering_rows) {
+    std::map<position_in_partition, clustering_row_summary, position_in_partition::less_compare> summary{position_in_partition::less_compare(s)};
+    for (const auto& entry : clustering_rows) {
+        const auto& r = entry.row();
+        summary.emplace(
+                entry.position(),
+                clustering_row_summary{r.marker(), r.deleted_at(), summarize_row(r.cells())});
+    }
+    return summary;
+}
+
+std::set<range_tombstone, range_tombstone_less_compare> summarize_range_tombstones(const schema& s, const range_tombstone_list& range_tombstones) {
+    return std::set<range_tombstone, range_tombstone_less_compare>(range_tombstones.begin(), range_tombstones.end(), range_tombstone_less_compare(s));
+}
+
+partition_summary summarize_mutation(const mutation& m) {
+    const auto& s = *m.schema();
+    return partition_summary(
+            m.decorated_key(),
+            m.partition().partition_tombstone(),
+            m.partition().static_row().empty() ? std::nullopt : std::optional(static_row_summary{summarize_row(m.partition().static_row())}),
+            summarize_clustering_rows(s, m.partition().clustered_rows()),
+            summarize_range_tombstones(s, m.partition().row_tombstones()));
+}
+
+std::vector<partition_summary> summarize_mutations(const std::vector<mutation>& mutations) {
+    std::vector<partition_summary> summaries;
+    summaries.reserve(mutations.size());
+    std::transform(mutations.cbegin(), mutations.cend(), std::back_inserter(summaries), summarize_mutation);
+    return summaries;
+}
+
+struct stats {
+    size_t partitions = 0;
+    size_t partition_tombstones = 0;
+    size_t static_rows = 0;
+    size_t static_cells = 0;
+    size_t clustering_rows = 0;
+    size_t row_markers = 0;
+    size_t row_tombstones = 0;
+    size_t clustering_cells = 0;
+    size_t range_tombstones = 0;
+};
+
+std::ostream& operator<<(std::ostream& os, const stats& s) {
+    os << "stats{";
+    os << "partitions=" << s.partitions;
+    os << ", partition_tombstones=" << s.partition_tombstones;
+    os << ", static_rows=" << s.static_rows;
+    os << ", static_cells=" << s.static_cells;
+    os << ", clustering_rows=" << s.clustering_rows;
+    os << ", row_markers=" << s.row_markers;
+    os << ", row_tombstones=" << s.row_tombstones;
+    os << ", clustering_cells=" << s.clustering_cells;
+    os << ", range_tombstones=" << s.range_tombstones;
+    os << "}";
+    return os;
+}
+
+stats create_stats(const std::vector<partition_summary>& summaries) {
+    stats s;
+
+    s.partitions = summaries.size();
+    for (const auto& summary : summaries) {
+        s.partition_tombstones += size_t(bool(summary.tomb));
+        if (summary.static_row) {
+            ++s.static_rows;
+            s.static_cells += summary.static_row->cells.size();
+        }
+
+        s.clustering_rows += summary.clustering_rows.size();
+        for (const auto& [pos, cr] : summary.clustering_rows) {
+            s.row_markers += size_t{!cr.marker.is_missing()};
+            s.row_tombstones += size_t{bool(cr.tomb.regular())};
+            s.clustering_cells += cr.cells.size();
+        }
+
+        s.range_tombstones += summary.range_tombstones.size();
+    }
+
+    return s;
+}
+
+std::vector<mutation_fragment> combine_into_dummy_fragment_stream(const schema& schema, const partition_summary& summary) {
+    std::vector<mutation_fragment> frags;
+    frags.reserve(summary.clustering_rows.size() + summary.range_tombstones.size());
+
+    for (const auto& [pos, cr] : summary.clustering_rows) {
+        frags.emplace_back(clustering_row(pos.key(), cr.tomb, cr.marker, {}));
+    }
+    for (const auto& rt : summary.range_tombstones) {
+        frags.emplace_back(range_tombstone(rt));
+    }
+    boost::sort(frags, [cmp = position_in_partition::tri_compare(schema), rt_cmp = range_tombstone_less_compare(schema)] (
+            const mutation_fragment& a, const mutation_fragment& b) {
+        if (const auto res = cmp(a.position(), b.position()); res != 0) {
+            return res < 0;
+        }
+        if (a.is_range_tombstone() && b.is_range_tombstone()) {
+            return rt_cmp(a.as_range_tombstone(), b.as_range_tombstone());
+        }
+        // Sort range-tombstones before rows (if they have the same pos).
+        return a.is_range_tombstone() && !b.is_range_tombstone();
+    });
+    return frags;
+}
+
+void check_dummy_clustering_rows_have_equivalent_tombstone_coverage(const clustering_row& cra, const clustering_row& cre, tombstone tomb) {
+    if (cre.marker().is_missing()) {
+        BOOST_REQUIRE(cra.marker().is_missing());
+    } else {
+        // actual is allowed to be missing the marker only if it is
+        // covered by a tombstone.
+        BOOST_REQUIRE(
+                (cra.marker().timestamp() == cre.marker().timestamp()) ||
+                (cre.marker().timestamp() <= tomb.timestamp));
+    }
+    if (cre.tomb().regular()) {
+        // actual is allowed to be missing the row tombstone only
+        // if it is covered by a higher level tombstone.
+        BOOST_REQUIRE(
+                (cra.tomb() == cre.tomb()) ||
+                (cre.tomb().tomb().timestamp <= tomb.timestamp));
+    } else {
+        BOOST_REQUIRE(!cre.tomb().regular());
+    }
+}
+
+void check_dummy_fragment_is_allowed_to_be_missing(const mutation_fragment& mf, tombstone partition_tombstone, tombstone current_tombstone) {
+    // actual is missing whatever `ite` is. So check that it is allowed
+    // to be missing it.
+    if (mf.is_range_tombstone()) {
+        BOOST_REQUIRE_LE(mf.as_range_tombstone().tomb.timestamp, partition_tombstone.timestamp);
+    } else if (mf.is_clustering_row()) {
+        // A clustering row can only be missing if it has no cells and
+        // the marker and/or the row tombstone is covered by a higher
+        // level tombstone.
+        const auto& cr = mf.as_clustering_row();
+        BOOST_REQUIRE(cr.cells().empty());
+        BOOST_REQUIRE(cr.marker().timestamp() <= current_tombstone.timestamp);
+        BOOST_REQUIRE(cr.tomb().tomb().timestamp <= current_tombstone.timestamp);
+    } else {
+        BOOST_FAIL("dummy fragment stream should not contain anything other than range tombstones and clustering rows");
+    }
+}
+
+// We have to ensure actual's tombstones cover the same as expected's. As we
+// should still have all purged tombstones, only those tombstones are allowed
+// to be missing that were redundant (covered by a higher level tombstone).
+void check_tombstone_coverage(const schema& schema, const partition_summary& actual, const partition_summary& expected) {
+    BOOST_REQUIRE_EQUAL(actual.tomb.timestamp, expected.tomb.timestamp);
+    position_in_partition::tri_compare cmp(schema);
+    range_tombstone_less_compare rt_cmp(schema);
+
+    const auto actual_frags = combine_into_dummy_fragment_stream(schema, actual);
+    const auto expected_frags = combine_into_dummy_fragment_stream(schema, expected);
+
+    range_tombstone_accumulator range_tombstones(schema, false);
+    range_tombstones.set_partition_tombstone(expected.tomb);
+
+    auto ita = actual_frags.cbegin();
+    auto ite = expected_frags.cbegin();
+    while (ita != actual_frags.cend() && ite != expected_frags.cend()) {
+        const auto res = cmp(ita->position(), ita->position());
+        // res < 0 is illegal, it would mean actual contains a position, which
+        // is missing from expected (hence expected has a next, greater pos).
+        // We can never have a clustering row or range tombstone in actual that
+        // is not in expected, that would mean that a new fragment appeared from
+        // thin air while compacting.
+        BOOST_REQUIRE_GE(res, 0);
+        if (res == 0) { // pos(ita) == pos(ite)
+            if (ite->is_range_tombstone()) {
+                const auto& rte = ite->as_range_tombstone();
+
+                range_tombstones.apply(rte);
+
+                if (ita->is_range_tombstone()) {
+                    const auto& rta = ita->as_range_tombstone();
+
+                    BOOST_REQUIRE(!rt_cmp(rta, rte));
+
+                    if (rt_cmp(rte, rta)) {
+                        // actual is missing a range tombstone, this is only allowed
+                        // if the tombstone is superseded by a higher level
+                        // tombstone (partition tombstone).
+                        BOOST_REQUIRE_LE(rte.tomb.timestamp, expected.tomb.timestamp);
+                        ++ite;
+                    } else {
+                        // actual has the same tombstone, all is well.
+                        BOOST_REQUIRE_EQUAL(rta.tomb.timestamp, rte.tomb.timestamp);
+                        ++ita;
+                        ++ite;
+                    }
+                } else {
+                    // actual is missing a range tombstone here and has
+                    // clustering row (which comes after all relevant range tombstones in the stream).
+                    // Check that the range tombstone is covered by a higher level tombstone.
+                    BOOST_REQUIRE_LE(rte.tomb.timestamp, expected.tomb.timestamp);
+                    ++ite;
+                }
+            } else if (ite->is_clustering_row()) {
+                // Having a range tombstone would mean actual has a range
+                // tombstone that doesn't exist in expected.
+                BOOST_REQUIRE(ita->is_clustering_row());
+                const auto& cre = ite->as_clustering_row();
+                auto tomb = cre.tomb();
+                tomb.apply(range_tombstones.tombstone_for_row(ite->key()));
+                check_dummy_clustering_rows_have_equivalent_tombstone_coverage(ita->as_clustering_row(), cre, tomb.tomb());
+                ++ita;
+                ++ite;
+            } else {
+                BOOST_FAIL("dummy fragment stream should not contain anything other than range tombstones and clustering rows");
+            }
+        } else { // res > 0 -> pos(ita) > pos(ite)
+            if (ite->is_range_tombstone()) {
+                range_tombstones.apply(ite->as_range_tombstone());
+            }
+            const auto tomb = ite->is_clustering_row() ? range_tombstones.tombstone_for_row(ite->key()) : tombstone{};
+            check_dummy_fragment_is_allowed_to_be_missing(*ite, expected.tomb, tomb);
+            ++ite;
+        }
+    }
+
+    BOOST_REQUIRE(ita == actual_frags.cend());
+
+    for (;ite != expected_frags.cend(); ++ite) {
+        if (ite->is_range_tombstone()) {
+            range_tombstones.apply(ite->as_range_tombstone());
+        }
+        const auto tomb = ite->is_clustering_row() ? range_tombstones.tombstone_for_row(ite->key()) : tombstone{};
+        check_dummy_fragment_is_allowed_to_be_missing(*ite, expected.tomb, tomb);
+    }
+}
+
+// Ensure no data was lost in the split. The survived data merged with the purged
+// data should be equivalent to the original (expected) one.
+void check_partition_summaries(const schema& schema, const std::vector<partition_summary>& actual, const std::vector<partition_summary>& expected) {
+    BOOST_CHECK_EQUAL(actual.size(), expected.size());
+
+    for (auto actual_it = actual.cbegin(), expected_it = expected.cbegin(); actual_it != actual.cend(), expected_it != expected.cend();
+            ++actual_it, ++expected_it) {
+        BOOST_REQUIRE(actual_it->key.equal(schema, expected_it->key));
+        BOOST_REQUIRE_EQUAL(bool(actual_it->tomb), bool(expected_it->tomb));
+
+        BOOST_REQUIRE_EQUAL(bool(actual_it->static_row), bool(expected_it->static_row));
+        if (actual_it->static_row) {
+            BOOST_REQUIRE(std::equal(
+                    actual_it->static_row->cells.cbegin(),
+                    actual_it->static_row->cells.cend(),
+                    expected_it->static_row->cells.cbegin(),
+                    expected_it->static_row->cells.cend()));
+        }
+
+        BOOST_REQUIRE_EQUAL(actual_it->clustering_rows.size(), expected_it->clustering_rows.size());
+        for (auto actual_cr_it = actual_it->clustering_rows.cbegin(), expected_cr_it = expected_it->clustering_rows.cbegin();
+                actual_cr_it != actual_it->clustering_rows.cend(), expected_cr_it != expected_it->clustering_rows.cend();
+                ++actual_cr_it, ++expected_cr_it) {
+            const auto [actual_cr_pos, actual_cr_summary] = *actual_cr_it;
+            const auto [expected_cr_pos, expected_cr_summary] = *expected_cr_it;
+            BOOST_REQUIRE(std::equal(
+                    actual_cr_summary.cells.cbegin(),
+                    actual_cr_summary.cells.cend(),
+                    expected_cr_summary.cells.cbegin(),
+                    expected_cr_summary.cells.cend()));
+        }
+
+        check_tombstone_coverage(schema, *actual_it, *expected_it);
+    }
+}
+
+void run_compaction_data_stream_split_test(const schema& schema, gc_clock::time_point query_time, const std::vector<mutation>& mutations) {
+    const auto expected_mutations_summary = summarize_mutations(mutations);
+
+    tlog.info("Original data: {}", create_stats(expected_mutations_summary));
+
+    auto reader = flat_mutation_reader_from_mutations(std::move(mutations));
+    auto get_max_purgeable = [] (const dht::decorated_key&) {
+        return api::max_timestamp;
+    };
+    auto consumer = make_stable_flattened_mutations_consumer<compact_for_compaction<survived_compacted_fragments_consumer, purged_compacted_fragments_consumer>>(
+            schema,
+            query_time,
+            get_max_purgeable,
+            survived_compacted_fragments_consumer(schema, query_time, get_max_purgeable),
+            purged_compacted_fragments_consumer(schema, query_time, get_max_purgeable));
+
+    auto [survived_partitions, purged_partitions] = reader.consume(std::move(consumer), db::no_timeout, flat_mutation_reader::consume_reversed_partitions::no).get0();
+
+    tlog.info("Survived data: {}", create_stats(survived_partitions));
+    tlog.info("Purged data:   {}", create_stats(purged_partitions));
+
+    auto merged_partition_summaries = merge(schema, std::move(survived_partitions), std::move(purged_partitions));
+
+    tlog.info("Merged data:   {}", create_stats(merged_partition_summaries));
+
+    check_partition_summaries(schema, merged_partition_summaries, expected_mutations_summary);
+}
+
+} // anonymous namespace
+
+SEASTAR_THREAD_TEST_CASE(test_compaction_data_stream_split) {
+    auto& partitioner = dht::global_partitioner();
+    auto spec = tests::make_random_schema_specification(get_name());
+
+    tests::random_schema random_schema(tests::random::get_int<uint32_t>(), *spec, partitioner);
+    const auto& schema = *random_schema.schema();
+
+    tlog.info("Random schema:\n{}", random_schema.cql());
+
+    const auto query_time = gc_clock::now();
+    const auto ttl = gc_clock::duration{schema.gc_grace_seconds().count() * 4};
+    const std::uniform_int_distribution<size_t> partition_count_dist = std::uniform_int_distribution<size_t>(16, 128);
+    const std::uniform_int_distribution<size_t> clustering_row_count_dist = std::uniform_int_distribution<size_t>(2, 32);
+
+    // Random data
+    {
+        tlog.info("Random data");
+        const auto ts_gen = tests::default_timestamp_generator();
+        // Half of the tombstones are gcable.
+        // Half of the cells are expiring. Half of those is expired.
+        const auto exp_gen = [query_time, ttl, schema] (std::mt19937& engine, tests::timestamp_destination destination)
+                -> std::optional<tests::expiry_info> {
+            const auto is_tombstone = (destination == tests::timestamp_destination::partition_tombstone ||
+                    destination == tests::timestamp_destination::row_tombstone ||
+                    destination == tests::timestamp_destination::range_tombstone ||
+                    destination == tests::timestamp_destination::collection_tombstone);
+            if (!is_tombstone && tests::random::get_bool(engine)) {
+                return std::nullopt;
+            }
+            const auto offset = (is_tombstone ? schema.gc_grace_seconds().count() : ttl.count()) / 2;
+            auto offset_dist = std::uniform_int_distribution<gc_clock::duration::rep>(-offset, offset);
+            return tests::expiry_info{ttl, query_time + gc_clock::duration{offset_dist(engine)}};
+        };
+        const auto mutations = tests::generate_random_mutations(random_schema, ts_gen, exp_gen, partition_count_dist,
+                clustering_row_count_dist).get0();
+        run_compaction_data_stream_split_test(schema, query_time, mutations);
+    }
+
+    // All data is purged
+    {
+        tlog.info("All data is purged");
+        const auto ts_gen = [] (std::mt19937& engine, tests::timestamp_destination destination, api::timestamp_type min_timestamp) {
+            static const api::timestamp_type tomb_ts_min = 10000;
+            static const api::timestamp_type tomb_ts_max = 99999;
+            static const api::timestamp_type collection_tomb_ts_min = 100;
+            static const api::timestamp_type collection_tomb_ts_max = 999;
+            static const api::timestamp_type other_ts_min = 1000;
+            static const api::timestamp_type other_ts_max = 9999;
+
+            if (destination == tests::timestamp_destination::partition_tombstone ||
+                    destination == tests::timestamp_destination::row_tombstone ||
+                    destination == tests::timestamp_destination::range_tombstone) {
+                assert(min_timestamp < tomb_ts_max);
+                return tests::random::get_int<api::timestamp_type>(tomb_ts_min, tomb_ts_max, engine);
+            } else if (destination == tests::timestamp_destination::collection_tombstone) {
+                assert(min_timestamp < collection_tomb_ts_max);
+                return tests::random::get_int<api::timestamp_type>(collection_tomb_ts_min, collection_tomb_ts_max, engine);
+            } else {
+                assert(min_timestamp < other_ts_max);
+                return tests::random::get_int<api::timestamp_type>(other_ts_min, other_ts_max, engine);
+            }
+        };
+        const auto all_purged_exp_gen = [query_time, ttl, schema] (std::mt19937& engine, tests::timestamp_destination destination)
+                -> std::optional<tests::expiry_info> {
+            const auto offset = std::max(ttl.count(), schema.gc_grace_seconds().count());
+            auto offset_dist = std::uniform_int_distribution<gc_clock::duration::rep>(-offset * 2, -offset);
+            return tests::expiry_info{ttl, query_time + gc_clock::duration{offset_dist(engine)}};
+        };
+        const auto mutations = tests::generate_random_mutations(random_schema, ts_gen, all_purged_exp_gen, partition_count_dist,
+                clustering_row_count_dist).get0();
+        run_compaction_data_stream_split_test(schema, query_time, mutations);
+    }
+
+    // No data is purged
+    {
+        tlog.info("No data is purged");
+        const auto ts_gen = [] (std::mt19937& engine, tests::timestamp_destination destination, api::timestamp_type min_timestamp) {
+            static const api::timestamp_type tomb_ts_min = 100;
+            static const api::timestamp_type tomb_ts_max = 999;
+            static const api::timestamp_type collection_tomb_ts_min = 1000;
+            static const api::timestamp_type collection_tomb_ts_max = 9999;
+            static const api::timestamp_type other_ts_min = 10000;
+            static const api::timestamp_type other_ts_max = 99999;
+
+            if (destination == tests::timestamp_destination::partition_tombstone ||
+                    destination == tests::timestamp_destination::row_tombstone ||
+                    destination == tests::timestamp_destination::range_tombstone) {
+                assert(min_timestamp < tomb_ts_max);
+                return tests::random::get_int<api::timestamp_type>(tomb_ts_min, tomb_ts_max, engine);
+            } else if (destination == tests::timestamp_destination::collection_tombstone) {
+                assert(min_timestamp < tomb_ts_max);
+                return tests::random::get_int<api::timestamp_type>(collection_tomb_ts_min, collection_tomb_ts_max, engine);
+            } else {
+                assert(min_timestamp < other_ts_max);
+                return tests::random::get_int<api::timestamp_type>(other_ts_min, other_ts_max, engine);
+            }
+        };
+        const auto mutations = tests::generate_random_mutations(random_schema, ts_gen, tests::no_expiry_expiry_generator(), partition_count_dist,
+                clustering_row_count_dist).get0();
+        run_compaction_data_stream_split_test(schema, query_time, mutations);
+    }
 }
