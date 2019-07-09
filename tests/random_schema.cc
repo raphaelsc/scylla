@@ -1023,6 +1023,7 @@ future<std::vector<mutation>> generate_random_mutations(
         auto r = boost::irange(size_t{0}, partition_count);
         return do_for_each(r.begin(), r.end(), [=, &random_schema, &engine, &muts] (size_t pk) mutable {
             auto mut = random_schema.new_mutation(pk);
+            random_schema.set_partition_tombstone(engine, mut, ts_gen);
             random_schema.add_static_row(engine, mut, ts_gen);
 
             if (!schema_has_clustering_columns) {
