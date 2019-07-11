@@ -1140,9 +1140,9 @@ SEASTAR_TEST_CASE(compact) {
 
     return test_setup::do_with_tmp_directory([s, generation, cf, cm] (test_env& env, sstring tmpdir_path) {
         return open_sstables(env, s, "tests/sstables/compaction", {1,2,3}).then([&env, tmpdir_path, s, cf, cm, generation] (auto sstables) {
-            auto new_sstable = [&env, generation, s, tmpdir_path] {
+            auto new_sstable = [&env, gen = make_lw_shared<unsigned>(generation), s, tmpdir_path] {
                 return env.make_sstable(s, tmpdir_path,
-                        generation, sstables::sstable::version_types::la, sstables::sstable::format_types::big);
+                        (*gen)++, sstables::sstable::version_types::la, sstables::sstable::format_types::big);
             };
             return sstables::compact_sstables(sstables::compaction_descriptor(std::move(sstables)), *cf, new_sstable, replacer_fn_no_op()).then([&env, s, generation, cf, cm, tmpdir_path] (auto) {
                 // Verify that the compacted sstable has the right content. We expect to see:
@@ -2912,7 +2912,7 @@ SEASTAR_TEST_CASE(test_sstable_max_local_deletion_time_2) {
                 auto sst2 = get_usable_sst(*mt, 55).get0();
                 BOOST_REQUIRE(now.time_since_epoch().count() == sst2->get_stats_metadata().max_local_deletion_time);
 
-                auto creator = [&env, s, tmpdir_path, version] { return env.make_sstable(s, tmpdir_path, 56, version, big); };
+                auto creator = [&env, s, tmpdir_path, version, gen = make_lw_shared<unsigned>(56)] { return env.make_sstable(s, tmpdir_path, (*gen)++, version, big); };
                 auto info = sstables::compact_sstables(sstables::compaction_descriptor({sst1, sst2}), *cf,
                                                        creator, replacer_fn_no_op()).get0();
                 BOOST_REQUIRE(info.new_sstables.size() == 1);
@@ -4103,8 +4103,8 @@ SEASTAR_TEST_CASE(sstable_expired_data_ratio) {
         BOOST_REQUIRE(std::fabs(sst->estimate_droppable_tombstone_ratio(gc_before) - expired) <= 0.1);
 
         column_family_for_tests cf(s);
-        auto creator = [&] {
-            auto sst = env.make_sstable(s, tmp.path().string(), 2, la, big);
+        auto creator = [&, gen = make_lw_shared<unsigned>(2)] {
+            auto sst = env.make_sstable(s, tmp.path().string(), (*gen)++, la, big);
             sst->set_unshared();
             return sst;
         };
@@ -5189,3 +5189,205 @@ SEASTAR_TEST_CASE(purged_tombstone_consumer_sstable_test) {
         }
     });
 }
+
+/*  Make sure data is not ressurrected.
+    sstable 1 with key A and key B and key C
+    sstable 2 with expired (GC'able) tombstone for key A
+
+    use max_sstable_size = 1;
+
+    so key A and expired tombstone for key A are compacted away.
+    key B is written into a new sstable, and sstable 2 is removed.
+
+    Need to stop compaction at this point!!!
+
+    Result: sstable 1 is alive in the table, whereas sstable 2 is gone.
+
+    if key A can be read from table, data was ressurrected.
+ */
+#if 0
+SEASTAR_TEST_CASE(incremental_compaction_data_resurrection_test) {
+    return test_env::do_with_async([] (test_env& env) {
+        std::cout << "Running ... " << std::endl;
+        storage_service_for_tests ssft;
+        cell_locker_stats cl_stats;
+
+        // In a column family with gc_grace_seconds set to 0, check that a tombstone
+        // is purged after compaction.
+        auto builder = schema_builder("tests", "incremental_compaction_data_resurrection_test")
+                .with_column("id", utf8_type, column_kind::partition_key)
+                .with_column("value", int32_type);
+        builder.set_gc_grace_seconds(0);
+        auto s = builder.build();
+
+        auto tmp = tmpdir();
+        auto sst_gen = [&env, s, &tmp, gen = make_lw_shared<unsigned>(1)] () mutable {
+            return env.make_sstable(s, tmp.path().string(), (*gen)++, la, big);
+        };
+
+        auto next_timestamp = [] {
+            static thread_local api::timestamp_type next = 1;
+            return next++;
+        };
+
+        auto make_insert = [&] (partition_key key) {
+            mutation m(s, key);
+            m.set_clustered_cell(clustering_key::make_empty(), bytes("value"), data_value(int32_t(1)), next_timestamp());
+            return m;
+        };
+
+        auto make_delete = [&] (partition_key key) {
+            mutation m(s, key);
+            tombstone tomb(next_timestamp(), gc_clock::now());
+            m.partition().apply(tomb);
+            return m;
+        };
+
+        auto tokens = token_generation_for_current_shard(3);
+        auto alpha = partition_key::from_exploded(*s, {to_bytes(tokens[0].first)});
+        auto beta = partition_key::from_exploded(*s, {to_bytes(tokens[1].first)});
+        auto gamma = partition_key::from_exploded(*s, {to_bytes(tokens[2].first)});
+
+        auto ttl = 5;
+
+        auto mut1 = make_insert(alpha);
+        auto mut2 = make_insert(beta);
+        auto mut3 = make_insert(gamma);
+        auto mut1_deletion = make_delete(alpha);
+
+        auto non_expired_sst = make_sstable_containing(sst_gen, {mut1, mut2, mut3});
+        auto expired_sst = make_sstable_containing(sst_gen, {mut1_deletion});
+
+        std::vector<shared_sstable> sstables = {
+                non_expired_sst,
+                expired_sst,
+        };
+
+        // make mut1_deletion gc'able.
+        forward_jump_clocks(std::chrono::seconds(ttl));
+
+        std::cout << "creating cf " << std::endl;
+
+        auto cm = make_lw_shared<compaction_manager>();
+        cm->start();
+
+        column_family::config cfg = column_family_test_config();
+        cfg.datadir = tmp.path().string();
+        cfg.enable_disk_writes = false;
+        cfg.enable_commitlog = false;
+        cfg.enable_cache = false;
+        auto tracker = make_lw_shared<cache_tracker>();
+        auto cf = make_lw_shared<column_family>(s, cfg, column_family::no_commitlog(), *cm, cl_stats, *tracker);
+        std::cout << "marking ready " << std::endl;
+        cf->mark_ready_for_writes();
+        std::cout << "starting cf " << std::endl;
+        cf->start();
+
+#if 0
+        auto is_partition_dead = [&s, &cf] (partition_key& pkey) {
+            std::cout << "finding partition slow\n";
+            column_family::const_mutation_partition_ptr mp = cf->find_partition_slow(s, pkey).get0();
+            BOOST_REQUIRE(mp);
+            std::cout << "getting p tomb\n";
+            return bool(mp->partition_tombstone());
+        };
+#endif
+#if 1
+        auto finds_partition = [&s, &cf] (partition_key& pkey) {
+            std::cout << "finding partition slow:\n";
+            column_family::const_mutation_partition_ptr mp = cf->find_partition_slow(s, pkey).get0();
+            std::cout << "(returned): \n";
+            if (mp) {
+                std::cout << "found\n";
+                //std::cout << mp->partition_tombstone() << std::endl;
+            } else {
+                std::cout << "not found\n";
+            }
+        };
+#endif
+        std::cout << "adding sstable and updating cache:\n";
+        cf->add_sstable_and_update_cache(non_expired_sst).get();
+        finds_partition(alpha);
+        //BOOST_REQUIRE(!is_partition_dead(alpha));
+        //cf->add_sstable_and_update_cache(expired_sst).get();
+        //finds_partition(alpha);
+        //BOOST_REQUIRE(is_partition_dead(alpha));
+
+        auto replacer = [&] (std::vector<sstables::shared_sstable> old_sstables, std::vector<sstables::shared_sstable> new_sstables) {
+
+            // expired_sst is exhausted, and new sstable is written with mut 2.
+            BOOST_REQUIRE(old_sstables.size() == 1);
+            BOOST_REQUIRE(old_sstables.front() == expired_sst);
+            BOOST_REQUIRE(new_sstables.size() == 1);
+            assert_that(sstable_reader(new_sstables.front(), s))
+                    .produces(mut2)
+                    .produces_end_of_stream();
+            column_family_test(cf).rebuild_sstable_list(new_sstables, old_sstables);
+            // force compaction failure after sstable containing expired tombstone is removed from set.
+            throw std::runtime_error("forcing compaction failure on early replacement");
+        };
+
+        bool swallowed = false;
+        try {
+            // The goal is to have one sstable generated for each mutation to trigger the issue.
+            auto max_sstable_size = 0;
+            auto result = sstables::compact_sstables(sstables::compaction_descriptor(sstables, 0, max_sstable_size), *cf, sst_gen, replacer).get0().new_sstables;
+            BOOST_REQUIRE_EQUAL(2, result.size());
+        } catch (...) {
+            // swallow exception
+            swallowed = true;
+        }
+        BOOST_REQUIRE(swallowed);
+        // check there's no data resurrection
+        //BOOST_REQUIRE(is_partition_dead(alpha));
+        //finds_partition(alpha);
+    });
+}
+#endif
+
+SEASTAR_TEST_CASE(sstable_cleanup_correctness_tests) {
+    return do_with_cql_env([] (auto& e) {
+        return test_env::do_with_async([&db = e.local_db()] (test_env& env) {
+            cell_locker_stats cl_stats;
+
+            auto s = schema_builder("ks" /* single_node_cql_env::ks_name */, "correcness_test")
+                    .with_column("id", utf8_type, column_kind::partition_key)
+                    .with_column("value", int32_type).build();
+
+            auto tmp = tmpdir();
+            auto sst_gen = [&env, s, &tmp, gen = make_lw_shared<unsigned>(1)] () mutable {
+                return env.make_sstable(s, tmp.path().string(), (*gen)++, la, big);
+            };
+
+            auto make_insert = [&] (partition_key key) {
+                mutation m(s, key);
+                m.set_clustered_cell(clustering_key::make_empty(), bytes("value"), data_value(int32_t(1)), api::timestamp_type(0));
+                return m;
+            };
+
+            auto total_partitions = 10000U;
+            auto local_keys = make_local_keys(total_partitions, s);
+            std::vector<mutation> mutations;
+            for (auto i = 0U; i < total_partitions; i++) {
+                mutations.push_back(make_insert(partition_key::from_deeply_exploded(*s, { local_keys.at(i) })));
+            }
+            auto sst = make_sstable_containing(sst_gen, mutations);
+
+            auto cf = make_lw_shared<column_family>(s, column_family_test_config(), column_family::no_commitlog(),
+                db.get_compaction_manager(), cl_stats, db.row_cache_tracker());
+            cf->mark_ready_for_writes();
+            cf->start();
+
+            cf->add_sstable_and_update_cache(sst);
+
+            column_family::const_mutation_partition_ptr p = cf->find_partition_slow(s, partition_key::from_deeply_exploded(*s, { local_keys.at(0) })).get0();
+            if (p != nullptr) {
+                std::cout << "found\n";
+            } else {
+                std::cout << "not found\n";
+            }
+        });
+    });
+}
+
+

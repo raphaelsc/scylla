@@ -692,6 +692,7 @@ table::add_sstable_and_update_cache(sstables::shared_sstable sst) {
     return get_row_cache().invalidate([this, sst] () noexcept {
         // FIXME: this is not really noexcept, but we need to provide strong exception guarantees.
         // atomically load all opened sstables into column family.
+        std::cout << "Adding sst " << std::endl;
         add_sstable(sst, {engine().cpu_id()});
         trigger_compaction();
     }, dht::partition_range::make({sst->get_first_decorated_key(), true}, {sst->get_last_decorated_key(), true}));
