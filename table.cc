@@ -771,6 +771,14 @@ public:
             , _maximum_timestamp(max_timestamp)
     {}
 
+    database_sstable_write_monitor(database_sstable_write_monitor&&) = default;
+
+    virtual ~database_sstable_write_monitor() {
+        if (_tracker) {
+            write_failed();
+        }
+    }
+
     virtual void on_write_started(const sstables::writer_offset_tracker& t) override {
         _tracker = &t;
         _compaction_strategy.get_backlog_tracker().register_partially_written_sstable(_sst, *this);
