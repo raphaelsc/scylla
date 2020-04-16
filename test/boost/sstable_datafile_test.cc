@@ -2535,7 +2535,6 @@ SEASTAR_TEST_CASE(sstable_rewrite) {
             auto new_tables = make_lw_shared<std::vector<sstables::shared_sstable>>();
             auto creator = [&env, new_tables, s, tmpdir_path] {
                 auto sst = env.make_sstable(s, tmpdir_path, 52, la, big);
-                sst->set_unshared();
                 new_tables->emplace_back(sst);
                 return sst;
             };
@@ -4123,7 +4122,6 @@ SEASTAR_TEST_CASE(sstable_expired_data_ratio) {
         column_family_for_tests cf(s);
         auto creator = [&, gen = make_lw_shared<unsigned>(2)] {
             auto sst = env.make_sstable(s, tmp.path().string(), (*gen)++, la, big);
-            sst->set_unshared();
             return sst;
         };
         auto info = compact_sstables(sstables::compaction_descriptor({ sst }), *cf, creator).get0();
@@ -4207,7 +4205,6 @@ SEASTAR_TEST_CASE(sstable_owner_shards) {
             auto sst_gen = [&env, s, &tmp, gen, ignore_msb] () mutable {
                 auto schema = schema_builder(s).with_sharder(1, ignore_msb).build();
                 auto sst = env.make_sstable(std::move(schema), tmp.path().string(), (*gen)++, la, big);
-                sst->set_unshared();
                 return sst;
             };
             auto sst = make_sstable_containing(sst_gen, std::move(muts));
@@ -4389,7 +4386,6 @@ SEASTAR_TEST_CASE(compaction_correctness_with_partitioned_sstable_set) {
         auto tmp = tmpdir();
         auto sst_gen = [&env, s, &tmp, gen = make_lw_shared<unsigned>(1)] () mutable {
             auto sst = env.make_sstable(s, tmp.path().string(), (*gen)++, la, big);
-            sst->set_unshared();
             return sst;
         };
 
@@ -5029,7 +5025,6 @@ SEASTAR_TEST_CASE(sstable_run_based_compaction_test) {
         auto tmp = tmpdir();
         auto sst_gen = [&env, s, &tmp, gen = make_lw_shared<unsigned>(1)] () mutable {
             auto sst = env.make_sstable(s, tmp.path().string(), (*gen)++, la, big);
-            sst->set_unshared();
             return sst;
         };
 
@@ -5232,7 +5227,6 @@ SEASTAR_TEST_CASE(backlog_tracker_correctness_after_stop_tracking_compaction) {
         auto tmp = make_lw_shared<tmpdir>();
         auto sst_gen = [&env, s, tmp, gen = make_lw_shared<unsigned>(1)] () mutable {
             auto sst = env.make_sstable(s, tmp->path().string(), (*gen)++, la, big);
-            sst->set_unshared();
             return sst;
         };
 
