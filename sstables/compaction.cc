@@ -577,8 +577,6 @@ private:
             _info->total_partitions, _info->total_keys_written);
         report_finish(formatted_msg, ended_at);
 
-        backlog_tracker_adjust_charges();
-
         auto info = std::move(_info);
         _cf.get_compaction_manager().deregister_compaction(info);
         return std::move(*info);
@@ -586,7 +584,6 @@ private:
 
     virtual void report_start(const sstring& formatted_msg) const = 0;
     virtual void report_finish(const sstring& formatted_msg, std::chrono::time_point<db_clock> ended_at) const = 0;
-    virtual void backlog_tracker_adjust_charges() = 0;
 
     virtual std::function<api::timestamp_type(const dht::decorated_key&)> max_purgeable_func() {
         return [] (const dht::decorated_key& dk) {
@@ -783,13 +780,6 @@ public:
         clogger.info("Compacted {}", formatted_msg);
     }
 
-    void backlog_tracker_adjust_charges() override {
-        _monitor_generator.remove_sstables(_info->tracking);
-        for (auto& wm : _active_write_monitors) {
-            wm.add_sstable();
-        }
-    }
-
     virtual std::function<api::timestamp_type(const dht::decorated_key&)> max_purgeable_func() override {
         return [this] (const dht::decorated_key& dk) {
             return get_max_purgeable_timestamp(_cf, *_selector, _compacting_for_max_purgeable_func, dk);
@@ -835,8 +825,16 @@ public:
             _cf.get_compaction_manager().on_compaction_complete(*_weight_registration);
         }
         replace_remaining_exhausted_sstables();
+        backlog_tracker_adjust_charges();
     }
 private:
+    void backlog_tracker_adjust_charges() {
+        _monitor_generator.remove_sstables(_info->tracking);
+        for (auto& wm : _active_write_monitors) {
+            wm.add_sstable();
+        }
+    }
+
     void backlog_tracker_incrementally_adjust_charges(std::vector<shared_sstable> exhausted_sstables) {
         //
         // Notify backlog tracker of an early sstable replacement triggered by incremental compaction approach.
@@ -1270,8 +1268,6 @@ public:
     void report_finish(const sstring& formatted_msg, std::chrono::time_point<db_clock> ended_at) const override {
         clogger.info("Resharded {}", formatted_msg);
     }
-
-    void backlog_tracker_adjust_charges() override { }
 
     shared_sstable create_new_sstable() const override {
         // create_new_sstables is used only from the garbage_collected writer.
