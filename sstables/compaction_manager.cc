@@ -767,14 +767,6 @@ future<> compaction_manager::remove(column_family* cf) {
     });
 }
 
-void compaction_manager::stop_tracking_ongoing_compactions(column_family* cf) {
-    for (auto& info : _compactions) {
-        if (info->cf == cf) {
-            info->stop_tracking();
-        }
-    }
-}
-
 void compaction_manager::stop_compaction(sstring type) {
     // TODO: this method only works for compaction of type compaction and cleanup.
     // Other types are: validation, scrub, index_build.
@@ -829,7 +821,6 @@ void compaction_backlog_tracker::remove_sstable(sstables::shared_sstable sst) {
         return;
     }
 
-    _ongoing_compactions.erase(sst);
     try {
         _impl->remove_sstable(std::move(sst));
     } catch (...) {
@@ -858,30 +849,35 @@ void compaction_backlog_tracker::register_compacting_sstable(sstables::shared_ss
         return;
     }
 
+    remove_sstable(sst);
     try {
         _ongoing_compactions.emplace(sst, &rp);
     } catch (...) {
         cmlog.warn("backlog tracker couldn't register partially compacting SSTable to exception {}", std::current_exception());
+        add_sstable(sst);
     }
 }
 
-void compaction_backlog_tracker::transfer_ongoing_charges(compaction_backlog_tracker& new_bt, bool move_read_charges) {
+void compaction_backlog_tracker::revert_partially_written_charges(sstables::shared_sstable sst) {
+    _ongoing_writes.erase(sst);
+}
+
+void compaction_backlog_tracker::revert_compacting_charges(sstables::shared_sstable sst) {
+    _ongoing_compactions.erase(sst);
+    add_sstable(std::move(sst));
+}
+
+
+void compaction_backlog_tracker::transfer_ongoing_charges(compaction_backlog_tracker& new_bt) {
     for (auto&& w : _ongoing_writes) {
         new_bt.register_partially_written_sstable(w.first, *w.second);
     }
 
-    if (move_read_charges) {
-        for (auto&& w : _ongoing_compactions) {
-            new_bt.register_compacting_sstable(w.first, *w.second);
-        }
+    for (auto&& w : _ongoing_compactions) {
+        new_bt.register_compacting_sstable(w.first, *w.second);
     }
     _ongoing_writes = {};
     _ongoing_compactions = {};
-}
-
-void compaction_backlog_tracker::revert_charges(sstables::shared_sstable sst) {
-    _ongoing_writes.erase(sst);
-    _ongoing_compactions.erase(sst);
 }
 
 compaction_backlog_tracker::~compaction_backlog_tracker() {

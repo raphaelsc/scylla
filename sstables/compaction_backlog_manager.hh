@@ -72,11 +72,69 @@ public:
     using ongoing_writes = std::unordered_map<sstables::shared_sstable, backlog_write_progress_manager*>;
     using ongoing_compactions = std::unordered_map<sstables::shared_sstable, backlog_read_progress_manager*>;
 
+    // A SSTable in the tracker can exist in only one state.
+    // The possible states are PARTIAL, IDLE, and COMPACTING.
+    // IDLE means that SSTable is not partial nor compacting.
+    // PARTIAL means that SSTable is being created.
+    // COMPACTING means that SSTable is being compacted.
+    // NULL is data sink, with similar purpose as /dev/null.
+    // SSTables that come from NULL are the new ones being written.
+    // SSTables that goes to NULL are the old ones being deleted.
+    //
+    //                       +----------------+
+    //                       |      NULL      |     success
+    //          +----------> |                | <-----------+
+    //          |  failure   +----------------+             |
+    //          |                                           |
+    //          |                                           |
+    //          |                                           |
+    //  +--------+---+            +----------+      +--------+------+
+    //  |  PARTIAL   +----------> |   IDLE   +----> |  COMPACTING   |
+    //  |            |  success   |          |      |               |
+    //  +------------+            +----+-----+      +--------+------+
+    //                              ^                     |
+    //                              |                     |
+    //                              +---------------------+
+    //                                failure
+    //
+    // Given that a SSTable can only exist in one state, tracker
+    // can calculate the backlog by adding the backlog contribution
+    // of all SStables in all possible states.
+    // Compacting SStables are removed in the beginning of compaction,
+    // so instead of removing backlog as compaction progresses,
+    // strategy-specific implementation of backlog needs to add a
+    // quantity that decreases with time.
+
     struct impl {
         virtual void add_sstable(sstables::shared_sstable sst) = 0;
         virtual void remove_sstable(sstables::shared_sstable sst) = 0;
         virtual double backlog(const ongoing_writes& ow, const ongoing_compactions& oc) const = 0;
         virtual ~impl() { }
+    };
+
+    struct partially_written_sstable_registration {
+        static void
+        register_sstable(compaction_backlog_tracker& tracker, sstables::shared_sstable sst, backlog_write_progress_manager& wp) {
+            tracker.register_partially_written_sstable(std::move(sst), wp);
+        }
+        static void
+        on_failure(compaction_backlog_tracker& tracker, sstables::shared_sstable sst) {
+            tracker.revert_partially_written_charges(std::move(sst));
+        }
+    };
+    struct compacting_sstable_registration {
+        static void
+        register_sstable(compaction_backlog_tracker& tracker, sstables::shared_sstable sst, backlog_read_progress_manager& rp) {
+            tracker.register_compacting_sstable(std::move(sst), rp);
+        }
+        static void
+        on_failure(compaction_backlog_tracker& tracker, sstables::shared_sstable sst) {
+            tracker.revert_compacting_charges(std::move(sst));
+        }
+        static void
+        on_success(compaction_backlog_tracker& tracker, sstables::shared_sstable sst) {
+            tracker._ongoing_compactions.erase(sst);
+        }
     };
 
     compaction_backlog_tracker(std::unique_ptr<impl> impl) : _impl(std::move(impl)) {}
@@ -87,11 +145,13 @@ public:
     double backlog() const;
     void add_sstable(sstables::shared_sstable sst);
     void remove_sstable(sstables::shared_sstable sst);
+    void transfer_ongoing_charges(compaction_backlog_tracker& new_bt);
+private:
     void register_partially_written_sstable(sstables::shared_sstable sst, backlog_write_progress_manager& wp);
     void register_compacting_sstable(sstables::shared_sstable sst, backlog_read_progress_manager& rp);
-    void transfer_ongoing_charges(compaction_backlog_tracker& new_bt, bool move_read_charges = true);
-    void revert_charges(sstables::shared_sstable sst);
-private:
+    void revert_partially_written_charges(sstables::shared_sstable sst);
+    void revert_compacting_charges(sstables::shared_sstable sst);
+
     void disable() {
         _disabled = true;
         _ongoing_writes = {};

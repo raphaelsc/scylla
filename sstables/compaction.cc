@@ -157,7 +157,8 @@ struct compaction_read_monitor_generator final : public read_monitor_generator {
     public:
         virtual void on_read_started(const sstables::reader_position_tracker& tracker) override {
             _tracker = &tracker;
-            _cf.get_compaction_strategy().get_backlog_tracker().register_compacting_sstable(_sst, *this);
+            compaction_backlog_tracker::compacting_sstable_registration::register_sstable(
+                _cf.get_compaction_strategy().get_backlog_tracker(), _sst, *this);
         }
 
         virtual void on_read_completed() override {
@@ -174,13 +175,11 @@ struct compaction_read_monitor_generator final : public read_monitor_generator {
             return _last_position_seen;
         }
 
-        void remove_sstable(bool is_tracking) {
-            if (is_tracking && _sst) {
-                _cf.get_compaction_strategy().get_backlog_tracker().remove_sstable(_sst);
-            } else if (_sst) {
-                _cf.get_compaction_strategy().get_backlog_tracker().revert_charges(_sst);
+        void on_completed() {
+            if (_sst) {
+                compaction_backlog_tracker::compacting_sstable_registration::on_success(
+                    _cf.get_compaction_strategy().get_backlog_tracker(), std::move(_sst));
             }
-            _sst = {};
         }
 
         compaction_read_monitor(sstables::shared_sstable sst, compaction_manager& cm, column_family &cf)
@@ -190,32 +189,37 @@ struct compaction_read_monitor_generator final : public read_monitor_generator {
             // We failed to finish handling this SSTable, so we have to update the backlog_tracker
             // about it.
             if (_sst) {
-                _cf.get_compaction_strategy().get_backlog_tracker().revert_charges(_sst);
+                compaction_backlog_tracker::compacting_sstable_registration::on_failure(
+                    _cf.get_compaction_strategy().get_backlog_tracker(), std::move(_sst));
             }
         }
 
         friend class compaction_read_monitor_generator;
     };
-
     virtual sstables::read_monitor& operator()(sstables::shared_sstable sst) override {
         _generated_monitors.emplace_back(std::move(sst), _compaction_manager, _cf);
         return _generated_monitors.back();
     }
+
+    // Fully expired sstables have their monitor fast forwarded to end because
+    // they aren't actually read by compaction.
+    void fast_forward_to_end(const shared_sstable& sst) {
+        sstables::read_monitor& monitor = (*this)(sst);
+        sstables::reader_position_tracker tracker;
+        tracker.position = sst->data_size();
+
+        monitor.on_read_started(tracker);
+        monitor.on_read_completed();
+    }
+
     compaction_read_monitor_generator(compaction_manager& cm, column_family& cf)
         : _compaction_manager(cm)
         , _cf(cf) {}
 
-    void remove_sstables(bool is_tracking) {
-        for (auto& rm : _generated_monitors) {
-            rm.remove_sstable(is_tracking);
-        }
-    }
-
-    void remove_sstable(bool is_tracking, sstables::shared_sstable& sst) {
-        for (auto& rm : _generated_monitors) {
-            if (rm._sst == sst) {
-                rm.remove_sstable(is_tracking);
-                break;
+    void on_completed(const std::vector<shared_sstable>& exhausted_sstables) {
+        for (auto& m : _generated_monitors) {
+            if (boost::find(exhausted_sstables, m._sst) != exhausted_sstables.end()) {
+                m.on_completed();
             }
         }
     }
@@ -242,13 +246,15 @@ public:
 
     ~compaction_write_monitor() {
         if (_sst) {
-            _cf.get_compaction_strategy().get_backlog_tracker().revert_charges(_sst);
+            compaction_backlog_tracker::partially_written_sstable_registration::on_failure(
+                _cf.get_compaction_strategy().get_backlog_tracker(), _sst);
         }
     }
 
     virtual void on_write_started(const sstables::writer_offset_tracker& tracker) override {
         _tracker = &tracker;
-        _cf.get_compaction_strategy().get_backlog_tracker().register_partially_written_sstable(_sst, *this);
+        compaction_backlog_tracker::partially_written_sstable_registration::register_sstable(
+            _cf.get_compaction_strategy().get_backlog_tracker(), _sst, *this);
     }
 
     virtual void on_data_write_completed() override {
@@ -389,6 +395,7 @@ protected:
     creator_fn _sstable_creator;
     schema_ptr _schema;
     std::vector<shared_sstable> _sstables;
+    std::unordered_set<sstables::shared_sstable> _fully_expired_sstables;
     // Unused sstables are tracked because if compaction is interrupted we can only delete them.
     // Deleting used sstables could potentially result in data loss.
     std::vector<shared_sstable> _new_unused_sstables;
@@ -488,7 +495,7 @@ private:
     future<> setup(GCConsumer gc_consumer) {
         auto ssts = make_lw_shared<sstables::sstable_set>(_cf.get_compaction_strategy().make_sstable_set(_schema));
         sstring formatted_msg = "[";
-        auto fully_expired = get_fully_expired_sstables(_cf, _sstables, gc_clock::now() - _schema->gc_grace_seconds());
+        _fully_expired_sstables = get_fully_expired_sstables(_cf, _sstables, gc_clock::now() - _schema->gc_grace_seconds());
         min_max_tracker<api::timestamp_type> timestamp_tracker;
 
         for (auto& sst : _sstables) {
@@ -504,7 +511,7 @@ private:
 
             // Do not actually compact a sstable that is fully expired and can be safely
             // dropped without ressurrecting old data.
-            if (fully_expired.count(sst)) {
+            if (_fully_expired_sstables.count(sst)) {
                 continue;
             }
 
@@ -546,6 +553,7 @@ private:
                 reader.consume_in_thread(std::move(cfc), make_partition_filter(), db::no_timeout);
             });
         });
+        on_start_of_compaction();
         return consumer(make_sstable_reader());
     }
 
@@ -598,6 +606,8 @@ private:
     }
 
     virtual void on_new_partition() = 0;
+
+    virtual void on_start_of_compaction() = 0;
 
     virtual void on_end_of_compaction() = 0;
 
@@ -820,21 +830,19 @@ public:
         update_pending_ranges();
     }
 
+    virtual void on_start_of_compaction() override {
+        for (auto& sst : _fully_expired_sstables) {
+            _monitor_generator.fast_forward_to_end(sst);
+        }
+    }
+
     virtual void on_end_of_compaction() override {
         if (_weight_registration) {
             _cf.get_compaction_manager().on_compaction_complete(*_weight_registration);
         }
         replace_remaining_exhausted_sstables();
-        backlog_tracker_adjust_charges();
     }
 private:
-    void backlog_tracker_adjust_charges() {
-        _monitor_generator.remove_sstables(_info->tracking);
-        for (auto& wm : _active_write_monitors) {
-            wm.add_sstable();
-        }
-    }
-
     void backlog_tracker_incrementally_adjust_charges(std::vector<shared_sstable> exhausted_sstables) {
         //
         // Notify backlog tracker of an early sstable replacement triggered by incremental compaction approach.
@@ -844,10 +852,7 @@ private:
         // This way we prevent bogus calculation of backlog due to lack of charge adjustment whenever there's
         // an early sstable replacement.
         //
-
-        for (auto& sst : exhausted_sstables) {
-            _monitor_generator.remove_sstable(_info->tracking, sst);
-        }
+        _monitor_generator.on_completed(std::move(exhausted_sstables));
         for (auto& wm : _active_write_monitors) {
             wm.add_sstable();
         }
@@ -885,7 +890,8 @@ private:
         if (!_sstables.empty()) {
             std::vector<shared_sstable> sstables_compacted;
             std::move(_sstables.begin(), _sstables.end(), std::back_inserter(sstables_compacted));
-            _replacer(get_compaction_completion_desc(std::move(sstables_compacted), std::move(_new_unused_sstables)));
+            _replacer(get_compaction_completion_desc(sstables_compacted, std::move(_new_unused_sstables)));
+            backlog_tracker_incrementally_adjust_charges(std::move(sstables_compacted));
         }
     }
 
@@ -1289,6 +1295,8 @@ public:
     }
 
     void on_new_partition() override {}
+
+    virtual void on_start_of_compaction() override {}
 
     virtual void on_end_of_compaction() override {}
 

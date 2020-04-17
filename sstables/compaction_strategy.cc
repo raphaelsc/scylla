@@ -502,9 +502,15 @@ size_tiered_backlog_tracker::inflight_component
 size_tiered_backlog_tracker::compacted_backlog(const compaction_backlog_tracker::ongoing_compactions& ongoing_compactions) const {
     inflight_component in;
     for (auto const& crp : ongoing_compactions) {
+        auto size = crp.first->data_size();
         auto compacted = crp.second->compacted();
-        in.total_bytes += compacted;
-        in.contribution += compacted * log4((crp.first->data_size()));
+        auto effective_size = size - compacted;
+
+        if (!effective_size) {
+            continue;
+        }
+        in.total_bytes += effective_size;
+        in.contribution += effective_size * log4(size);
     }
     return in;
 }
@@ -513,11 +519,11 @@ double size_tiered_backlog_tracker::backlog(const compaction_backlog_tracker::on
     inflight_component partial = partial_backlog(ow);
     inflight_component compacted = compacted_backlog(oc);
 
-    auto total_bytes = _total_bytes + partial.total_bytes - compacted.total_bytes;
+    auto total_bytes = _total_bytes + partial.total_bytes + compacted.total_bytes;
     if ((total_bytes <= 0)) {
         return 0;
     }
-    auto sstables_contribution = _sstables_backlog_contribution + partial.contribution - compacted.contribution;
+    auto sstables_contribution = _sstables_backlog_contribution + partial.contribution + compacted.contribution;
     auto b = (total_bytes * log4(total_bytes)) - sstables_contribution;
     return b > 0 ? b : 0;
 }

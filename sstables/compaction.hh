@@ -190,7 +190,6 @@ namespace sstables {
         int64_t ended_at;
         std::vector<shared_sstable> new_sstables;
         sstring stop_requested;
-        bool tracking = true;
         utils::UUID run_identifier;
         struct replacement {
             const std::vector<shared_sstable> removed;
@@ -204,10 +203,6 @@ namespace sstables {
 
         void stop(sstring reason) {
             stop_requested = std::move(reason);
-        }
-
-        void stop_tracking() {
-            tracking = false;
         }
     };
 

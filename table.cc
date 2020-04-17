@@ -781,7 +781,8 @@ public:
 
     virtual void on_write_started(const sstables::writer_offset_tracker& t) override {
         _tracker = &t;
-        _compaction_strategy.get_backlog_tracker().register_partially_written_sstable(_sst, *this);
+        compaction_backlog_tracker::partially_written_sstable_registration::register_sstable(
+            _compaction_strategy.get_backlog_tracker(), _sst, *this);
     }
 
     virtual void on_data_write_completed() override {
@@ -791,7 +792,8 @@ public:
     }
 
     void write_failed() {
-        _compaction_strategy.get_backlog_tracker().revert_charges(_sst);
+        compaction_backlog_tracker::partially_written_sstable_registration::on_failure(
+            _compaction_strategy.get_backlog_tracker(), _sst);
     }
 
     virtual uint64_t written() const override {
@@ -1372,17 +1374,12 @@ void table::set_compaction_strategy(sstables::compaction_strategy_type strategy)
     auto new_cs = make_compaction_strategy(strategy, _schema->compaction_strategy_options());
 
     _compaction_manager.register_backlog_tracker(new_cs.get_backlog_tracker());
-    auto move_read_charges = new_cs.type() == _compaction_strategy.type();
-    _compaction_strategy.get_backlog_tracker().transfer_ongoing_charges(new_cs.get_backlog_tracker(), move_read_charges);
+    _compaction_strategy.get_backlog_tracker().transfer_ongoing_charges(new_cs.get_backlog_tracker());
 
     auto new_sstables = new_cs.make_sstable_set(_schema);
     for (auto&& s : *_sstables->all()) {
         add_sstable_to_backlog_tracker(new_cs.get_backlog_tracker(), s);
         new_sstables.insert(s);
-    }
-
-    if (!move_read_charges) {
-        _compaction_manager.stop_tracking_ongoing_compactions(this);
     }
 
     // now exception safe:
