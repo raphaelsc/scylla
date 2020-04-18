@@ -5671,3 +5671,60 @@ SEASTAR_TEST_CASE(twcs_major_compaction_test) {
         BOOST_REQUIRE(ret.new_sstables.size() == 2);
     });
 }
+
+
+//
+// Check that backlog will reduce correctly after compacting a fully expired sstable.
+//
+SEASTAR_TEST_CASE(backlog_correctness_with_fully_expired_sstables) {
+    return test_env::do_with_async([] (test_env& env) {
+        storage_service_for_tests ssft;
+        auto builder = schema_builder("la", "cf")
+            .with_column("pk", utf8_type, column_kind::partition_key)
+            .with_column("ck1", utf8_type, column_kind::clustering_key)
+            .with_column("r1", int32_type);
+
+        builder.set_gc_grace_seconds(0);
+        auto s = builder.build();
+
+        auto tmp = tmpdir();
+        auto key = partition_key::from_exploded(*s, {to_bytes("key1")});
+        auto c_key = clustering_key_prefix::from_exploded(*s, {to_bytes("c1")});
+        auto sst_gen = [&env, s, &tmp, gen = make_lw_shared<unsigned>(1)] () mutable {
+            return env.make_sstable(s, tmp.path().string(), (*gen)++, la, big);
+        };
+        mutation m(s, key);
+        tombstone tomb(api::new_timestamp(), gc_clock::now() - std::chrono::seconds(3600));
+        m.partition().apply_delete(*s, c_key, tomb);
+
+        std::vector<shared_sstable> sstables = {
+                make_sstable_containing(sst_gen, {m}),
+                make_sstable_containing(sst_gen, {m}),
+        };
+
+        column_family_for_tests cf(s);
+        cf->set_compaction_strategy(sstables::compaction_strategy_type::time_window);
+
+        auto expired = get_fully_expired_sstables(*cf, sstables, gc_clock::now());
+        BOOST_REQUIRE(expired.size() == sstables.size());
+
+        double last_backlog = 0.0f;
+        // Verify backlog will not keep growing to the sky and above as we compact fully expired data.
+        for (auto i = 0; i < 10; i++) {
+            for (auto& sst : sstables) {
+                cf->get_compaction_strategy().get_backlog_tracker().add_sstable(sst);
+            }
+            BOOST_REQUIRE(cf->get_compaction_strategy().get_backlog_tracker().backlog() > 0.0f);
+
+            auto ret = compact_sstables(sstables::compaction_descriptor(sstables), *cf, sst_gen, replacer_fn_no_op()).get0();
+            BOOST_REQUIRE(ret.new_sstables.empty());
+
+            auto backlog = cf->get_compaction_strategy().get_backlog_tracker().backlog();
+            BOOST_REQUIRE(backlog <= last_backlog);
+
+            last_backlog = backlog;
+        }
+
+        BOOST_REQUIRE(cf->get_compaction_strategy().get_backlog_tracker().backlog() == 0.0f);
+    });
+}
