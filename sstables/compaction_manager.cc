@@ -802,6 +802,68 @@ void compaction_manager::propagate_replacement(column_family* cf,
     }
 }
 
+#ifdef COMPACTION_BACKLOG_TRACKER_DEBUG
+void compaction_backlog_tracker::validate_operation(const sstables::shared_sstable& sst, backlog_sstable_state to) {
+    static std::once_flag inform_once;
+    std::call_once(inform_once, [] {
+        cmlog.info0("Validation mode of compaction backlog tracker is enabled. System is potentially slower!");
+    });
+
+    backlog_sstable_state from = backlog_sstable_state::null;
+    auto it = _state_tracker.find(sst);
+    if (it != _state_tracker.end()) {
+        from = it->second;
+    }
+    auto to_string = [] (backlog_sstable_state state) {
+        switch(state) {
+        case backlog_sstable_state::null:
+            return "NULL";
+        case backlog_sstable_state::idle:
+            return "IDLE";
+        case backlog_sstable_state::compacting:
+            return "COMPACTING";
+        case backlog_sstable_state::partial:
+            return "PARTIAL";
+        default:
+            abort();
+        }
+    };
+
+    switch(from) {
+    case backlog_sstable_state::null:
+        if (to != backlog_sstable_state::partial && to != backlog_sstable_state::idle) {
+            on_internal_error(cmlog, format("Destination from NULL must be PARTIAL or IDLE, actual: {}", to_string(to)));
+        }
+        if (it != _state_tracker.end()) {
+            on_internal_error(cmlog, "Source NULL was already inserted in the tracker");
+        }
+        break;
+    case backlog_sstable_state::idle:
+        if (to != backlog_sstable_state::null && to != backlog_sstable_state::compacting) {
+            on_internal_error(cmlog, format("Destination from IDLE must be NULL or COMPACTING, actual: {}", to_string(to)));
+        }
+        break;
+    case backlog_sstable_state::compacting:
+        if (to != backlog_sstable_state::idle && to != backlog_sstable_state::null) {
+            on_internal_error(cmlog, format("Destination from COMPACTING must be IDLE or NULL, actual: {}", to_string(to)));
+        }
+        break;
+    case backlog_sstable_state::partial:
+        if (to != backlog_sstable_state::idle && to != backlog_sstable_state::null) {
+            on_internal_error(cmlog, format("Destination from PARTIAL must be IDLE or NULL, actual: {}", to_string(to)));
+        }
+        break;
+    }
+    if (to == backlog_sstable_state::null) {
+        _state_tracker.erase(sst);
+    } else {
+        _state_tracker[sst] = to;
+    }
+}
+#else
+void compaction_backlog_tracker::validate_operation(const sstables::shared_sstable& sst, backlog_sstable_state to) {}
+#endif
+
 double compaction_backlog_tracker::backlog() const {
     return _disabled ? compaction_controller::disable_backlog : _impl->backlog(_ongoing_writes, _ongoing_compactions);
 }
@@ -817,6 +879,7 @@ void compaction_backlog_tracker::add_sstable(sstables::shared_sstable sst) {
         cmlog.warn("Disabling backlog tracker due to exception {}", std::current_exception());
         disable();
     }
+    validate_operation(sst, backlog_sstable_state::idle);
 }
 
 void compaction_backlog_tracker::remove_sstable(sstables::shared_sstable sst) {
@@ -830,6 +893,7 @@ void compaction_backlog_tracker::remove_sstable(sstables::shared_sstable sst) {
         cmlog.warn("Disabling backlog tracker due to exception {}", std::current_exception());
         disable();
     }
+    validate_operation(sst, backlog_sstable_state::null);
 }
 
 void compaction_backlog_tracker::register_partially_written_sstable(sstables::shared_sstable sst, backlog_write_progress_manager& wp) {
@@ -838,6 +902,7 @@ void compaction_backlog_tracker::register_partially_written_sstable(sstables::sh
     }
     try {
         _ongoing_writes.emplace(sst, &wp);
+        validate_operation(sst, backlog_sstable_state::partial);
     } catch (...) {
         // We can potentially recover from adding ongoing compactions or writes when the process
         // ends. The backlog will just be temporarily wrong. If we are are suffering from something
@@ -855,6 +920,7 @@ void compaction_backlog_tracker::register_compacting_sstable(sstables::shared_ss
     remove_sstable(sst);
     try {
         _ongoing_compactions.emplace(sst, &rp);
+        validate_operation(sst, backlog_sstable_state::compacting);
     } catch (...) {
         cmlog.warn("backlog tracker couldn't register partially compacting SSTable to exception {}", std::current_exception());
         add_sstable(sst);
@@ -863,6 +929,7 @@ void compaction_backlog_tracker::register_compacting_sstable(sstables::shared_ss
 
 void compaction_backlog_tracker::revert_partially_written_charges(sstables::shared_sstable sst) {
     _ongoing_writes.erase(sst);
+    validate_operation(sst, backlog_sstable_state::null);
 }
 
 void compaction_backlog_tracker::revert_compacting_charges(sstables::shared_sstable sst) {

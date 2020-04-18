@@ -164,6 +164,16 @@ private:
     ongoing_writes _ongoing_writes;
     ongoing_compactions _ongoing_compactions;
     compaction_backlog_manager* _manager = nullptr;
+
+    enum class backlog_sstable_state {
+        null,
+        idle,
+        compacting,
+        partial,
+    };
+    std::unordered_map<sstables::shared_sstable, backlog_sstable_state> _state_tracker;
+    void validate_operation(const sstables::shared_sstable& sst, backlog_sstable_state to);
+
     friend class compaction_backlog_manager;
 };
 
