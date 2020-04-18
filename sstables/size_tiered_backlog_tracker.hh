@@ -92,6 +92,15 @@ class size_tiered_backlog_tracker final : public compaction_backlog_tracker::imp
         static constexpr double inv_log_4 = 1.0f / std::log(4);
         return log(x) * inv_log_4;
     }
+
+#ifdef COMPACTION_BACKLOG_TRACKER_DEBUG
+    std::unordered_set<sstables::shared_sstable> _sstables;
+#endif
+
+    void validate_backlog(double backlog, const compaction_backlog_tracker::ongoing_writes& ow,
+                          const compaction_backlog_tracker::ongoing_compactions& oc) const;
+    void on_sstable_add(const sstables::shared_sstable& sst);
+    void on_sstable_removal(const sstables::shared_sstable& sst);
 public:
     virtual double backlog(const compaction_backlog_tracker::ongoing_writes& ow, const compaction_backlog_tracker::ongoing_compactions& oc) const override;
 

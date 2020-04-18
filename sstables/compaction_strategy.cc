@@ -515,6 +515,78 @@ size_tiered_backlog_tracker::compacted_backlog(const compaction_backlog_tracker:
     return in;
 }
 
+#ifdef COMPACTION_BACKLOG_TRACKER_DEBUG
+void size_tiered_backlog_tracker::validate_backlog(double backlog, const compaction_backlog_tracker::ongoing_writes& ow,
+        const compaction_backlog_tracker::ongoing_compactions& oc) const {
+    auto sstables_total_bytes = boost::accumulate(_sstables |
+        boost::adaptors::transformed(std::mem_fn(&sstables::sstable::data_size)), int64_t(0));
+    auto T = sstables_total_bytes + partial_backlog(ow).total_bytes - compacted_backlog(oc).total_bytes;
+
+    double safe_backlog = 0.0f;
+    auto effective_size = [&oc] (auto& sst) {
+        auto it = oc.find(sst);
+        if (it != oc.end()) {
+            // Ei = Si - Ci, if compacting.
+            return sst->data_size() - it->second->compacted();
+        }
+        // Ei = Si, if not compacting.
+        return sst->data_size();
+    };
+
+    double sstables_backlog_contribution = 0.0f;
+    for (auto& sst : _sstables) {
+        sstables_backlog_contribution += sst->data_size() * log4(sst->data_size());
+
+        auto ei = effective_size(sst);
+        if (!ei) {
+            continue;
+        }
+        // backlog += Ei * log4(T / Si)
+        safe_backlog += ei * log4(T) - ei * log4(sst->data_size());
+
+    }
+
+    for (auto const& swp :  ow) {
+        auto written = swp.second->written();
+        if (!written) {
+            continue;
+        }
+        // backlog += Pi * log4(T / Si)
+        safe_backlog += written * log4(T) - written * log4(written);
+    }
+
+    if (std::abs(safe_backlog - backlog) > 0.1) {
+        sstables::clogger.warn("Backlog is significantly far from the expected value, actual {}, expected {}", backlog, safe_backlog);
+        // FIXME: add significant information about the state of the tracker.
+    }
+}
+
+void size_tiered_backlog_tracker::on_sstable_add(const sstables::shared_sstable& sst) {
+    if (_sstables.count(sst)) {
+        on_internal_error(sstables::clogger, format("SStable {} was already added to the tracker", sst->get_filename()));
+    }
+    _sstables.insert(sst);
+}
+
+void size_tiered_backlog_tracker::on_sstable_removal(const sstables::shared_sstable& sst) {
+    if (!_sstables.count(sst)) {
+        on_internal_error(sstables::clogger, format("SStable {} being removed wasn't previously added", sst->get_filename()));
+    }
+    _sstables.erase(sst);
+}
+#else
+
+void size_tiered_backlog_tracker::validate_backlog(double backlog, const compaction_backlog_tracker::ongoing_writes& ow,
+        const compaction_backlog_tracker::ongoing_compactions& oc) const {
+}
+
+void size_tiered_backlog_tracker::on_sstable_add(const sstables::shared_sstable& sst) {
+}
+
+void size_tiered_backlog_tracker::on_sstable_removal(const sstables::shared_sstable& sst) {
+}
+#endif
+
 double size_tiered_backlog_tracker::backlog(const compaction_backlog_tracker::ongoing_writes& ow, const compaction_backlog_tracker::ongoing_compactions& oc) const {
     inflight_component partial = partial_backlog(ow);
     inflight_component compacted = compacted_backlog(oc);
@@ -525,6 +597,7 @@ double size_tiered_backlog_tracker::backlog(const compaction_backlog_tracker::on
     }
     auto sstables_contribution = _sstables_backlog_contribution + partial.contribution + compacted.contribution;
     auto b = (effective_total_size * log4(effective_total_size)) - sstables_contribution;
+    validate_backlog(b, ow, oc);
     return b > 0 ? b : 0;
 }
 
@@ -532,6 +605,7 @@ void size_tiered_backlog_tracker::add_sstable(sstables::shared_sstable sst) {
     if (sst->data_size() > 0) {
         _total_bytes += sst->data_size();
         _sstables_backlog_contribution += sst->data_size() * log4(sst->data_size());
+        on_sstable_add(sst);
     }
 }
 
@@ -539,6 +613,7 @@ void size_tiered_backlog_tracker::remove_sstable(sstables::shared_sstable sst) {
     if (sst->data_size() > 0) {
         _total_bytes -= sst->data_size();
         _sstables_backlog_contribution -= sst->data_size() * log4(sst->data_size());
+        on_sstable_removal(sst);
     }
 }
 
