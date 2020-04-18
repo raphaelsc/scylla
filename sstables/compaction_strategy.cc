@@ -510,7 +510,7 @@ size_tiered_backlog_tracker::compacted_backlog(const compaction_backlog_tracker:
             continue;
         }
         in.total_bytes += effective_size;
-        in.contribution += effective_size * log4(size);
+        in.contribution += effective_size * log4(effective_size);
     }
     return in;
 }
@@ -542,7 +542,7 @@ void size_tiered_backlog_tracker::validate_backlog(double backlog, const compact
             continue;
         }
         // backlog += Ei * log4(T / Si)
-        safe_backlog += ei * log4(T) - ei * log4(sst->data_size());
+        safe_backlog += ei * log4(T) - ei * log4(ei);
 
     }
 
