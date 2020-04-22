@@ -301,8 +301,25 @@ class garbage_collected_sstable_writer {
     uint32_t _sstable_level = compaction_descriptor::default_level;
     uint64_t _partitions_per_sstable = 0;
 private:
-    void maybe_create_new_sstable_writer();
-    void on_end_of_stream();
+    void maybe_create_new_sstable_writer() {
+        if (!_writer) {
+            _sst = _sstable_creator(this_shard_id());
+
+            auto&& priority = service::get_local_compaction_priority();
+            _active_write_monitors.emplace_back(_sst, _cf, _maximum_timestamp, _sstable_level);
+            sstable_writer_config cfg = _cf.get_sstables_manager().configure_writer();
+            cfg.run_identifier = _run_identifier;
+            cfg.monitor = &_active_write_monitors.back();
+            _writer.emplace(_sst->get_writer(*_schema, _partitions_per_sstable, cfg, encoding_stats{}, priority));
+        }
+    }
+
+    void on_end_of_stream() {
+        for (auto&& sst : _temp_sealed_gc_sstables) {
+            clogger.debug("Asking for deletion of temporary tombstone-only sstable {}", sst->get_filename());
+            _delete_fn(std::move(sst));
+        }
+    }
 public:
     explicit garbage_collected_sstable_writer(column_family& cf, schema_ptr schema, api::timestamp_type maximum_timestamp,
           creator_fn sstable_creator, std::function<void(shared_sstable)> setup_fn, std::function<void(shared_sstable)> delete_fn)
@@ -337,7 +354,15 @@ public:
         on_end_of_stream();
     }
 
-    void finish_sstable_writer();
+    void finish_sstable_writer() {
+        if (_writer) {
+            _writer->consume_end_of_stream();
+            _writer = std::nullopt;
+            _sst->open_data().get0();
+            _setup_fn(_sst);
+            _temp_sealed_gc_sstables.push_back(std::move(_sst));
+        }
+    }
 
     friend class compaction;
 };
@@ -688,36 +713,6 @@ void compacting_sstable_writer::consume_end_of_stream() {
     if (_writer) {
         _c.stop_sstable_writer(&*_writer);
         _writer = std::nullopt;
-    }
-}
-
-void garbage_collected_sstable_writer::maybe_create_new_sstable_writer() {
-    if (!_writer) {
-        _sst = _sstable_creator(this_shard_id());
-
-        auto&& priority = service::get_local_compaction_priority();
-        _active_write_monitors.emplace_back(_sst, _cf, _maximum_timestamp, _sstable_level);
-        sstable_writer_config cfg = _cf.get_sstables_manager().configure_writer();
-        cfg.run_identifier = _run_identifier;
-        cfg.monitor = &_active_write_monitors.back();
-        _writer.emplace(_sst->get_writer(*_schema, _partitions_per_sstable, cfg, encoding_stats{}, priority));
-    }
-}
-
-void garbage_collected_sstable_writer::finish_sstable_writer() {
-    if (_writer) {
-        _writer->consume_end_of_stream();
-        _writer = std::nullopt;
-        _sst->open_data().get0();
-        _setup_fn(_sst);
-        _temp_sealed_gc_sstables.push_back(std::move(_sst));
-    }
-}
-
-void garbage_collected_sstable_writer::on_end_of_stream() {
-    for (auto&& sst : _temp_sealed_gc_sstables) {
-        clogger.debug("Asking for deletion of temporary tombstone-only sstable {}", sst->get_filename());
-        _delete_fn(std::move(sst));
     }
 }
 
