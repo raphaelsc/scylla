@@ -287,14 +287,14 @@ public:
 // from table's sstable set.
 class garbage_collected_sstable_writer {
     compaction* _c = nullptr;
-    std::vector<shared_sstable> _temp_sealed_gc_sstables;
+    std::vector<shared_sstable> _gc_sstables;
+    std::vector<shared_sstable> _unused_gc_sstables;
     std::deque<compaction_write_monitor> _active_write_monitors = {};
     shared_sstable _sst;
     std::optional<sstable_writer> _writer;
     utils::UUID _run_identifier = utils::make_random_uuid();
 private:
     void maybe_create_new_sstable_writer();
-    void on_end_of_stream();
 public:
     explicit garbage_collected_sstable_writer(compaction& c) : _c(&c) {
     }
@@ -319,10 +319,17 @@ public:
 
     void consume_end_of_stream() {
         finish_sstable_writer();
-        on_end_of_stream();
     }
 
     void finish_sstable_writer();
+
+    std::vector<shared_sstable> consume_unused_gc_sstables() && {
+        return std::move(_unused_gc_sstables);
+    }
+
+    std::vector<shared_sstable> consume_all_gc_sstables() && {
+        return std::move(_gc_sstables);
+    }
 };
 
 class gc_sstable_writer {
@@ -689,15 +696,8 @@ void garbage_collected_sstable_writer::finish_sstable_writer() {
         _writer->consume_end_of_stream();
         _writer = std::nullopt;
         _sst->open_data().get0();
-        _c->setup_garbage_collected_sstable(_sst);
-        _temp_sealed_gc_sstables.push_back(std::move(_sst));
-    }
-}
-
-void garbage_collected_sstable_writer::on_end_of_stream() {
-    for (auto&& sst : _temp_sealed_gc_sstables) {
-        clogger.debug("Asking for deletion of temporary tombstone-only sstable {}", sst->get_filename());
-        _c->eventually_delete_garbage_collected_sstable(std::move(sst));
+        _gc_sstables.push_back(_sst);
+        _unused_gc_sstables.push_back(std::move(_sst));
     }
 }
 
@@ -844,6 +844,9 @@ private:
             // Make sure SSTable created by garbage collected writer is made available
             // before exhausted SSTable is released, so as to prevent data resurrection.
             _gc_sstable_writer->finish_sstable_writer();
+            auto unused_gc_sstables = std::move(*_gc_sstable_writer).consume_unused_gc_sstables();
+            _new_unused_sstables.insert(_new_unused_sstables.end(), unused_gc_sstables.begin(), unused_gc_sstables.end());
+
             auto exhausted_ssts = std::vector<shared_sstable>(exhausted, _sstables.end());
             _replacer(get_compaction_completion_desc(exhausted_ssts, std::move(_new_unused_sstables)));
             _sstables.erase(exhausted, _sstables.end());
@@ -852,11 +855,13 @@ private:
     }
 
     void replace_remaining_exhausted_sstables() {
-        if (!_sstables.empty()) {
-            std::vector<shared_sstable> sstables_compacted;
-            std::move(_sstables.begin(), _sstables.end(), std::back_inserter(sstables_compacted));
-            _replacer(get_compaction_completion_desc(std::move(sstables_compacted), std::move(_new_unused_sstables)));
-        }
+        auto gc_sstables = std::move(*_gc_sstable_writer).consume_all_gc_sstables();
+        if (!_sstables.empty() || !gc_sstables.empty()) {
+            std::vector<shared_sstable> old_sstables;
+            std::move(_sstables.begin(), _sstables.end(), std::back_inserter(old_sstables));
+            old_sstables.insert(old_sstables.end(), gc_sstables.begin(), gc_sstables.end());
+            _replacer(get_compaction_completion_desc(std::move(old_sstables), std::move(_new_unused_sstables)));
+         }
     }
 
     void update_pending_ranges() {
