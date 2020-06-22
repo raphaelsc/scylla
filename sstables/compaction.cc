@@ -510,14 +510,20 @@ private:
     // Default range sstable reader that will only return mutation that belongs to current shard.
     virtual flat_mutation_reader make_sstable_reader() const = 0;
 
+    sstring sstable_log_entry(const sstables::shared_sstable& sst) {
+        std::filesystem::path p(sst->get_filename());
+        return format("{}:level={:d}, ", p.filename().string(), sst->get_sstable_level());
+    }
+
     template <typename GCConsumer>
     requires CompactedFragmentsConsumer<GCConsumer>
     future<> setup(GCConsumer gc_consumer) {
         auto ssts = make_lw_shared<sstables::sstable_set>(_cf.get_compaction_strategy().make_sstable_set(_schema));
-        sstring formatted_msg = "[";
+        sstring formatted_msg;
         auto fully_expired = get_fully_expired_sstables(_cf, _sstables, gc_clock::now() - _schema->gc_grace_seconds());
         min_max_tracker<api::timestamp_type> timestamp_tracker;
 
+        formatted_msg += format("at directory {} [", (*_sstables.begin())->get_dir());
         for (auto& sst : _sstables) {
             auto& sst_stats = sst->get_stats_metadata();
             timestamp_tracker.update(sst_stats.min_timestamp);
@@ -527,7 +533,7 @@ private:
             _ancestors.push_back(sst->generation());
             _info->start_size += sst->bytes_on_disk();
             _info->total_partitions += sst->get_estimated_key_count();
-            formatted_msg += format("{}:level={:d}, ", sst->get_filename(), sst->get_sstable_level());
+            formatted_msg += sstable_log_entry(sst);
 
             // Do not actually compact a sstable that is fully expired and can be safely
             // dropped without ressurrecting old data.
@@ -593,16 +599,21 @@ private:
 
         on_end_of_compaction();
 
-        for (auto& newtab : _info->new_sstables) {
-            new_sstables_msg += format("{}:level={:d}, ", newtab->get_filename(), newtab->get_sstable_level());
+        if (_info->new_sstables.size()) {
+            new_sstables_msg += format("at directory {} ", (*_info->new_sstables.begin())->get_dir());
         }
+        new_sstables_msg += "to [";
+        for (auto& newtab : _info->new_sstables) {
+            new_sstables_msg += sstable_log_entry(newtab);
+        }
+        new_sstables_msg += "]";
 
         // FIXME: there is some missing information in the log message below.
         // look at CompactionTask::runMayThrow() in origin for reference.
         // - add support to merge summary (message: Partition merge counts were {%s}.).
         // - there is no easy way, currently, to know the exact number of total partitions.
         // By the time being, using estimated key count.
-        sstring formatted_msg = fmt::format("{} sstables to [{}]. {} to {} (~{} of original) in {}ms = {}. " \
+        sstring formatted_msg = fmt::format("{} sstables {}. {} to {} (~{} of original) in {}ms = {}. " \
             "~{} total partitions merged to {}.",
             _info->sstables, new_sstables_msg, pretty_printed_data_size(_info->start_size), pretty_printed_data_size(_info->end_size), int(ratio * 100),
             std::chrono::duration_cast<std::chrono::milliseconds>(duration).count(), pretty_printed_throughput(_info->end_size, duration),
