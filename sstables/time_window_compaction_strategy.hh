@@ -260,7 +260,7 @@ public:
         return std::make_pair(std::move(buckets), max_timestamp);
     }
 
-    static std::vector<shared_sstable>
+    std::vector<shared_sstable>
     newest_bucket(std::map<timestamp_type, std::vector<shared_sstable>> buckets, int min_threshold, int max_threshold,
             std::chrono::seconds sstable_window_size, timestamp_type now, size_tiered_compaction_strategy_options& stcs_options) {
         // If the current bucket has at least minThreshold SSTables, choose that one.
