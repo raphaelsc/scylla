@@ -141,6 +141,8 @@ class time_window_compaction_strategy : public compaction_strategy_impl {
     int64_t _estimated_remaining_tasks = 0;
     db_clock::time_point _last_expired_check;
     timestamp_type _highest_window_seen;
+    // Keep track of all recent active windows that still need to be compacted into a single SSTable
+    std::unordered_set<timestamp_type> _recent_active_windows;
     size_tiered_compaction_strategy_options _stcs_options;
     compaction_backlog_tracker _backlog_tracker;
 public:
@@ -273,20 +275,38 @@ public:
 
             clogger.trace("Key {}, now {}", key, now);
 
-            if (bucket.size() >= size_t(min_threshold) && key >= now) {
-                // If we're in the newest bucket, we'll use STCS to prioritize sstables
-                auto stcs_interesting_bucket = size_tiered_compaction_strategy::most_interesting_bucket(bucket, min_threshold, max_threshold, stcs_options);
+            if (key >= now) {
+                _recent_active_windows.insert(key);
+                if (bucket.size() >= size_t(min_threshold)) {
+                    // If we're in the newest bucket, we'll use STCS to prioritize sstables
+                    auto stcs_interesting_bucket = size_tiered_compaction_strategy::most_interesting_bucket(bucket,
+                        min_threshold, max_threshold, stcs_options);
 
-                // If the tables in the current bucket aren't eligible in the STCS strategy, we'll skip it and look for other buckets
-                if (!stcs_interesting_bucket.empty()) {
-                    return stcs_interesting_bucket;
+                    // If the tables in the current bucket aren't eligible in the STCS strategy, we'll skip it and look for other buckets
+                    if (!stcs_interesting_bucket.empty()) {
+                        return stcs_interesting_bucket;
+                    }
                 }
-            } else if (bucket.size() >= 2 && key < now) {
-                clogger.debug("bucket size {} >= 2 and not in current bucket, compacting what's here", bucket.size());
-                return trim_to_threshold(std::move(bucket), max_threshold);
             } else {
-                clogger.debug("No compaction necessary for bucket size {} , key {}, now {}", bucket.size(), key, now);
+                // Let's perform STCS on all past windows but the ones that were not closed yet, to prevent the write
+                // ampĺification from being hurt when read repair, for example, cause small updates to past windows.
+                if (_recent_active_windows.count(key)) {
+                    _recent_active_windows.erase(key);
+                    if (bucket.size() >= 2) {
+                        clogger.debug("bucket size {} >= 2 for the recent active window {}, compacting what's here", bucket.size(), key);
+                        return trim_to_threshold(std::move(bucket), max_threshold);
+                    }
+                } else {
+                    auto stcs_interesting_bucket = size_tiered_compaction_strategy::most_interesting_bucket(bucket,
+                        min_threshold, max_threshold, stcs_options);
+
+                    if (!stcs_interesting_bucket.empty()) {
+                        clogger.debug("bucket size {} >= 2 for the past window {}, compacting what's here with STCS", bucket.size(), key);
+                        return stcs_interesting_bucket;
+                    }
+                }
             }
+            clogger.debug("No compaction necessary for bucket size {} , key {}, now {}", bucket.size(), key, now);
         }
         return {};
     }
