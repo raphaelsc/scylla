@@ -223,7 +223,7 @@ private:
         // Update the highest window seen, if necessary
         _highest_window_seen = std::max(_highest_window_seen, p.second);
 
-        update_estimated_compaction_by_tasks(p.first, cf.min_compaction_threshold());
+        update_estimated_compaction_by_tasks(p.first, cf.min_compaction_threshold(), cf.schema()->max_compaction_threshold());
 
         return newest_bucket(std::move(p.first), cf.min_compaction_threshold(), cf.schema()->max_compaction_threshold(),
             _options.sstable_window_size, _highest_window_seen, _stcs_options);
@@ -332,7 +332,7 @@ public:
         return timestamp_type(std::chrono::duration_cast<std::chrono::microseconds>(options.get_sstable_window_size()).count());
     }
 private:
-    void update_estimated_compaction_by_tasks(std::map<timestamp_type, std::vector<shared_sstable>>& tasks, int min_threshold) {
+    void update_estimated_compaction_by_tasks(std::map<timestamp_type, std::vector<shared_sstable>>& tasks, int min_threshold, int max_threshold) {
         int64_t n = 0;
         timestamp_type now = _highest_window_seen;
 
@@ -342,9 +342,15 @@ private:
             // For current window, make sure it's compactable
             auto count = task.second.size();
             if (key >= now && count >= size_t(min_threshold)) {
-                n++;
-            } else if (key < now && count >= 2) {
-                n++;
+                n += size_tiered_compaction_strategy::estimated_pending_compactions(task.second,
+                    min_threshold, max_threshold, _stcs_options);
+            } else if (key < now) {
+                if (_recent_active_windows.count(key) && count >= 2) {
+                    n++;
+                } else if (count >= size_t(min_threshold)) {
+                    n += size_tiered_compaction_strategy::estimated_pending_compactions(task.second,
+                        min_threshold, max_threshold, _stcs_options);
+                }
             }
         }
         _estimated_remaining_tasks = n;
