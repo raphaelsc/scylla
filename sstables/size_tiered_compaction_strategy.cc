@@ -27,7 +27,7 @@
 namespace sstables {
 
 std::vector<std::pair<sstables::shared_sstable, uint64_t>>
-size_tiered_compaction_strategy::create_sstable_and_length_pairs(const std::vector<sstables::shared_sstable>& sstables) const {
+size_tiered_compaction_strategy::create_sstable_and_length_pairs(const std::vector<sstables::shared_sstable>& sstables) {
 
     std::vector<std::pair<sstables::shared_sstable, uint64_t>> sstable_length_pairs;
     sstable_length_pairs.reserve(sstables.size());
@@ -43,7 +43,7 @@ size_tiered_compaction_strategy::create_sstable_and_length_pairs(const std::vect
 }
 
 std::vector<std::vector<sstables::shared_sstable>>
-size_tiered_compaction_strategy::get_buckets(const std::vector<sstables::shared_sstable>& sstables) const {
+size_tiered_compaction_strategy::get_buckets(const std::vector<sstables::shared_sstable>& sstables, size_tiered_compaction_strategy_options options) {
     // sstables sorted by size of its data file.
     auto sorted_sstables = create_sstable_and_length_pairs(sstables);
 
@@ -64,8 +64,8 @@ size_tiered_compaction_strategy::get_buckets(const std::vector<sstables::shared_
         for (auto it = buckets.begin(); it != buckets.end(); it++) {
             size_t old_average_size = it->first;
 
-            if ((size > (old_average_size * _options.bucket_low) && size < (old_average_size * _options.bucket_high)) ||
-                    (size < _options.min_sstable_size && old_average_size < _options.min_sstable_size)) {
+            if ((size > (old_average_size * options.bucket_low) && size < (old_average_size * options.bucket_high)) ||
+                    (size < options.min_sstable_size && old_average_size < options.min_sstable_size)) {
                 auto bucket = std::move(it->second);
                 size_t total_size = bucket.size() * old_average_size;
                 size_t new_average_size = (total_size + size) / (bucket.size() + 1);
@@ -141,7 +141,7 @@ size_tiered_compaction_strategy::get_sstables_for_compaction(column_family& cfs,
 
     // TODO: Add support to filter cold sstables (for reference: SizeTieredCompactionStrategy::filterColdSSTables).
 
-    auto buckets = get_buckets(candidates);
+    auto buckets = get_buckets(candidates, _options);
 
     if (is_any_bucket_interesting(buckets, min_threshold)) {
         std::vector<sstables::shared_sstable> most_interesting = most_interesting_bucket(std::move(buckets), min_threshold, max_threshold);
@@ -187,7 +187,7 @@ int64_t size_tiered_compaction_strategy::estimated_pending_compactions(column_fa
         sstables.push_back(entry);
     }
 
-    for (auto& bucket : get_buckets(sstables)) {
+    for (auto& bucket : get_buckets(sstables, _options)) {
         if (bucket.size() >= size_t(min_threshold)) {
             n += std::ceil(double(bucket.size()) / max_threshold);
         }
@@ -200,7 +200,7 @@ size_tiered_compaction_strategy::most_interesting_bucket(const std::vector<sstab
         int min_threshold, int max_threshold, size_tiered_compaction_strategy_options options) {
     size_tiered_compaction_strategy cs(options);
 
-    auto buckets = cs.get_buckets(candidates);
+    auto buckets = cs.get_buckets(candidates, options);
 
     std::vector<sstables::shared_sstable> most_interesting = cs.most_interesting_bucket(std::move(buckets),
         min_threshold, max_threshold);
@@ -218,7 +218,7 @@ size_tiered_compaction_strategy::get_reshaping_job(std::vector<shared_sstable> i
         offstrategy_threshold = max_sstables;
     }
 
-    for (auto& bucket : get_buckets(input)) {
+    for (auto& bucket : get_buckets(input, _options)) {
         if (bucket.size() >= offstrategy_threshold) {
             bucket.resize(std::min(max_sstables, bucket.size()));
             compaction_descriptor desc(std::move(bucket), std::optional<sstables::sstable_set>(), iop);
