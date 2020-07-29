@@ -272,7 +272,7 @@ public:
             auto key = key_bucket.first;
             auto& bucket = key_bucket.second;
 
-            clogger.trace("Key {}, now {}", key, now);
+            clogger.trace("Key {}, now {}, size {}", key, now, bucket.size());
 
             if (key >= now) {
                 _recent_active_windows.insert(key);
