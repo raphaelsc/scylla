@@ -778,6 +778,10 @@ future<> compaction_manager::perform_sstable_scrub(column_family* cf, bool skip_
     });
 }
 
+void compaction_manager::submit_off_strategy(column_family* cf) {
+    // TODO: implement
+}
+
 future<> compaction_manager::remove(column_family* cf) {
     // FIXME: better way to iterate through compaction info for a given column family,
     // although this path isn't performance sensitive.
