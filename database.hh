@@ -519,13 +519,9 @@ public:
         return _truncated_at;
     }
 
-    void notify_bootstrap_or_replace_start() {
-        _is_bootstrap_or_replace = true;
-    }
+    void notify_bootstrap_or_replace_start();
 
-    void notify_bootstrap_or_replace_end() {
-        _is_bootstrap_or_replace = false;
-    }
+    void notify_bootstrap_or_replace_end();
 private:
     bool cache_enabled() const {
         return _config.enable_cache && _schema->caching_options().enabled();
@@ -571,9 +567,13 @@ private:
     // Rebuilds existing sstable set with new sstables added to it and old sstables removed from it.
     void rebuild_sstable_list(const std::vector<sstables::shared_sstable>& new_sstables,
         const std::vector<sstables::shared_sstable>& old_sstables);
+    // Remove input sstables for off-strategy from repair sst set and add output sstables into main sst set.
+    void rebuild_sstable_lists_for_repair(const std::vector<sstables::shared_sstable>& new_sstables,
+        const std::vector<sstables::shared_sstable>& old_sstables);
 
     // Rebuild sstable set, delete input sstables right away, and update row cache and statistics.
-    void on_compaction_completion(sstables::compaction_completion_desc& desc);
+    void on_compaction_completion(sstables::compaction_completion_desc& desc,
+                                  std::function<void(sstables::compaction_completion_desc&)> replacer);
 
     void rebuild_statistics();
 private:
@@ -831,6 +831,7 @@ public:
     void trigger_compaction();
     void try_trigger_compaction() noexcept;
     future<> run_compaction(sstables::compaction_descriptor descriptor);
+    future<> run_offstrategy_compaction();
     void set_compaction_strategy(sstables::compaction_strategy_type strategy);
     const sstables::compaction_strategy& get_compaction_strategy() const {
         return _compaction_strategy;
