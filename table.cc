@@ -1187,8 +1187,8 @@ future<> table::snapshot(database& db, sstring name) {
         // If the SSTables are shared, link this sstable to the snapshot directory only by one of the shards that own it.
         auto& all = *_sstables->all();
         std::vector<sstables::shared_sstable> tables;
-        tables.reserve(all.size());
-        for (auto& sst : all) {
+        tables.reserve(all.size() + _repair_sstables->all()->size());
+        for (auto& sst : boost::range::join(all, *_repair_sstables->all())) {
             const auto& shards = sst->get_shards_for_this_sstable();
             if (shards.size() <= 1 || shards[0] == this_shard_id()) {
                 tables.emplace_back(sst);
