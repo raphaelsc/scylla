@@ -658,11 +658,11 @@ void table::rebuild_statistics() {
     }
 }
 
-void
-table::rebuild_sstable_list(const std::vector<sstables::shared_sstable>& new_sstables,
-                                    const std::vector<sstables::shared_sstable>& old_sstables) {
-    auto current_sstables = _sstables;
-    auto new_sstable_list = _compaction_strategy.make_sstable_set(_schema);
+lw_shared_ptr<sstables::sstable_set>
+table::build_new_sstable_set(lw_shared_ptr<sstables::sstable_set> current_sstables,
+                             lw_shared_ptr<sstables::sstable_set> new_sstable_list,
+                             const std::vector<sstables::shared_sstable>& new_sstables,
+                             const std::vector<sstables::shared_sstable>& old_sstables) {
 
     std::unordered_set<sstables::shared_sstable> s(old_sstables.begin(), old_sstables.end());
 
@@ -671,10 +671,21 @@ table::rebuild_sstable_list(const std::vector<sstables::shared_sstable>& new_sst
     // Noone is actually moving anything...
     for (auto&& tab : boost::range::join(new_sstables, std::move(*current_sstables->all()))) {
         if (!s.contains(tab)) {
-            new_sstable_list.insert(tab);
+            new_sstable_list->insert(tab);
         }
     }
-    _sstables = make_lw_shared<sstables::sstable_set>(std::move(new_sstable_list));
+    return new_sstable_list;
+}
+
+void
+table::rebuild_sstable_list(const std::vector<sstables::shared_sstable>& new_sstables,
+                                    const std::vector<sstables::shared_sstable>& old_sstables) {
+    auto new_sstable_list = build_new_sstable_set(
+        _sstables,
+        make_lw_shared<sstables::sstable_set>(_compaction_strategy.make_sstable_set(_schema)),
+        new_sstables,
+        old_sstables);
+    _sstables = std::move(new_sstable_list);
 }
 
 // Note: must run in a seastar thread

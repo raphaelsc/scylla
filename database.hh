@@ -564,6 +564,12 @@ private:
         return sstable_generation % smp::count;
     }
 
+    lw_shared_ptr<sstables::sstable_set>
+    build_new_sstable_set(lw_shared_ptr<sstables::sstable_set> current_sstables,
+                          lw_shared_ptr<sstables::sstable_set> new_sstable_list,
+                          const std::vector<sstables::shared_sstable>& new_sstables,
+                          const std::vector<sstables::shared_sstable>& old_sstables);
+
     // Rebuilds existing sstable set with new sstables added to it and old sstables removed from it.
     void rebuild_sstable_list(const std::vector<sstables::shared_sstable>& new_sstables,
         const std::vector<sstables::shared_sstable>& old_sstables);
