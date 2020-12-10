@@ -1344,17 +1344,23 @@ future<db::replay_position> table::discard_sstables(db_clock::time_point truncat
             auto gc_trunc = to_gc_clock(truncated_at);
 
             auto pruned = make_lw_shared<sstables::sstable_set>(cf._compaction_strategy.make_sstable_set(cf._schema));
+            auto repair_pruned = cf.make_repair_sstable_set();
 
-            for (auto& p : *cf._sstables->all()) {
-                if (p->max_data_age() <= gc_trunc) {
-                    rp = std::max(p->get_stats_metadata().position, rp);
-                    remove.emplace_back(p);
-                    continue;
+            auto prune = [this, &gc_trunc] (lw_shared_ptr<sstables::sstable_set>& pruned, lw_shared_ptr<sstable_list> all) mutable {
+                for (auto& p : *all) {
+                    if (p->max_data_age() <= gc_trunc) {
+                        rp = std::max(p->get_stats_metadata().position, rp);
+                        remove.emplace_back(p);
+                        continue;
+                    }
+                    pruned->insert(p);
                 }
-                pruned->insert(p);
-            }
+            };
+            prune(pruned, cf._sstables->all());
+            prune(repair_pruned, cf._repair_sstables->all());
 
             cf._sstables = std::move(pruned);
+            cf._repair_sstables = std::move(repair_pruned);
         }
     };
     auto p = make_lw_shared<pruner>(*this);
