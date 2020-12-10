@@ -365,6 +365,25 @@ table::add_sstable_and_update_cache(sstables::shared_sstable sst) {
     }, dht::partition_range::make({sst->get_first_decorated_key(), true}, {sst->get_last_decorated_key(), true}));
 }
 
+lw_shared_ptr<sstables::sstable_set> table::make_repair_sstable_set() const {
+    // FIXME: twcs may want to use its own custom set as the data may be segregated by timestamp
+    return make_lw_shared<sstables::sstable_set>(
+        sstables::make_partitioned_sstable_set(_schema, make_lw_shared<sstable_list>(sstable_list{}), false));
+}
+
+future<>
+table::add_repaired_sstable(sstables::shared_sstable sst) {
+    // allow in-progress reads to continue using old list
+    auto new_sstables = make_lw_shared<sstables::sstable_set>(*_repair_sstables);
+    new_sstables->insert(sst);
+    if (sst->requires_view_building()) {
+        _sstables_staging.emplace(sst->generation(), sst);
+    }
+    _repair_sstables = std::move(new_sstables);
+    update_stats_for_new_sstable(sst->bytes_on_disk());
+    return make_ready_future<>();
+}
+
 future<>
 table::update_cache(lw_shared_ptr<memtable> m, sstables::shared_sstable sst) {
     auto adder = [this, m, sst] {
@@ -579,6 +598,7 @@ table::stop() {
                     return _sstable_deletion_gate.close().then([this] {
                         return get_row_cache().invalidate([this] {
                             _sstables = _compaction_strategy.make_sstable_set(_schema);
+                            _repair_sstables = make_repair_sstable_set();
                             _sstables_staging.clear();
                         }).then([this] {
                             _cache.refresh_snapshot();
@@ -686,6 +706,20 @@ table::rebuild_sstable_list(const std::vector<sstables::shared_sstable>& new_sst
         new_sstables,
         old_sstables);
     _sstables = std::move(new_sstable_list);
+}
+
+void
+table::rebuild_repair_sstable_list(const std::vector<sstables::shared_sstable>& new_sstables,
+                                    const std::vector<sstables::shared_sstable>& old_sstables) {
+    auto new_sstable_list = build_new_sstable_set(
+        _repair_sstables,
+        make_repair_sstable_set(),
+        new_sstables,
+        old_sstables);
+    _repair_sstables = std::move(new_sstable_list);
+
+    tlogger.debug("rebuild_sstable_lists_for_repair: new={}, old={} -> repair={}, main={}",
+                 new_sstables.size(), old_sstables.size(), _repair_sstables->all()->size(), _sstables->all()->size());
 }
 
 // Note: must run in a seastar thread
@@ -840,6 +874,10 @@ void table::set_compaction_strategy(sstables::compaction_strategy_type strategy)
         add_sstable_to_backlog_tracker(new_cs.get_backlog_tracker(), s);
         new_sstables.insert(s);
     }
+    auto new_repair_sstables = make_repair_sstable_set();
+    for (auto&& s : *_repair_sstables->all()) {
+        new_repair_sstables->insert(s);
+    }
 
     if (!move_read_charges) {
         _compaction_manager.stop_tracking_ongoing_compactions(this);
@@ -848,6 +886,7 @@ void table::set_compaction_strategy(sstables::compaction_strategy_type strategy)
     // now exception safe:
     _compaction_strategy = std::move(new_cs);
     _sstables = std::move(new_sstables);
+    _repair_sstables = std::move(new_repair_sstables);
 }
 
 size_t table::sstables_count() const {
@@ -964,6 +1003,7 @@ table::table(schema_ptr schema, config config, db::commitlog* cl, compaction_man
     , _memtables(_config.enable_disk_writes ? make_memtable_list() : make_memory_only_memtable_list())
     , _compaction_strategy(make_compaction_strategy(_schema->compaction_strategy(), _schema->compaction_strategy_options()))
     , _sstables(make_lw_shared<sstables::sstable_set>(_compaction_strategy.make_sstable_set(_schema)))
+    , _repair_sstables(make_repair_sstable_set())
     , _cache(_schema, sstables_as_snapshot_source(), row_cache_tracker, is_continuous::yes)
     , _commitlog(cl)
     , _durable_writes(true)

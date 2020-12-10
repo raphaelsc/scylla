@@ -423,6 +423,8 @@ private:
     sstables::compaction_strategy _compaction_strategy;
     // generation -> sstable. Ordered by key so we can easily get the most recent.
     lw_shared_ptr<sstables::sstable_set> _sstables;
+    // SSTables created by repair-based ops, which need reshaping before integration
+    lw_shared_ptr<sstables::sstable_set> _repair_sstables;
     // sstables that have been compacted (so don't look up in query) but
     // have not been deleted yet, so must not GC any tombstones in other sstables
     // that may delete data in these sstables:
@@ -498,6 +500,8 @@ private:
     bool _is_bootstrap_or_replace = false;
 public:
     future<> add_sstable_and_update_cache(sstables::shared_sstable sst);
+    lw_shared_ptr<sstables::sstable_set> make_repair_sstable_set() const;
+    future<> add_repaired_sstable(sstables::shared_sstable sst);
     future<> move_sstables_from_staging(std::vector<sstables::shared_sstable>);
     sstables::shared_sstable get_staging_sstable(uint64_t generation) {
         auto it = _sstables_staging.find(generation);
@@ -572,6 +576,8 @@ private:
 
     // Rebuilds existing sstable set with new sstables added to it and old sstables removed from it.
     void rebuild_sstable_list(const std::vector<sstables::shared_sstable>& new_sstables,
+        const std::vector<sstables::shared_sstable>& old_sstables);
+    void rebuild_repair_sstable_list(const std::vector<sstables::shared_sstable>& new_sstables,
         const std::vector<sstables::shared_sstable>& old_sstables);
 
     // Rebuild sstable set, delete input sstables right away, and update row cache and statistics.
