@@ -112,6 +112,34 @@ table::make_sstable_reader(schema_ptr s,
     return make_restricted_flat_reader(std::move(ms), std::move(s), std::move(permit), pr, slice, pc, std::move(trace_state), fwd, fwd_mr);
 }
 
+static flat_mutation_reader
+make_restricted_combined_reader(schema_ptr s,
+                                   reader_permit permit,
+                                   std::vector<flat_mutation_reader> readers,
+                                   const dht::partition_range& pr,
+                                   const query::partition_slice& slice,
+                                   const io_priority_class& pc,
+                                   tracing::trace_state_ptr trace_state,
+                                   streamed_mutation::forwarding fwd,
+                                   mutation_reader::forwarding fwd_mr) {
+    using readers_t = std::vector<flat_mutation_reader>;
+    auto ms = [readers = make_lw_shared<readers_t>(std::move(readers))] () -> mutation_source {
+        return mutation_source([readers = std::move(readers)] (
+                schema_ptr s,
+                reader_permit permit,
+                const dht::partition_range& pr,
+                const query::partition_slice& slice,
+                const io_priority_class& pc,
+                tracing::trace_state_ptr trace_state,
+                streamed_mutation::forwarding fwd,
+                mutation_reader::forwarding fwd_mr) mutable {
+            return make_combined_reader(s, std::move(permit), std::move(*readers), fwd, fwd_mr);
+        });
+    }();
+    return make_restricted_flat_reader(std::move(ms), std::move(s), std::move(permit),
+                                       pr, slice, pc, std::move(trace_state), fwd, fwd_mr);
+}
+
 // Exposed for testing, not performance critical.
 future<table::const_mutation_partition_ptr>
 table::find_partition(schema_ptr s, reader_permit permit, const dht::decorated_key& key) const {
