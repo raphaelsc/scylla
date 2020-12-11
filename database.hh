@@ -577,7 +577,8 @@ private:
         const std::vector<sstables::shared_sstable>& old_sstables);
 
     // Rebuild sstable set, delete input sstables right away, and update row cache and statistics.
-    void on_compaction_completion(sstables::compaction_completion_desc& desc);
+    void on_compaction_completion(sstables::compaction_completion_desc& desc,
+                                  std::function<void(sstables::compaction_completion_desc&)> replacer);
 
     void rebuild_statistics();
 private:
