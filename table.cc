@@ -872,6 +872,53 @@ future<> table::run_compaction(sstables::compaction_descriptor descriptor) {
     return compact_sstables(std::move(descriptor));
 }
 
+future<> table::run_offstrategy_compaction() {
+  return with_semaphore(_off_strategy_sem, 1, [this] () mutable {
+    tlogger.info("Starting off-strategy compaction on behalf of {}.{}, {} candidates were found",
+        _schema->ks_name(), _schema->cf_name(), _repair_sstables->all()->size());
+    return repeat([this] () mutable {
+        auto candidates = boost::copy_range<std::vector<sstables::shared_sstable>>(*_repair_sstables->all());
+
+        auto& iop = service::get_local_streaming_priority();
+        auto desc = _compaction_strategy.get_reshaping_job(candidates, _schema, iop, sstables::reshape_mode::strict);
+        if (desc.sstables.empty()) {
+            // if we're done reshaping, merge repair set into the main one
+            return do_with(std::move(candidates), [this] (std::vector<sstables::shared_sstable>& ssts) mutable {
+                return do_for_each(ssts, [this] (sstables::shared_sstable& sst) mutable {
+                    return load_sstable(sst);
+                });
+            }).then([this] {
+                tlogger.info("Done with off-strategy for {}.{}", _schema->ks_name(), _schema->cf_name());
+                return make_ready_future<stop_iteration>(stop_iteration::yes);
+            });
+        }
+
+        desc.creator = [this] (shard_id dummy) {
+            auto sst = make_sstable();
+            return sst;
+        };
+        desc.replacer = [this] (sstables::compaction_completion_desc desc) mutable {
+            this->on_compaction_completion(desc, [this] (sstables::compaction_completion_desc& desc) mutable {
+                rebuild_repair_sstable_list(desc.new_sstables, desc.old_sstables);
+            });
+        };
+
+        return _compaction_manager.run_custom_job(this, "off-strategy", [desc = std::move(desc), this] () mutable {
+            return sstables::compact_sstables(std::move(desc), *this).discard_result();
+        }).then([] {
+            return make_ready_future<stop_iteration>(stop_iteration::no);
+        });
+    }).then_wrapped([this] (auto f) {
+        try {
+            f.get();
+        } catch(...) {
+            tlogger.error("Off strategy compaction failed on behalf of {}.{}, due to: {}",
+                          _schema->ks_name(), _schema->cf_name(), std::current_exception());
+        }
+    });
+  });
+}
+
 void table::set_compaction_strategy(sstables::compaction_strategy_type strategy) {
     tlogger.debug("Setting compaction strategy of {}.{} to {}", _schema->ks_name(), _schema->cf_name(), sstables::compaction_strategy::name(strategy));
     auto new_cs = make_compaction_strategy(strategy, _schema->compaction_strategy_options());
