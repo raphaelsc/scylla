@@ -854,6 +854,10 @@ public:
             finish_new_sstable(writer);
         }
     }
+
+    virtual void on_end_of_compaction() override {
+        _replacer(get_compaction_completion_desc(_sstables, _new_unused_sstables));
+    }
 };
 
 class regular_compaction : public compaction {
