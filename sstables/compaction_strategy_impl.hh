@@ -42,11 +42,13 @@ class compaction_strategy_impl {
 protected:
     const sstring TOMBSTONE_THRESHOLD_OPTION = "tombstone_threshold";
     const sstring TOMBSTONE_COMPACTION_INTERVAL_OPTION = "tombstone_compaction_interval";
+    const sstring SPLIT_DURING_FLUSH_OPTION = "split_during_flush";
 
     bool _use_clustering_key_filter = false;
     bool _disable_tombstone_compaction = false;
     float _tombstone_threshold = DEFAULT_TOMBSTONE_THRESHOLD;
     db_clock::duration _tombstone_compaction_interval = DEFAULT_TOMBSTONE_COMPACTION_INTERVAL();
+    bool _split_during_flush = false;
 public:
     static std::optional<sstring> get_value(const std::map<sstring, sstring>& options, const sstring& name);
 protected:
@@ -66,6 +68,10 @@ public:
 
     bool use_clustering_key_filter() const {
         return _use_clustering_key_filter;
+    }
+
+    bool split_during_flush() const {
+        return _split_during_flush;
     }
 
     virtual bool can_compact_partial_runs() const {

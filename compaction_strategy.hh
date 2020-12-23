@@ -73,6 +73,9 @@ public:
     // Return if optimization to rule out sstables based on clustering key filter should be applied.
     bool use_clustering_key_filter() const;
 
+    // Return if memtable content should be split (segregated) during flush
+    bool split_during_flush() const;
+
     // Return true if compaction strategy doesn't care if a sstable belonging to partial sstable run is compacted.
     bool can_compact_partial_runs() const;
 

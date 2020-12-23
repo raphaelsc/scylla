@@ -101,6 +101,14 @@ std::optional<sstring> compaction_strategy_impl::get_value(const std::map<sstrin
     return it->second;
 }
 
+static bool option_value_as_bool(sstring value) {
+    std::transform(value.begin(), value.end(), value.begin(), ::tolower);
+    std::istringstream is(value);
+    bool ret;
+    is >> std::boolalpha >> ret;
+    return ret;
+}
+
 compaction_strategy_impl::compaction_strategy_impl(const std::map<sstring, sstring>& options) {
     using namespace cql3::statements;
 
@@ -110,6 +118,10 @@ compaction_strategy_impl::compaction_strategy_impl(const std::map<sstring, sstri
     tmp_value = get_value(options, TOMBSTONE_COMPACTION_INTERVAL_OPTION);
     auto interval = property_definitions::to_long(TOMBSTONE_COMPACTION_INTERVAL_OPTION, tmp_value, DEFAULT_TOMBSTONE_COMPACTION_INTERVAL().count());
     _tombstone_compaction_interval = db_clock::duration(std::chrono::seconds(interval));
+
+    if (auto it = options.find(SPLIT_DURING_FLUSH_OPTION); it != options.end()) {
+        _split_during_flush = option_value_as_bool(it->second);
+    }
 
     // FIXME: validate options.
 }
@@ -651,6 +663,10 @@ int64_t compaction_strategy::estimated_pending_compactions(column_family& cf) co
 
 bool compaction_strategy::use_clustering_key_filter() const {
     return _compaction_strategy_impl->use_clustering_key_filter();
+}
+
+bool compaction_strategy::split_during_flush() const {
+    return _compaction_strategy_impl->split_during_flush();
 }
 
 compaction_backlog_tracker& compaction_strategy::get_backlog_tracker() {
