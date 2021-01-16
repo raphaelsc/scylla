@@ -316,6 +316,11 @@ future<> compaction_manager::run_custom_job(column_family* cf, sstring name, non
     return task->compaction_done.get_future().then([task] {});
 }
 
+void
+compaction_manager::submit_custom_job(column_family* cf, sstring name, noncopyable_function<future<>()> job) {
+    (void)run_custom_job(cf, std::move(name), std::move(job));
+}
+
 future<> compaction_manager::task_stop(lw_shared_ptr<compaction_manager::task> task) {
     task->stopping = true;
     auto f = task->compaction_done.get_future();

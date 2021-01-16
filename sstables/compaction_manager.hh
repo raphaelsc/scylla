@@ -220,6 +220,8 @@ public:
     //
     // parameter job is a function that will carry the operation
     future<> run_custom_job(column_family* cf, sstring name, noncopyable_function<future<>()> job);
+    // Variant of run_custom_job(), which job can be submitted to manager but not waited by the caller.
+    void submit_custom_job(column_family* cf, sstring name, noncopyable_function<future<>()> job);
 
     // Remove a column family from the compaction manager.
     // Cancel requests on cf and wait for a possible ongoing compaction on cf.
