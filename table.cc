@@ -758,11 +758,10 @@ void table::rebuild_statistics() {
     _stats.live_disk_space_used = 0;
     _stats.live_sstable_count = 0;
 
-    for (auto&& tab : boost::range::join(_sstables_compacted_but_not_deleted,
-                    // this might seem dangerous, but "move" here just avoids constness,
-                    // making the two ranges compatible when compiling with boost 1.55.
-                    // Noone is actually moving anything...
-                                         std::move(*_sstables->all()))) {
+    _all_sstables.for_each_sstable([this] (const sstables::shared_sstable& tab) mutable {
+        update_stats_for_new_sstable(tab->bytes_on_disk());
+    });
+    for (auto& tab : _sstables_compacted_but_not_deleted) {
         update_stats_for_new_sstable(tab->bytes_on_disk());
     }
 }
@@ -969,19 +968,20 @@ void table::set_compaction_strategy(sstables::compaction_strategy_type strategy)
 }
 
 size_t table::sstables_count() const {
-    return _sstables->all()->size();
+    return _all_sstables.sstables_size();
 }
 
 std::vector<uint64_t> table::sstable_count_per_level() const {
     std::vector<uint64_t> count_per_level;
-    for (auto&& sst : *_sstables->all()) {
+
+    _all_sstables.for_each_sstable([&count_per_level] (const sstables::shared_sstable& sst) mutable {
         auto level = sst->get_sstable_level();
 
         if (level + 1 > count_per_level.size()) {
             count_per_level.resize(level + 1, 0UL);
         }
         count_per_level[level]++;
-    }
+    });
     return count_per_level;
 }
 
