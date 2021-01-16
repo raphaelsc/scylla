@@ -214,7 +214,7 @@ table::make_reader(schema_ptr s,
     if (cache_enabled() && !slice.options.contains(query::partition_slice::option::bypass_cache)) {
         readers.emplace_back(_cache.make_reader(s, permit, range, slice, pc, std::move(trace_state), fwd, fwd_mr));
     } else {
-        readers.emplace_back(make_sstable_reader(s, permit, _sstables, range, slice, pc, std::move(trace_state), fwd, fwd_mr));
+        readers.emplace_back(make_sstable_reader(s, permit, { _sstables, _maintenance_sstables }, range, slice, pc, std::move(trace_state), fwd, fwd_mr));
     }
 
     auto comb_reader = make_combined_reader(s, std::move(permit), std::move(readers), fwd, fwd_mr);
@@ -249,7 +249,7 @@ table::make_streaming_reader(schema_ptr s,
         for (auto&& mt : *_memtables) {
             readers.emplace_back(mt->make_flat_reader(s, permit, range, slice, pc, trace_state, fwd, fwd_mr));
         }
-        readers.emplace_back(make_sstable_reader(s, permit, _sstables, range, slice, pc, std::move(trace_state), fwd, fwd_mr));
+        readers.emplace_back(make_sstable_reader(s, permit, { _sstables, _maintenance_sstables }, range, slice, pc, std::move(trace_state), fwd, fwd_mr));
         return make_combined_reader(s, std::move(permit), std::move(readers), fwd, fwd_mr);
     });
 
@@ -268,7 +268,7 @@ flat_mutation_reader table::make_streaming_reader(schema_ptr schema, const dht::
     for (auto&& mt : *_memtables) {
         readers.emplace_back(mt->make_flat_reader(schema, permit, range, slice, pc, trace_state, fwd, fwd_mr));
     }
-    readers.emplace_back(make_sstable_reader(schema, permit, _sstables, range, slice, pc, std::move(trace_state), fwd, fwd_mr));
+    readers.emplace_back(make_sstable_reader(schema, permit, { _sstables, _maintenance_sstables }, range, slice, pc, std::move(trace_state), fwd, fwd_mr));
     return make_combined_reader(std::move(schema), std::move(permit), std::move(readers), fwd, fwd_mr);
 }
 
@@ -983,7 +983,12 @@ lw_shared_ptr<const sstable_list> table::get_sstables() const {
 }
 
 std::vector<sstables::shared_sstable> table::select_sstables(const dht::partition_range& range) const {
-    return _sstables->select(range);
+    std::vector<sstables::shared_sstable> ret = _sstables->select(range);
+    if (auto ssts = _maintenance_sstables->select(range); ssts.size()) {
+        ret.reserve(ret.size() + ssts.size());
+        std::move(ssts.begin(), ssts.end(), std::back_inserter(ret));
+    }
+    return ret;
 }
 
 std::vector<sstables::shared_sstable> table::non_staging_sstables() const {
@@ -1078,7 +1083,8 @@ snapshot_source
 table::sstables_as_snapshot_source() {
     return snapshot_source([this] () {
         auto sst_set = _sstables;
-        return mutation_source([this, sst_set] (schema_ptr s,
+        auto maintenance_sst_set = _maintenance_sstables;
+        return mutation_source([this, sst_set, maintenance_sst_set] (schema_ptr s,
                 reader_permit permit,
                 const dht::partition_range& r,
                 const query::partition_slice& slice,
@@ -1086,9 +1092,18 @@ table::sstables_as_snapshot_source() {
                 tracing::trace_state_ptr trace_state,
                 streamed_mutation::forwarding fwd,
                 mutation_reader::forwarding fwd_mr) {
-            return make_sstable_reader(std::move(s), std::move(permit), sst_set, r, slice, pc, std::move(trace_state), fwd, fwd_mr);
-        }, [this, sst_set] {
-            return make_partition_presence_checker(sst_set);
+            return make_sstable_reader(std::move(s), std::move(permit), { sst_set, maintenance_sst_set }, r, slice, pc, std::move(trace_state), fwd, fwd_mr);
+        }, [this, sst_set, maintenance_sst_set] {
+            return [main_checker = make_partition_presence_checker(std::move(sst_set)),
+                    maintenance_checker = make_partition_presence_checker(std::move(maintenance_sst_set))]
+                    (const dht::decorated_key& key) mutable {
+                partition_presence_checker_result ret = partition_presence_checker_result::definitely_doesnt_exist;
+                if (main_checker(key) == partition_presence_checker_result::maybe_exists ||
+                        maintenance_checker(key) == partition_presence_checker_result::maybe_exists) {
+                    ret = partition_presence_checker_result::maybe_exists;
+                }
+                return ret;
+            };
         });
     });
 }
@@ -1898,8 +1913,12 @@ table::make_reader_excluding_sstables(schema_ptr s,
     for (auto& sst : excluded) {
         effective_sstables->erase(sst);
     }
+    auto effective_maintenance_sstables = ::make_lw_shared<sstables::sstable_set>(*_maintenance_sstables);
+    for (auto& sst : excluded) {
+        effective_sstables->erase(sst);
+    }
 
-    readers.emplace_back(make_sstable_reader(s, permit, std::move(effective_sstables), range, slice, pc, std::move(trace_state), fwd, fwd_mr));
+    readers.emplace_back(make_sstable_reader(s, permit, { std::move(effective_sstables), std::move(effective_maintenance_sstables) }, range, slice, pc, std::move(trace_state), fwd, fwd_mr));
     return make_combined_reader(s, std::move(permit), std::move(readers), fwd, fwd_mr);
 }
 
