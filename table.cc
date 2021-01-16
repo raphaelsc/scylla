@@ -54,7 +54,7 @@ using namespace std::chrono_literals;
 flat_mutation_reader
 table::make_sstable_reader(schema_ptr s,
                                    reader_permit permit,
-                                   lw_shared_ptr<sstables::sstable_set> sstables,
+                                   std::vector<lw_shared_ptr<sstables::sstable_set>> sstables_s,
                                    const dht::partition_range& pr,
                                    const query::partition_slice& slice,
                                    const io_priority_class& pc,
@@ -65,7 +65,7 @@ table::make_sstable_reader(schema_ptr s,
     // we want to optimize and read exactly this partition. As a
     // consequence, fast_forward_to() will *NOT* work on the result,
     // regardless of what the fwd_mr parameter says.
-    auto ms = [&] () -> mutation_source {
+    auto ms = [&] (lw_shared_ptr<sstables::sstable_set> sstables) -> mutation_source {
         if (pr.is_singular() && pr.start()->value().has_key()) {
             const dht::ring_position& pos = pr.start()->value();
             if (dht::shard_of(*s, pos.token()) != this_shard_id()) {
@@ -109,9 +109,30 @@ table::make_sstable_reader(schema_ptr s,
                         std::move(trace_state), fwd, fwd_mr);
             });
         }
-    }();
+    };
 
-    return make_restricted_flat_reader(std::move(ms), std::move(s), std::move(permit), pr, slice, pc, std::move(trace_state), fwd, fwd_mr);
+    std::vector<mutation_source> sources;
+    sources.reserve(sstables_s.size());
+    for (auto& sstables : sstables_s) {
+        sources.push_back(ms(std::move(sstables)));
+    }
+
+    return make_restricted_flat_reader(make_combined_mutation_source(std::move(sources)), std::move(s), std::move(permit), pr,
+                                       slice, pc, std::move(trace_state), fwd, fwd_mr);
+}
+
+flat_mutation_reader
+table::make_sstable_reader(schema_ptr s,
+                                   reader_permit permit,
+                                   lw_shared_ptr<sstables::sstable_set> sstables,
+                                   const dht::partition_range& pr,
+                                   const query::partition_slice& slice,
+                                   const io_priority_class& pc,
+                                   tracing::trace_state_ptr trace_state,
+                                   streamed_mutation::forwarding fwd,
+                                   mutation_reader::forwarding fwd_mr) const {
+    std::vector<lw_shared_ptr<sstables::sstable_set>> sstables_s = { std::move(sstables) };
+    return make_sstable_reader(std::move(s), std::move(permit), std::move(sstables_s), pr, slice, pc, trace_state, fwd, fwd_mr);
 }
 
 // Exposed for testing, not performance critical.

@@ -587,6 +587,16 @@ private:
     // Mutations returned by the reader will all have given schema.
     flat_mutation_reader make_sstable_reader(schema_ptr schema,
                                         reader_permit permit,
+                                        std::vector<lw_shared_ptr<sstables::sstable_set>> sstables_s,
+                                        const dht::partition_range& range,
+                                        const query::partition_slice& slice,
+                                        const io_priority_class& pc,
+                                        tracing::trace_state_ptr trace_state,
+                                        streamed_mutation::forwarding fwd,
+                                        mutation_reader::forwarding fwd_mr) const;
+    // TODO: kill this variant which accept only one sstable set once all users are updated to use the new one.
+    flat_mutation_reader make_sstable_reader(schema_ptr schema,
+                                        reader_permit permit,
                                         lw_shared_ptr<sstables::sstable_set> sstables,
                                         const dht::partition_range& range,
                                         const query::partition_slice& slice,
