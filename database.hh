@@ -427,6 +427,8 @@ private:
     sstables::compaction_strategy _compaction_strategy;
     // generation -> sstable. Ordered by key so we can easily get the most recent.
     lw_shared_ptr<sstables::sstable_set> _sstables;
+    // SSTables created by maintenance operations, which need reshaping before integration into main set
+    lw_shared_ptr<sstables::sstable_set> _maintenance_sstables;
     // sstables that have been compacted (so don't look up in query) but
     // have not been deleted yet, so must not GC any tombstones in other sstables
     // that may delete data in these sstables:
@@ -504,6 +506,8 @@ private:
     bool _is_bootstrap_or_replace = false;
 public:
     future<> add_sstable_and_update_cache(sstables::shared_sstable sst);
+    lw_shared_ptr<sstables::sstable_set> make_maintenance_sstable_set() const;
+    void add_maintenance_sstable(sstables::shared_sstable sst);
     future<> move_sstables_from_staging(std::vector<sstables::shared_sstable>);
     sstables::shared_sstable get_staging_sstable(uint64_t generation) {
         auto it = _sstables_staging.find(generation);
