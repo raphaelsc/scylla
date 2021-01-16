@@ -1927,7 +1927,10 @@ future<> table::move_sstables_from_staging(std::vector<sstables::shared_sstable>
                 return sst->move_to_new_dir(dir(), sst->generation(), false).then_wrapped([this, sst, &dirs_to_sync] (future<> f) {
                     if (!f.failed()) {
                         _sstables_staging.erase(sst->generation());
-                        add_sstable_to_backlog_tracker(_compaction_strategy.get_backlog_tracker(), sst);
+                        // Staging SSTable is only added to the backlog tracker if it isn't being processed by off-strategy.
+                        if (!_maintenance_sstables->all()->contains(sst)) {
+                            add_sstable_to_backlog_tracker(_compaction_strategy.get_backlog_tracker(), sst);
+                        }
                         return make_ready_future<>();
                     } else {
                         auto ep = f.get_exception();
