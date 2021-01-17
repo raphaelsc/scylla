@@ -112,11 +112,16 @@ std::ostream& operator<<(std::ostream& os, pretty_printed_throughput tp) {
     return os;
 }
 
-static api::timestamp_type get_max_purgeable_timestamp(const column_family& cf, sstable_set::incremental_selector& selector,
+static api::timestamp_type get_max_purgeable_timestamp(const column_family& cf,
+        sstable_set::incremental_selector& selector, sstable_set::incremental_selector& maintenance_selector,
         const std::unordered_set<shared_sstable>& compacting_set, const dht::decorated_key& dk) {
     auto timestamp = api::max_timestamp;
     std::optional<utils::hashed_key> hk;
-    for (auto&& sst : boost::range::join(selector.select(dk).sstables, cf.compacted_undeleted_sstables())) {
+    auto& sstables = selector.select(dk).sstables;
+    auto& maintenance_sstables = maintenance_selector.select(dk).sstables;
+    auto all_uncompacted_ssts = boost::range::join(sstables, maintenance_sstables);
+
+    for (auto&& sst : boost::range::join(std::move(all_uncompacted_ssts), cf.compacted_undeleted_sstables())) {
         if (compacting_set.contains(sst)) {
             continue;
         }
@@ -444,8 +449,10 @@ protected:
     ::io_priority_class _io_priority;
     // optional clone of sstable set to be used for expiration purposes, so it will be set if expiration is enabled.
     std::optional<sstable_set> _sstable_set;
+    std::optional<sstable_set> _maintenance_sstable_set;
     // used to incrementally calculate max purgeable timestamp, as we iterate through decorated keys.
     std::optional<sstable_set::incremental_selector> _selector;
+    std::optional<sstable_set::incremental_selector> _maintenance_selector;
     std::unordered_set<shared_sstable> _compacting_for_max_purgeable_func;
 protected:
     compaction(column_family& cf, compaction_descriptor descriptor)
@@ -462,7 +469,9 @@ protected:
         , _run_identifier(descriptor.run_identifier)
         , _io_priority(descriptor.io_priority)
         , _sstable_set(std::move(descriptor.all_sstables_snapshot))
+        , _maintenance_sstable_set(_cf.get_maintenance_sstable_set())
         , _selector(_sstable_set ? _sstable_set->make_incremental_selector() : std::optional<sstable_set::incremental_selector>{})
+        , _maintenance_selector(_maintenance_sstable_set->make_incremental_selector())
         , _compacting_for_max_purgeable_func(std::unordered_set<shared_sstable>(_sstables.begin(), _sstables.end()))
     {
         _info->type = descriptor.options.type();
@@ -672,7 +681,7 @@ private:
             };
         }
         return [this] (const dht::decorated_key& dk) {
-            return get_max_purgeable_timestamp(_cf, *_selector, _compacting_for_max_purgeable_func, dk);
+            return get_max_purgeable_timestamp(_cf, *_selector, *_maintenance_selector, _compacting_for_max_purgeable_func, dk);
         };
     }
 
