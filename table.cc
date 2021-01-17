@@ -354,6 +354,9 @@ void table::notify_bootstrap_or_replace_start() {
 
 void table::notify_bootstrap_or_replace_end() {
     _is_bootstrap_or_replace = false;
+    _compaction_manager.submit_custom_job(this, "off-strategy", [this] () mutable {
+        return run_offstrategy_compaction();
+    });
 }
 
 void table::update_stats_for_new_sstable(uint64_t disk_space_used_by_sstable) noexcept {
@@ -406,6 +409,11 @@ void table::add_maintenance_sstable(sstables::shared_sstable sst) {
 
 future<>
 table::add_sstable_and_update_cache(sstables::shared_sstable sst) {
+    if (_is_bootstrap_or_replace) {
+        // cache invalidation is bypassed as new data only is being added by bootstrap or replace
+        add_maintenance_sstable(std::move(sst));
+        return make_ready_future<>();
+    }
     return get_row_cache().invalidate(row_cache::external_updater([this, sst] () noexcept {
         // FIXME: this is not really noexcept, but we need to provide strong exception guarantees.
         // atomically load all opened sstables into column family.
