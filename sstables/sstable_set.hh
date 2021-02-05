@@ -27,6 +27,8 @@
 #include "dht/i_partitioner.hh"
 #include <seastar/core/shared_ptr.hh>
 #include <vector>
+#include <boost/range.hpp>
+#include <boost/range/join.hpp>
 
 namespace utils {
 class estimated_histogram;
@@ -155,6 +157,50 @@ public:
             streamed_mutation::forwarding,
             mutation_reader::forwarding,
             read_monitor_generator& rmg = default_read_monitor_generator()) const;
+};
+
+// This structure holds non-owning reference to multiple sstable sets and allow
+// their operations to be combined.
+template <std::size_t N>
+class compound_sstable_set {
+    using sstable_set_ptr = lw_shared_ptr<sstable_set>;
+    std::array<sstable_set_ptr*, N> _sets;
+public:
+    compound_sstable_set(std::array<sstable_set_ptr*, N> sets) : _sets(std::move(sets)) {}
+
+    compound_sstable_set(const compound_sstable_set&) = delete;
+    compound_sstable_set& operator=(const compound_sstable_set&) = delete;
+
+    // Allows iteration over all sstables from all sets
+    void for_each_sstable(std::function<void(const sstables::shared_sstable&)> func) const {
+        for (sstable_set_ptr* set : _sets) {
+            for (const shared_sstable& sstable : *(*set)->all()) {
+                func(sstable);
+            }
+        }
+    }
+
+    // Returns the amount of sstables in all sets
+    uint64_t sstables_size() const {
+        return boost::accumulate(_sets | boost::adaptors::transformed([] (sstable_set_ptr* set) -> uint64_t {
+            return (*set)->all()->size();
+        }), uint64_t(0));
+    }
+
+    // Returns sstables from all sets which potentially contain data in the provided range
+    std::vector<shared_sstable> select(const dht::partition_range& range) const {
+        std::vector<shared_sstable> ret;
+        for (auto& set : _sets) {
+            auto ssts = (*set)->select(range);
+            if (ret.empty()) {
+                ret = std::move(ssts);
+            } else {
+                ret.reserve(ret.size() + ssts.size());
+                std::move(ssts.begin(), ssts.end(), std::back_inserter(ret));
+            }
+        }
+        return ret;
+    }
 };
 
 /// Read a range from the passed-in sstables.
