@@ -6854,3 +6854,41 @@ SEASTAR_TEST_CASE(test_sstable_origin) {
         return make_ready_future<>();
     });
 }
+
+SEASTAR_TEST_CASE(compound_sstable_set_test) {
+    return test_env::do_with([] (test_env& env) {
+        auto s = make_shared_schema({}, some_keyspace, some_column_family,
+            {{"p1", utf8_type}}, {}, {}, {}, utf8_type);
+        auto cs = sstables::make_compaction_strategy(sstables::compaction_strategy_type::size_tiered, s->compaction_strategy_options());
+
+        sstables::compound_sstable_set<2> css;
+        lw_shared_ptr<sstables::sstable_set>& set1 = css.init<0>(make_lw_shared(cs.make_sstable_set(s)));
+        lw_shared_ptr<sstables::sstable_set>& set2 = css.init<1>(make_lw_shared(cs.make_sstable_set(s)));
+
+        unsigned gen = 1;
+        set1->insert(env.make_sstable(s, "", gen++, la, big));
+        set2->insert(env.make_sstable(s, "", gen++, la, big));
+        set2->insert(env.make_sstable(s, "", gen++, la, big));
+
+        {
+            unsigned found = 0;
+            css.for_each_sstable([&found] (const shared_sstable& sst) {
+                found++;
+            });
+            BOOST_REQUIRE(css.sstables_size() == 3);
+            BOOST_REQUIRE(css.sstables_size() == found);
+        }
+
+        set2 = make_lw_shared(cs.make_sstable_set(s));
+        {
+            unsigned found = 0;
+            css.for_each_sstable([&found] (const shared_sstable& sst) {
+                found++;
+            });
+            BOOST_REQUIRE(css.sstables_size() == 1);
+            BOOST_REQUIRE(css.sstables_size() == found);
+        }
+
+        return make_ready_future<>();
+    });
+}
