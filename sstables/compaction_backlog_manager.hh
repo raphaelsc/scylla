@@ -133,3 +133,4 @@ public:
     double backlog() const;
     void register_backlog_tracker(compaction_backlog_tracker& tracker);
 };
+
