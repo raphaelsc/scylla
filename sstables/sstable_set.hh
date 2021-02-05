@@ -223,4 +223,6 @@ sstable_set make_partitioned_sstable_set(schema_ptr schema, lw_shared_ptr<sstabl
 
 std::ostream& operator<<(std::ostream& os, const sstables::sstable_run& run);
 
+using enable_backlog_tracker = bool_class<class enable_backlog_tracker_tag>;
+
 }
