@@ -428,6 +428,7 @@ private:
     lw_shared_ptr<sstables::sstable_set> _sstables;
     // SSTables created by maintenance operations, which need reshaping before integration into main set
     lw_shared_ptr<sstables::sstable_set> _maintenance_sstables;
+    sstables::compound_sstable_set<2> _all_sstables;
     // sstables that have been compacted (so don't look up in query) but
     // have not been deleted yet, so must not GC any tombstones in other sstables
     // that may delete data in these sstables:
