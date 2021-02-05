@@ -426,10 +426,11 @@ private:
     lw_shared_ptr<memtable_list> make_memtable_list();
 
     sstables::compaction_strategy _compaction_strategy;
+    sstables::compound_sstable_set _all_sstables;
     // generation -> sstable. Ordered by key so we can easily get the most recent.
-    lw_shared_ptr<sstables::sstable_set> _sstables;
+    lw_shared_ptr<sstables::sstable_set>& _sstables;
     // SSTables created by maintenance operations, which need reshaping before integration into main set
-    lw_shared_ptr<sstables::sstable_set> _maintenance_sstables;
+    lw_shared_ptr<sstables::sstable_set>& _maintenance_sstables;
     // sstables that have been compacted (so don't look up in query) but
     // have not been deleted yet, so must not GC any tombstones in other sstables
     // that may delete data in these sstables:
