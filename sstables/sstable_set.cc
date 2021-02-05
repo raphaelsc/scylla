@@ -21,6 +21,7 @@
 
 #include <boost/icl/interval_map.hpp>
 #include <boost/range/adaptor/map.hpp>
+#include <boost/range.hpp>
 
 #include "compatible_ring_position.hh"
 #include "compaction_strategy_impl.hh"
@@ -917,6 +918,46 @@ flat_mutation_reader make_restricted_range_sstable_reader(
                 std::move(trace_state), fwd, fwd_mr, monitor_generator);
     });
     return make_restricted_flat_reader(std::move(ms), std::move(s), std::move(permit), pr, slice, pc, std::move(trace_state), fwd, fwd_mr);
+}
+
+lw_shared_ptr<sstable_set>&
+compound_sstable_set::init(std::size_t idx, lw_shared_ptr<sstable_set> s) {
+    auto& set = _sets[idx];
+    set = std::move(s);
+    return set;
+}
+
+const std::vector<lw_shared_ptr<sstable_set>>& compound_sstable_set::sets() const {
+    return _sets;
+}
+
+void compound_sstable_set::for_each_sstable(std::function<void(const sstables::shared_sstable&)> func) const {
+    for (auto& set : _sets) {
+        for (const shared_sstable& sstable : *set->all()) {
+            func(sstable);
+        }
+    }
+}
+
+uint64_t compound_sstable_set::sstables_size() const {
+    return boost::accumulate(_sets | boost::adaptors::transformed([] (auto& set) -> uint64_t {
+        return set->all()->size();
+    }), uint64_t(0));
+}
+
+std::vector<shared_sstable>
+compound_sstable_set::select(const dht::partition_range& range) const {
+    std::vector<shared_sstable> ret;
+    for (auto& set : _sets) {
+        auto ssts = set->select(range);
+        if (ret.empty()) {
+            ret = std::move(ssts);
+        } else {
+            ret.reserve(ret.size() + ssts.size());
+            std::move(ssts.begin(), ssts.end(), std::back_inserter(ret));
+        }
+    }
+    return ret;
 }
 
 } // namespace sstables

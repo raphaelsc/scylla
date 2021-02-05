@@ -157,6 +157,32 @@ public:
             read_monitor_generator& rmg = default_read_monitor_generator()) const;
 };
 
+// This structure holds ownership of multiple sstable sets and allow them to be
+// referenced individually, and their operations to be combined.
+class compound_sstable_set {
+    std::vector<lw_shared_ptr<sstable_set>> _sets;
+public:
+    explicit compound_sstable_set(std::size_t nr_elements) : _sets(nr_elements) {}
+    compound_sstable_set(compound_sstable_set&&) = delete;
+    compound_sstable_set& operator=(const compound_sstable_set&&) = delete;
+    compound_sstable_set(const compound_sstable_set&) = delete;
+    compound_sstable_set& operator=(const compound_sstable_set&) = delete;
+
+    // Initialize nth set and return a reference to it
+    lw_shared_ptr<sstable_set>& init(std::size_t idx, lw_shared_ptr<sstable_set> s);
+
+    const std::vector<lw_shared_ptr<sstable_set>>& sets() const;
+
+    // Allows iteration over all sstables from all sets
+    void for_each_sstable(std::function<void(const sstables::shared_sstable&)> func) const;
+
+    // Returns the amount of sstables in all sets
+    uint64_t sstables_size() const;
+
+    // Returns sstables from all sets which potentially contain data in the provided range
+    std::vector<shared_sstable> select(const dht::partition_range& range) const;
+};
+
 /// Read a range from the passed-in sstables.
 ///
 /// The reader is restricted, that is it will wait for admission on the semaphore
