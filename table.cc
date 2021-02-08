@@ -781,6 +781,35 @@ table::build_new_sstable_list(const std::vector<sstables::shared_sstable>& new_s
     co_return make_lw_shared<sstables::sstable_set>(std::move(new_sstable_list));
 }
 
+future<>
+table::move_reshaped_sstables_into_main_set(const std::vector<sstables::shared_sstable>& old_sstables,
+                                            const std::vector<sstables::shared_sstable>& new_sstables) {
+    auto current_maintenance = _maintenance_sstables;
+    auto new_maintenance_set = make_maintenance_sstable_set();
+
+    std::unordered_set<sstables::shared_sstable> old(old_sstables.begin(), old_sstables.end());
+    for (auto& tab : *current_maintenance->all()) {
+        if (!old.contains(tab)) {
+            new_maintenance_set->insert(tab);
+        }
+        co_await make_ready_future<>(); // yield if needed.
+    }
+
+    auto current_main = _sstables;
+    auto new_main_set = _compaction_strategy.make_sstable_set(_schema);
+
+    // this might seem dangerous, but "move" here just avoids constness
+    for (auto& tab : boost::range::join(new_sstables, std::move(*current_main->all()))) {
+        new_main_set.insert(tab);
+        co_await make_ready_future<>(); // yield if needed.
+    }
+
+    _sstables = std::move(new_main_set);
+    _maintenance_sstables = std::move(*new_maintenance_set);
+    refresh_sstables_mutation_source();
+    _cache.refresh_snapshot();
+}
+
 // Note: must run in a seastar thread
 void
 table::on_compaction_completion(sstables::compaction_completion_desc& desc) {
@@ -936,6 +965,55 @@ void table::do_trigger_compaction() {
 
 future<> table::run_compaction(sstables::compaction_descriptor descriptor) {
     return compact_sstables(std::move(descriptor));
+}
+
+future<> table::run_offstrategy_compaction() {
+    auto sem_unit = co_await seastar::get_units(_off_strategy_sem, 1);
+
+    tlogger.info("Starting off-strategy compaction on behalf of {}.{}, {} candidates were found",
+        _schema->ks_name(), _schema->cf_name(), _maintenance_sstables->all()->size());
+
+    const auto old_sstables = boost::copy_range<std::vector<sstables::shared_sstable>>(*_maintenance_sstables->all());
+    std::vector<sstables::shared_sstable> new_sstables, sstables_to_remove;
+    std::vector<sstables::shared_sstable> reshape_candidates = old_sstables;
+
+    for (;;) {
+        auto& iop = service::get_local_streaming_priority(); /* run reshape in maintenance mode */
+        auto desc = _compaction_strategy.get_reshaping_job(reshape_candidates, _schema, iop, sstables::reshape_mode::strict);
+        if (desc.sstables.empty()) {
+            new_sstables = std::move(reshape_candidates);
+            break;
+        }
+
+        desc.creator = [this] (shard_id dummy) {
+            auto sst = make_sstable();
+            return sst;
+        };
+        auto input = boost::copy_range<std::unordered_set<sstables::shared_sstable>>(desc.sstables);
+
+        auto ret = co_await sstables::compact_sstables(std::move(desc), *this);
+
+        // update list of reshape candidates without input but with output added to it
+        auto it = boost::remove_if(reshape_candidates, [&] (auto& s) { return input.contains(s); });
+        reshape_candidates.erase(it, reshape_candidates.end());
+        std::move(ret.new_sstables.begin(), ret.new_sstables.end(), std::back_inserter(reshape_candidates));
+        std::move(input.begin(), input.end(), std::back_inserter(sstables_to_remove));
+    }
+
+    co_await move_reshaped_sstables_into_main_set(old_sstables, new_sstables);
+
+    auto f = seastar::try_with_gate(_sstable_deletion_gate, [this, sstables_to_remove = std::move(sstables_to_remove)] {
+       return with_semaphore(_sstable_deletion_sem, 1, [sstables_to_remove = std::move(sstables_to_remove)] {
+           return sstables::delete_atomically(std::move(sstables_to_remove));
+       });
+    });
+    try {
+        co_await f.discard_result();
+    } catch (...) {
+        tlogger.error("Deletion of reshaped SSTables failed, due to {}. Ignored.", std::current_exception());
+    }
+
+    tlogger.info("Done with off-strategy for {}.{}", _schema->ks_name(), _schema->cf_name());
 }
 
 void table::set_compaction_strategy(sstables::compaction_strategy_type strategy) {
