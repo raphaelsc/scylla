@@ -52,7 +52,7 @@ static seastar::metrics::label keyspace_label("ks");
 using namespace std::chrono_literals;
 
 sstables::sstables_mutation_source
-table::make_sstables_mutation_source(lw_shared_ptr<sstables::sstable_set> sstables) const {
+table::make_sstables_mutation_source(std::vector<lw_shared_ptr<sstables::sstable_set>> sets) const {
     auto single_key_ms = [this] (lw_shared_ptr<sstables::sstable_set> sstables) -> mutation_source {
         return mutation_source([this, sstables=std::move(sstables)] (
                 schema_ptr s,
@@ -82,16 +82,28 @@ table::make_sstables_mutation_source(lw_shared_ptr<sstables::sstable_set> sstabl
         });
     };
 
+    auto make_ms = [this, &sets] (auto func) mutable {
+        if (sets.size() == 1) {
+            return func(sets.front());
+        }
+        std::vector<mutation_source> sources;
+        sources.reserve(sets.size());
+        for (auto& sstables : sets) {
+            sources.push_back(func(sstables));
+        }
+        return make_combined_mutation_source(std::move(sources));
+    };
+
     sstables::sstables_mutation_source ssts_mutation_source;
-    ssts_mutation_source.single_key = single_key_ms(sstables);
-    ssts_mutation_source.range_scanning = range_scanning_ms(sstables);
+    ssts_mutation_source.single_key = make_ms(single_key_ms);
+    ssts_mutation_source.range_scanning = make_ms(range_scanning_ms);
     return ssts_mutation_source;
 }
 
 void
 table::refresh_sstables_mutation_source() {
     // TODO: will soon feed all sets in compound sst set, but by the time being, we're only reading from main set.
-    _sstables_mutation_source = make_sstables_mutation_source(_sstables);
+    _sstables_mutation_source = make_sstables_mutation_source({_sstables});
 }
 
 flat_mutation_reader
@@ -281,7 +293,7 @@ flat_mutation_reader table::make_streaming_reader(schema_ptr schema, const dht::
     auto trace_state = tracing::trace_state_ptr();
     const auto fwd = streamed_mutation::forwarding::no;
     const auto fwd_mr = mutation_reader::forwarding::no;
-    return make_sstable_reader(schema, permit, make_sstables_mutation_source(std::move(sstables)), range, slice, pc,
+    return make_sstable_reader(schema, permit, make_sstables_mutation_source({std::move(sstables)}), range, slice, pc,
                                std::move(trace_state), fwd, fwd_mr);
 }
 
@@ -822,7 +834,7 @@ table::on_compaction_completion(sstables::compaction_completion_desc& desc) {
         explicit sstable_list_updater(table& t, sstables::compaction_completion_desc& d) : _t(t), _desc(d) {}
         virtual future<> prepare() override {
             _new_sstables = co_await _t.build_new_sstable_list(_desc.new_sstables, _desc.old_sstables);
-            _sstables_mutation_source = _t.make_sstables_mutation_source(_new_sstables);
+            _sstables_mutation_source = _t.make_sstables_mutation_source({_new_sstables});
         }
         virtual void execute() override {
             _t._sstables = std::move(_new_sstables);
@@ -1068,7 +1080,7 @@ table::table(schema_ptr schema, config config, db::commitlog* cl, compaction_man
     , _sstables(make_lw_shared<sstables::sstable_set>(_compaction_strategy.make_sstable_set(_schema)))
     , _maintenance_sstables(make_maintenance_sstable_set())
     , _all_sstables({ &_sstables, &_maintenance_sstables })
-    , _sstables_mutation_source(make_sstables_mutation_source(_sstables))
+    , _sstables_mutation_source(make_sstables_mutation_source({_sstables}))
     , _cache(_schema, sstables_as_snapshot_source(), row_cache_tracker, is_continuous::yes)
     , _commitlog(cl)
     , _durable_writes(true)
@@ -1929,7 +1941,7 @@ table::make_reader_excluding_sstables(schema_ptr s,
         effective_sstables->erase(sst);
     }
 
-    readers.emplace_back(make_sstable_reader(s, permit, make_sstables_mutation_source(std::move(effective_sstables)), range, slice, pc, std::move(trace_state), fwd, fwd_mr));
+    readers.emplace_back(make_sstable_reader(s, permit, make_sstables_mutation_source({std::move(effective_sstables)}), range, slice, pc, std::move(trace_state), fwd, fwd_mr));
     return make_combined_reader(s, std::move(permit), std::move(readers), fwd, fwd_mr);
 }
 

@@ -585,7 +585,7 @@ private:
 private:
     mutation_source_opt _virtual_reader;
 
-    sstables::sstables_mutation_source make_sstables_mutation_source(lw_shared_ptr<sstables::sstable_set> sstables) const;
+    sstables::sstables_mutation_source make_sstables_mutation_source(std::vector<lw_shared_ptr<sstables::sstable_set>> sets) const;
     void refresh_sstables_mutation_source();
 
     // Creates a mutation reader which covers given sstables.
