@@ -172,6 +172,13 @@ public:
     compound_sstable_set(const compound_sstable_set&) = delete;
     compound_sstable_set& operator=(const compound_sstable_set&) = delete;
 
+    std::vector<lw_shared_ptr<sstable_set>> sets() const {
+        return boost::copy_range<std::vector<sstable_set_ptr>>(_sets
+                | boost::adaptors::transformed([] (sstable_set_ptr* set) -> sstable_set_ptr {
+            return *set;
+        }));
+    }
+
     // Allows iteration over all sstables from all sets
     void for_each_sstable(std::function<void(const sstables::shared_sstable&)> func) const {
         for (sstable_set_ptr* set : _sets) {
