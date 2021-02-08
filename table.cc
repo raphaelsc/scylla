@@ -1406,7 +1406,11 @@ future<db::replay_position> table::discard_sstables(db_clock::time_point truncat
     struct pruner {
         column_family& cf;
         db::replay_position rp;
-        std::vector<sstables::shared_sstable> remove;
+        struct removed_sstable {
+            sstables::shared_sstable sst;
+            sstables::enable_backlog_tracker enable_backlog_tracker;
+        };
+        std::vector<removed_sstable> remove;
 
         pruner(column_family& cf)
             : cf(cf) {}
@@ -1415,17 +1419,25 @@ future<db::replay_position> table::discard_sstables(db_clock::time_point truncat
             auto gc_trunc = to_gc_clock(truncated_at);
 
             auto pruned = make_lw_shared<sstables::sstable_set>(cf._compaction_strategy.make_sstable_set(cf._schema));
+            auto maintenance_pruned = cf.make_maintenance_sstable_set();
 
-            for (auto& p : *cf._sstables->all()) {
-                if (p->max_data_age() <= gc_trunc) {
-                    rp = std::max(p->get_stats_metadata().position, rp);
-                    remove.emplace_back(p);
-                    continue;
+            auto prune = [this, &gc_trunc] (lw_shared_ptr<sstables::sstable_set>& pruned,
+                                            lw_shared_ptr<sstable_list> all,
+                                            sstables::enable_backlog_tracker enable_backlog_tracker) mutable {
+                for (auto& p : *all) {
+                    if (p->max_data_age() <= gc_trunc) {
+                        rp = std::max(p->get_stats_metadata().position, rp);
+                        remove.emplace_back(removed_sstable{p, enable_backlog_tracker});
+                        continue;
+                    }
+                    pruned->insert(p);
                 }
-                pruned->insert(p);
-            }
+            };
+            prune(pruned, cf._sstables->all(), sstables::enable_backlog_tracker::yes);
+            prune(maintenance_pruned, cf._maintenance_sstables->all(), sstables::enable_backlog_tracker::no);
 
             cf._sstables = std::move(pruned);
+            cf._maintenance_sstables = std::move(maintenance_pruned);
             cf.refresh_sstables_mutation_source();
         }
     };
@@ -1436,9 +1448,11 @@ future<db::replay_position> table::discard_sstables(db_clock::time_point truncat
     })).then([this, p]() mutable {
         rebuild_statistics();
 
-        return parallel_for_each(p->remove, [this](sstables::shared_sstable s) {
-            remove_sstable_from_backlog_tracker(_compaction_strategy.get_backlog_tracker(), s);
-            return sstables::delete_atomically({s});
+        return parallel_for_each(p->remove, [this](pruner::removed_sstable& r) {
+            if (r.enable_backlog_tracker == sstables::enable_backlog_tracker::yes) {
+                remove_sstable_from_backlog_tracker(_compaction_strategy.get_backlog_tracker(), r.sst);
+            }
+            return sstables::delete_atomically({r.sst});
         }).then([p] {
             return make_ready_future<db::replay_position>(p->rp);
         });
