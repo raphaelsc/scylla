@@ -509,7 +509,8 @@ private:
 
     bool _is_bootstrap_or_replace = false;
 public:
-    future<> add_sstable_and_update_cache(sstables::shared_sstable sst);
+    future<> add_sstable_and_update_cache(sstables::shared_sstable sst,
+                                          sstables::enable_offstrategy offstrategy = sstables::enable_offstrategy::no);
     lw_shared_ptr<sstables::sstable_set> make_maintenance_sstable_set() const;
     void add_maintenance_sstable(sstables::shared_sstable sst);
     future<> move_sstables_from_staging(std::vector<sstables::shared_sstable>);

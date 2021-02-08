@@ -233,6 +233,8 @@ std::ostream& operator<<(std::ostream& os, const sstables::sstable_run& run);
 
 using enable_backlog_tracker = bool_class<class enable_backlog_tracker_tag>;
 
+using enable_offstrategy = bool_class<class enable_offstrategy_tag>;
+
 struct sstables_mutation_source {
     mutation_source_opt single_key;
     mutation_source_opt range_scanning;
