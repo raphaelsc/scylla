@@ -237,6 +237,8 @@ sstable_set make_partitioned_sstable_set(schema_ptr schema, lw_shared_ptr<sstabl
 
 std::ostream& operator<<(std::ostream& os, const sstables::sstable_run& run);
 
+using offstrategy = bool_class<class offstrategy_tag>;
+
 struct sstables_mutation_source {
     mutation_source_opt single_key;
     mutation_source_opt range_scanning;
