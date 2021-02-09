@@ -382,6 +382,15 @@ void table::add_sstable(sstables::shared_sstable sstable) {
     do_add_sstable(_sstables, std::move(sstable), enable_backlog_tracker::yes);
 }
 
+lw_shared_ptr<sstables::sstable_set> table::make_maintenance_sstable_set() const {
+    return make_lw_shared<sstables::sstable_set>(
+        sstables::make_partitioned_sstable_set(_schema, make_lw_shared<sstable_list>(sstable_list{}), false));
+}
+
+void table::add_maintenance_sstable(sstables::shared_sstable sst) {
+    do_add_sstable(_maintenance_sstables, std::move(sst), enable_backlog_tracker::no);
+}
+
 future<>
 table::add_sstable_and_update_cache(sstables::shared_sstable sst) {
     return get_row_cache().invalidate(row_cache::external_updater([this, sst] () noexcept {
@@ -641,6 +650,7 @@ table::stop() {
                     return _sstable_deletion_gate.close().then([this] {
                         return get_row_cache().invalidate(row_cache::external_updater([this] {
                             _sstables = _compaction_strategy.make_sstable_set(_schema);
+                            _maintenance_sstables = make_maintenance_sstable_set();
                             _sstables_staging.clear();
                         })).then([this] {
                             _cache.refresh_snapshot();
@@ -1031,6 +1041,7 @@ table::table(schema_ptr schema, config config, db::commitlog* cl, compaction_man
     , _memtables(_config.enable_disk_writes ? make_memtable_list() : make_memory_only_memtable_list())
     , _compaction_strategy(make_compaction_strategy(_schema->compaction_strategy(), _schema->compaction_strategy_options()))
     , _sstables(make_lw_shared<sstables::sstable_set>(_compaction_strategy.make_sstable_set(_schema)))
+    , _maintenance_sstables(make_maintenance_sstable_set())
     , _cache(_schema, sstables_as_snapshot_source(), row_cache_tracker, is_continuous::yes)
     , _commitlog(cl)
     , _durable_writes(true)
