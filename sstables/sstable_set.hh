@@ -181,6 +181,10 @@ public:
         return set;
     }
 
+    const std::vector<lw_shared_ptr<sstable_set>>& sets() const {
+        return _sets;
+    }
+
     // Allows iteration over all sstables from all sets
     void for_each_sstable(std::function<void(const sstables::shared_sstable&)> func) const {
         for (auto& set : _sets) {
