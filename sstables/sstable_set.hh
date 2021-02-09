@@ -22,6 +22,7 @@
 #pragma once
 
 #include "flat_mutation_reader.hh"
+#include "mutation_reader.hh"
 #include "sstables/progress_monitor.hh"
 #include "shared_sstable.hh"
 #include "dht/i_partitioner.hh"
@@ -231,5 +232,10 @@ flat_mutation_reader make_restricted_range_sstable_reader(
 sstable_set make_partitioned_sstable_set(schema_ptr schema, lw_shared_ptr<sstable_list> all, bool use_level_metadata = true);
 
 std::ostream& operator<<(std::ostream& os, const sstables::sstable_run& run);
+
+struct sstables_mutation_source {
+    mutation_source_opt single_key;
+    mutation_source_opt range_scanning;
+};
 
 }
