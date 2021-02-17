@@ -449,6 +449,7 @@ private:
     // sstables deleted by compaction in parallel, a race condition which could
     // easily result in failure.
     seastar::named_semaphore _sstable_deletion_sem = {1, named_semaphore_exception_factory{"sstable deletion"}};
+    mutation_source _sstables_mutation_source;
     mutable row_cache _cache; // Cache covers only sstables.
     std::optional<int64_t> _sstable_generation = {};
 
@@ -587,13 +588,17 @@ private:
     void rebuild_statistics();
 private:
     mutation_source_opt _virtual_reader;
+
+    mutation_source make_sstables_mutation_source(lw_shared_ptr<sstables::sstable_set> sstables) const;
+    void refresh_sstables_mutation_source();
+
     // Creates a mutation reader which covers given sstables.
     // Caller needs to ensure that column_family remains live (FIXME: relax this).
     // The 'range' parameter must be live as long as the reader is used.
     // Mutations returned by the reader will all have given schema.
     flat_mutation_reader make_sstable_reader(schema_ptr schema,
                                         reader_permit permit,
-                                        lw_shared_ptr<sstables::sstable_set> sstables,
+                                        mutation_source sstables_mutation_source,
                                         const dht::partition_range& range,
                                         const query::partition_slice& slice,
                                         const io_priority_class& pc,
