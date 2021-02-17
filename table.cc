@@ -52,8 +52,7 @@ static seastar::metrics::label keyspace_label("ks");
 using namespace std::chrono_literals;
 
 mutation_source
-table::make_sstables_mutation_source(lw_shared_ptr<sstables::sstable_set> sstables) const {
-    // NOTE: lambda seems like useless but it will be useful when extending this function for multiple sets
+table::make_sstables_mutation_source(std::vector<lw_shared_ptr<sstables::sstable_set>> sets) const {
     auto sstables_ms = [this] (lw_shared_ptr<sstables::sstable_set> sstables) -> mutation_source {
         return mutation_source([this, sstables=std::move(sstables)] (
                 schema_ptr s,
@@ -74,14 +73,17 @@ table::make_sstables_mutation_source(lw_shared_ptr<sstables::sstable_set> sstabl
             }
         });
     };
-
-    return sstables_ms(std::move(sstables));
+    auto sources = boost::copy_range<std::vector<mutation_source>>(sets |
+        boost::adaptors::transformed([&] (lw_shared_ptr<sstables::sstable_set>& set) {
+            return sstables_ms(std::move(set));
+        }));
+    return make_combined_mutation_source(std::move(sources));
 }
 
 void
 table::refresh_sstables_mutation_source() {
     // TODO: will soon feed all sets in compound sst set, but by the time being, we're only reading from main set.
-    _sstables_mutation_source = make_sstables_mutation_source(_sstables);
+    _sstables_mutation_source = make_sstables_mutation_source({_sstables});
 }
 
 flat_mutation_reader
@@ -266,7 +268,7 @@ flat_mutation_reader table::make_streaming_reader(schema_ptr schema, const dht::
     auto trace_state = tracing::trace_state_ptr();
     const auto fwd = streamed_mutation::forwarding::no;
     const auto fwd_mr = mutation_reader::forwarding::no;
-    return make_sstable_reader(schema, permit, make_sstables_mutation_source(std::move(sstables)), range, slice, pc,
+    return make_sstable_reader(schema, permit, make_sstables_mutation_source({std::move(sstables)}), range, slice, pc,
                                std::move(trace_state), fwd, fwd_mr);
 }
 
@@ -814,7 +816,7 @@ table::on_compaction_completion(sstables::compaction_completion_desc& desc) {
         explicit sstable_list_updater(table& t, sstables::compaction_completion_desc& d) : _t(t), _desc(d) {}
         virtual future<> prepare() override {
             _new_sstables = co_await _t.build_new_sstable_list(_desc.new_sstables, _desc.old_sstables);
-            _sstables_mutation_source = _t.make_sstables_mutation_source(_new_sstables);
+            _sstables_mutation_source = _t.make_sstables_mutation_source({_new_sstables});
         }
         virtual void execute() override {
             _t._sstables = std::move(_new_sstables);
@@ -1060,7 +1062,7 @@ table::table(schema_ptr schema, config config, db::commitlog* cl, compaction_man
     , _all_sstables(2)
     , _sstables(_all_sstables.init(0, make_lw_shared<sstables::sstable_set>(_compaction_strategy.make_sstable_set(_schema))))
     , _maintenance_sstables(_all_sstables.init(1, make_maintenance_sstable_set()))
-    , _sstables_mutation_source(make_sstables_mutation_source(_sstables))
+    , _sstables_mutation_source(make_sstables_mutation_source({_sstables}))
     , _cache(_schema, sstables_as_snapshot_source(), row_cache_tracker, is_continuous::yes)
     , _commitlog(cl)
     , _durable_writes(true)
@@ -1927,7 +1929,7 @@ table::make_reader_excluding_sstables(schema_ptr s,
         effective_sstables->erase(sst);
     }
 
-    readers.emplace_back(make_sstable_reader(s, permit, make_sstables_mutation_source(std::move(effective_sstables)), range, slice, pc, std::move(trace_state), fwd, fwd_mr));
+    readers.emplace_back(make_sstable_reader(s, permit, make_sstables_mutation_source({std::move(effective_sstables)}), range, slice, pc, std::move(trace_state), fwd, fwd_mr));
     return make_combined_reader(s, std::move(permit), std::move(readers), fwd, fwd_mr);
 }
 
