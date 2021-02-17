@@ -82,8 +82,7 @@ table::make_sstables_mutation_source(std::vector<lw_shared_ptr<sstables::sstable
 
 void
 table::refresh_sstables_mutation_source() {
-    // TODO: will soon feed all sets in compound sst set, but by the time being, we're only reading from main set.
-    _sstables_mutation_source = make_sstables_mutation_source({_sstables});
+    _sstables_mutation_source = make_sstables_mutation_source(_all_sstables.sets());
 }
 
 flat_mutation_reader
@@ -816,7 +815,7 @@ table::on_compaction_completion(sstables::compaction_completion_desc& desc) {
         explicit sstable_list_updater(table& t, sstables::compaction_completion_desc& d) : _t(t), _desc(d) {}
         virtual future<> prepare() override {
             _new_sstables = co_await _t.build_new_sstable_list(_desc.new_sstables, _desc.old_sstables);
-            _sstables_mutation_source = _t.make_sstables_mutation_source({_new_sstables});
+            _sstables_mutation_source = _t.make_sstables_mutation_source({_new_sstables, _t._maintenance_sstables});
         }
         virtual void execute() override {
             _t._sstables = std::move(_new_sstables);
@@ -1002,7 +1001,7 @@ lw_shared_ptr<const sstable_list> table::get_sstables() const {
 }
 
 std::vector<sstables::shared_sstable> table::select_sstables(const dht::partition_range& range) const {
-    return _sstables->select(range);
+    return _all_sstables.select(range);
 }
 
 std::vector<sstables::shared_sstable> table::non_staging_sstables() const {
@@ -1062,7 +1061,7 @@ table::table(schema_ptr schema, config config, db::commitlog* cl, compaction_man
     , _all_sstables(2)
     , _sstables(_all_sstables.init(0, make_lw_shared<sstables::sstable_set>(_compaction_strategy.make_sstable_set(_schema))))
     , _maintenance_sstables(_all_sstables.init(1, make_maintenance_sstable_set()))
-    , _sstables_mutation_source(make_sstables_mutation_source({_sstables}))
+    , _sstables_mutation_source(make_sstables_mutation_source(_all_sstables.sets()))
     , _cache(_schema, sstables_as_snapshot_source(), row_cache_tracker, is_continuous::yes)
     , _commitlog(cl)
     , _durable_writes(true)
@@ -1099,6 +1098,7 @@ snapshot_source
 table::sstables_as_snapshot_source() {
     return snapshot_source([this] () {
         auto sst_set = _sstables;
+        auto maintenance_sst_set = _maintenance_sstables;
         auto ssts_ms = _sstables_mutation_source;
         return mutation_source([this, ssts_ms] (schema_ptr s,
                 reader_permit permit,
@@ -1109,8 +1109,17 @@ table::sstables_as_snapshot_source() {
                 streamed_mutation::forwarding fwd,
                 mutation_reader::forwarding fwd_mr) {
             return make_sstable_reader(std::move(s), std::move(permit), ssts_ms, r, slice, pc, std::move(trace_state), fwd, fwd_mr);
-        }, [this, sst_set] {
-            return make_partition_presence_checker(sst_set);
+        }, [this, sst_set, maintenance_sst_set] {
+            return [main_checker = make_partition_presence_checker(std::move(sst_set)),
+                    maintenance_checker = make_partition_presence_checker(std::move(maintenance_sst_set))]
+                    (const dht::decorated_key& key) mutable {
+                partition_presence_checker_result ret = partition_presence_checker_result::definitely_doesnt_exist;
+                if (main_checker(key) == partition_presence_checker_result::maybe_exists ||
+                        maintenance_checker(key) == partition_presence_checker_result::maybe_exists) {
+                    ret = partition_presence_checker_result::maybe_exists;
+                }
+                return ret;
+            };
         });
     });
 }
@@ -1928,8 +1937,13 @@ table::make_reader_excluding_sstables(schema_ptr s,
     for (auto& sst : excluded) {
         effective_sstables->erase(sst);
     }
+    auto effective_maintenance_sstables = ::make_lw_shared<sstables::sstable_set>(*_maintenance_sstables);
+    for (auto& sst : excluded) {
+        effective_sstables->erase(sst);
+    }
 
-    readers.emplace_back(make_sstable_reader(s, permit, make_sstables_mutation_source({std::move(effective_sstables)}), range, slice, pc, std::move(trace_state), fwd, fwd_mr));
+    auto ms = make_sstables_mutation_source({std::move(effective_sstables), std::move(effective_maintenance_sstables)});
+    readers.emplace_back(make_sstable_reader(s, permit, std::move(ms), range, slice, pc, std::move(trace_state), fwd, fwd_mr));
     return make_combined_reader(s, std::move(permit), std::move(readers), fwd, fwd_mr);
 }
 
