@@ -134,4 +134,21 @@ public:
         mutation_reader::forwarding) const override;
 };
 
+// this set holds reference to N sstable sets and allow their read operations to be combined.
+// the managed sets cannot be modified through compound_sstable_set, but only read from, so insert() and erase() are disabled.
+class compound_sstable_set : public sstable_set_impl {
+    schema_ptr _schema;
+    std::vector<lw_shared_ptr<sstable_set>> _sets;
+public:
+    compound_sstable_set(schema_ptr schema, std::vector<lw_shared_ptr<sstable_set>> sets);
+
+    virtual std::unique_ptr<sstable_set_impl> clone() const override;
+    virtual std::vector<shared_sstable> select(const dht::partition_range& range = query::full_partition_range) const override;
+    virtual lw_shared_ptr<sstable_list> all() const override;
+    virtual void insert(shared_sstable sst) override;
+    virtual void erase(shared_sstable sst) override;
+    virtual std::unique_ptr<incremental_selector_impl> make_incremental_selector() const override;
+    class incremental_selector;
+};
+
 } // namespace sstables
