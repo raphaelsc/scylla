@@ -413,12 +413,11 @@ const db::extensions& database::extensions() const {
     return get_config().extensions();
 }
 
-void backlog_controller::adjust() {
+float backlog_controller::get_shares() const {
     auto backlog = _current_backlog();
 
     if (backlog >= _control_points.back().input) {
-        update_controller(_control_points.back().output);
-        return;
+        return _control_points.back().output;
     }
 
     // interpolate to find out which region we are. This run infrequently and there are a fixed
@@ -428,9 +427,14 @@ void backlog_controller::adjust() {
         idx++;
     }
 
-    control_point& cp = _control_points[idx];
-    control_point& last = _control_points[idx - 1];
+    const control_point& cp = _control_points[idx];
+    const control_point& last = _control_points[idx - 1];
     float result = last.output + (backlog - last.input) * (cp.output - last.output)/(cp.input - last.input);
+    return result;
+}
+
+void backlog_controller::adjust() {
+    float result = get_shares();
     update_controller(result);
 }
 

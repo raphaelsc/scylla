@@ -72,7 +72,9 @@ protected:
     future<> _inflight_update;
 
     virtual void update_controller(float quota);
-
+public:
+    float get_shares() const;
+protected:
     void adjust();
 
     backlog_controller(seastar::scheduling_group sg, const ::io_priority_class& iop, std::chrono::milliseconds interval,

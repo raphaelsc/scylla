@@ -266,6 +266,10 @@ public:
         return _backlog_manager.backlog();
     }
 
+    const compaction_controller& get_compaction_controller() {
+        return _compaction_controller;
+    }
+
     void register_backlog_tracker(compaction_backlog_tracker& backlog_tracker) {
         _backlog_manager.register_backlog_tracker(backlog_tracker);
     }
