@@ -306,15 +306,18 @@ class partitioned_sstable_set::incremental_selector : public incremental_selecto
     uint64_t _last_known_leveled_sstables_change_cnt;
     map_iterator _it;
     // Only to back the dht::ring_position_view returned from select().
-    dht::ring_position _next_position;
+    std::unique_ptr<dht::ring_position> _next_position;
+    // That's to back the dht::ring_position_view being used as the current position.
+    std::unique_ptr<dht::ring_position> _current_position;
 private:
     dht::ring_position_view next_position(map_iterator it) {
+        _current_position = std::move(_next_position);
         if (it == _leveled_sstables.end()) {
-            _next_position = dht::ring_position::max();
+            _next_position = std::make_unique<dht::ring_position>(dht::ring_position::max());
             return dht::ring_position_view::max();
         } else {
-            _next_position = partitioned_sstable_set::to_ring_position(it->first.lower());
-            return dht::ring_position_view(_next_position, dht::ring_position_view::after_key(!boost::icl::is_left_closed(it->first.bounds())));
+            _next_position = std::make_unique<dht::ring_position>(partitioned_sstable_set::to_ring_position(it->first.lower()));
+            return dht::ring_position_view(*_next_position, dht::ring_position_view::after_key(!boost::icl::is_left_closed(it->first.bounds())));
         }
     }
     static bool is_before_interval(const compatible_ring_position_or_view& crp, const interval_type& interval) {
@@ -339,7 +342,8 @@ public:
         , _leveled_sstables_change_cnt(leveled_sstables_change_cnt)
         , _last_known_leveled_sstables_change_cnt(leveled_sstables_change_cnt)
         , _it(leveled_sstables.begin())
-        , _next_position(dht::ring_position::min()) {
+        , _next_position(std::make_unique<dht::ring_position>(dht::ring_position::min()))
+        , _current_position(std::make_unique<dht::ring_position>(dht::ring_position::min())) {
     }
     virtual std::tuple<dht::partition_range, std::vector<shared_sstable>, dht::ring_position_view> select(const dht::ring_position_view& pos) override {
         auto crp = compatible_ring_position_or_view(*_schema, pos);
