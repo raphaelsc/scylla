@@ -136,9 +136,19 @@ size_tiered_backlog_tracker::compacted_backlog(const compaction_backlog_tracker:
     inflight_component in;
     for (auto const& crp : ongoing_compactions) {
         auto compacted = crp.second->compacted();
-        auto effective_size = crp.first->data_size() - compacted;
+        auto si = crp.first->data_size();
+        auto ei = crp.first->data_size() - compacted;
         in.total_bytes += compacted;
-        in.contribution += compacted * log4(effective_size);
+        if (ei > 0) {
+            // When a sstable is added to tracker, it contributes a backlog of: Si * log(Si) (see add_sstable()).
+            // Given that sstable's backlog formula is Bi=(Si - Ci) * log(Ei), where Ei = Si - Ci,
+            // we need to subtract (Si * log(Si / (Si - Ci))) from (Si * log(Si)), to produce (Si * log(Si - Ci)) = Si * log(Ei).
+            // So by doing: Si * log(Si) - (Si * log(Si / Ei) + Ci * log(Ei)), we achieve Bi=(Si - Ci) * log(Ei).
+            in.contribution += (si * log4(double(si) / ei)) + compacted * log4(ei);
+        } else {
+            // If compacted = Si, let's subtract compacted * log(Si) from the sstable's backlog, such that its effective backlog is zero.
+            in.contribution += compacted * log4(si);
+        }
     }
     return in;
 }
