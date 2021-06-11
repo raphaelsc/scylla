@@ -337,11 +337,7 @@ public:
     }
 
     data_consumer::processing_result process_state(temporary_buffer<char>& data) {
-        try {
-            return do_process_state(data);
-        } catch (malformed_sstable_exception& exp) {
-            throw malformed_sstable_exception(exp.what(), _sst->get_filename());
-        }
+        return do_process_state(data);
     }
 private:
     data_consumer::processing_result do_process_state(temporary_buffer<char>& data) {
