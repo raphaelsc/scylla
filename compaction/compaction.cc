@@ -331,6 +331,9 @@ struct compaction_read_monitor_generator final : public read_monitor_generator {
             if (_tracker) {
                 _last_position_seen = _tracker->position;
                 _tracker = nullptr;
+                // Remove sstable from list of ongoing compaction once it's been exhausted by compaction.
+                // That's specially important for incremental compaction approach which must release space earlier.
+                _cf.get_compaction_strategy().get_backlog_tracker().revert_charges(std::move(_sst));
             }
         }
 
@@ -339,13 +342,6 @@ struct compaction_read_monitor_generator final : public read_monitor_generator {
                 return _tracker->position;
             }
             return _last_position_seen;
-        }
-
-        void remove_sstable() {
-            if (_sst) {
-                _cf.get_compaction_strategy().get_backlog_tracker().remove_sstable(_sst);
-            }
-            _sst = {};
         }
 
         compaction_read_monitor(sstables::shared_sstable sst, column_family &cf)
@@ -369,21 +365,6 @@ struct compaction_read_monitor_generator final : public read_monitor_generator {
 
     explicit compaction_read_monitor_generator(column_family& cf)
         : _cf(cf) {}
-
-    void remove_sstables() {
-        for (auto& rm : _generated_monitors) {
-            rm.remove_sstable();
-        }
-    }
-
-    void remove_sstable(sstables::shared_sstable& sst) {
-        for (auto& rm : _generated_monitors) {
-            if (rm._sst == sst) {
-                rm.remove_sstable();
-                break;
-            }
-        }
-    }
 private:
      column_family& _cf;
      std::deque<compaction_read_monitor> _generated_monitors;
@@ -746,8 +727,6 @@ private:
                 std::chrono::duration_cast<std::chrono::milliseconds>(duration).count(), pretty_printed_throughput(_info->end_size, duration),
                 _info->total_partitions, _info->total_keys_written);
 
-        backlog_tracker_adjust_charges();
-
         auto info = std::move(_info);
         _cf.get_compaction_manager().deregister_compaction(info);
         return std::move(*info);
@@ -755,7 +734,6 @@ private:
 
     virtual std::string_view report_start_desc() const = 0;
     virtual std::string_view report_finish_desc() const = 0;
-    virtual void backlog_tracker_adjust_charges() { };
 
     std::function<api::timestamp_type(const dht::decorated_key&)> max_purgeable_func() {
         if (!tombstone_expiration_enabled()) {
@@ -957,7 +935,6 @@ public:
 class regular_compaction : public compaction {
     // sstable being currently written.
     mutable compaction_read_monitor_generator _monitor_generator;
-    std::vector<shared_sstable> _unused_sstables = {};
 public:
     regular_compaction(column_family& cf, compaction_descriptor descriptor)
         : compaction(cf, std::move(descriptor))
@@ -985,19 +962,9 @@ public:
         return "Compacted";
     }
 
-    void backlog_tracker_adjust_charges() override {
-        _monitor_generator.remove_sstables();
-        auto& tracker = _cf.get_compaction_strategy().get_backlog_tracker();
-        for (auto& sst : _unused_sstables) {
-            tracker.add_sstable(sst);
-        }
-        _unused_sstables.clear();
-    }
-
     virtual compaction_writer create_compaction_writer(const dht::decorated_key& dk) override {
         auto sst = _sstable_creator(this_shard_id());
         setup_new_sstable(sst);
-        _unused_sstables.push_back(sst);
 
         auto monitor = std::make_unique<compaction_write_monitor>(sst, _cf, maximum_timestamp(), _sstable_level);
         sstable_writer_config cfg = make_sstable_writer_config(_info->type);
@@ -1026,26 +993,6 @@ public:
         _monitor_generator(std::move(sstable));
     }
 private:
-    void backlog_tracker_incrementally_adjust_charges(std::vector<shared_sstable> exhausted_sstables) {
-        //
-        // Notify backlog tracker of an early sstable replacement triggered by incremental compaction approach.
-        // Backlog tracker will be told that the exhausted sstables aren't being compacted anymore, and the
-        // new sstables, which replaced the exhausted ones, are not partially written sstables and they can
-        // be added to tracker like any other regular sstable in the table's set.
-        // This way we prevent bogus calculation of backlog due to lack of charge adjustment whenever there's
-        // an early sstable replacement.
-        //
-
-        for (auto& sst : exhausted_sstables) {
-            _monitor_generator.remove_sstable(sst);
-        }
-        auto& tracker = _cf.get_compaction_strategy().get_backlog_tracker();
-        for (auto& sst : _unused_sstables) {
-            tracker.add_sstable(sst);
-         }
-        _unused_sstables.clear();
-    }
-
     void maybe_replace_exhausted_sstables_by_sst(shared_sstable sst) {
         // Skip earlier replacement of exhausted sstables if compaction works with only single-fragment runs,
         // meaning incremental compaction is disabled for this compaction.
@@ -1076,9 +1023,8 @@ private:
             _new_unused_sstables.insert(_new_unused_sstables.end(), unused_gc_sstables.begin(), unused_gc_sstables.end());
 
             auto exhausted_ssts = std::vector<shared_sstable>(exhausted, _sstables.end());
-            _replacer(get_compaction_completion_desc(exhausted_ssts, std::move(_new_unused_sstables)));
+            _replacer(get_compaction_completion_desc(std::move(exhausted_ssts), std::move(_new_unused_sstables)));
             _sstables.erase(exhausted, _sstables.end());
-            backlog_tracker_incrementally_adjust_charges(std::move(exhausted_ssts));
         }
     }
 
@@ -1552,8 +1498,6 @@ public:
     std::string_view report_finish_desc() const override {
         return "Resharded";
     }
-
-    void backlog_tracker_adjust_charges() override { }
 
     compaction_writer create_compaction_writer(const dht::decorated_key& dk) override {
         auto shard = dht::shard_of(*_schema, dk.token());
