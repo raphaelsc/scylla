@@ -341,11 +341,9 @@ struct compaction_read_monitor_generator final : public read_monitor_generator {
             return _last_position_seen;
         }
 
-        void remove_sstable(bool is_tracking) {
-            if (is_tracking && _sst) {
+        void remove_sstable() {
+            if (_sst) {
                 _cf.get_compaction_strategy().get_backlog_tracker().remove_sstable(_sst);
-            } else if (_sst) {
-                _cf.get_compaction_strategy().get_backlog_tracker().revert_charges(_sst);
             }
             _sst = {};
         }
@@ -372,16 +370,16 @@ struct compaction_read_monitor_generator final : public read_monitor_generator {
     explicit compaction_read_monitor_generator(column_family& cf)
         : _cf(cf) {}
 
-    void remove_sstables(bool is_tracking) {
+    void remove_sstables() {
         for (auto& rm : _generated_monitors) {
-            rm.remove_sstable(is_tracking);
+            rm.remove_sstable();
         }
     }
 
-    void remove_sstable(bool is_tracking, sstables::shared_sstable& sst) {
+    void remove_sstable(sstables::shared_sstable& sst) {
         for (auto& rm : _generated_monitors) {
             if (rm._sst == sst) {
-                rm.remove_sstable(is_tracking);
+                rm.remove_sstable();
                 break;
             }
         }
@@ -988,7 +986,7 @@ public:
     }
 
     void backlog_tracker_adjust_charges() override {
-        _monitor_generator.remove_sstables(_info->tracking);
+        _monitor_generator.remove_sstables();
         auto& tracker = _cf.get_compaction_strategy().get_backlog_tracker();
         for (auto& sst : _unused_sstables) {
             tracker.add_sstable(sst);
@@ -1039,7 +1037,7 @@ private:
         //
 
         for (auto& sst : exhausted_sstables) {
-            _monitor_generator.remove_sstable(_info->tracking, sst);
+            _monitor_generator.remove_sstable(sst);
         }
         auto& tracker = _cf.get_compaction_strategy().get_backlog_tracker();
         for (auto& sst : _unused_sstables) {
