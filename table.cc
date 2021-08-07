@@ -1029,7 +1029,6 @@ void table::set_compaction_strategy(sstables::compaction_strategy_type strategy)
     tlogger.debug("Setting compaction strategy of {}.{} to {}", _schema->ks_name(), _schema->cf_name(), sstables::compaction_strategy::name(strategy));
     auto new_cs = make_compaction_strategy(strategy, _schema->compaction_strategy_options());
 
-    _compaction_manager.register_backlog_tracker(new_cs.get_backlog_tracker());
     auto move_read_charges = new_cs.type() == _compaction_strategy.type();
     _compaction_strategy.get_backlog_tracker().transfer_ongoing_charges(new_cs.get_backlog_tracker(), move_read_charges);
 
@@ -1039,6 +1038,8 @@ void table::set_compaction_strategy(sstables::compaction_strategy_type strategy)
         new_sstables.insert(s);
     });
 
+    // only register new tracker when we're about to reach exception safe code.
+    _compaction_manager.register_backlog_tracker(new_cs.get_backlog_tracker());
     // now exception safe:
     _compaction_strategy = std::move(new_cs);
     _main_sstables = std::move(new_sstables);

@@ -89,7 +89,7 @@ public:
     void remove_sstable(sstables::shared_sstable sst);
     void register_partially_written_sstable(sstables::shared_sstable sst, backlog_write_progress_manager& wp);
     void register_compacting_sstable(sstables::shared_sstable sst, backlog_read_progress_manager& rp);
-    void transfer_ongoing_charges(compaction_backlog_tracker& new_bt, bool move_read_charges = true);
+    void transfer_ongoing_charges(compaction_backlog_tracker& new_bt, bool move_read_charges = true) const;
     void revert_charges(sstables::shared_sstable sst);
 private:
     // Returns true if this SSTable can be added or removed from the tracker.
