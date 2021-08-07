@@ -168,6 +168,10 @@ void size_tiered_backlog_tracker::add_sstable(sstables::shared_sstable sst) {
 void size_tiered_backlog_tracker::remove_sstable(sstables::shared_sstable sst) {
     if (sst->data_size() > 0) {
         _total_bytes -= sst->data_size();
+#ifdef SEASTAR_DEBUG
+        // Bad management can make _total_bytes go negative. Refs #9157.
+        assert(_total_bytes >= 0);
+#endif
         _sstables_backlog_contribution -= sst->data_size() * log4(sst->data_size());
     }
 }
