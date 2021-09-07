@@ -134,6 +134,11 @@ sstable_set::all() const {
     return _impl->all();
 }
 
+std::vector<sstable_run>
+sstable_set::all_runs() const {
+    return _impl->all_runs();
+}
+
 void sstable_set::for_each_sstable(std::function<void(const shared_sstable&)> func) const {
     return _impl->for_each_sstable(std::move(func));
 }
@@ -283,6 +288,10 @@ lw_shared_ptr<sstable_list> partitioned_sstable_set::all() const {
     return _all;
 }
 
+std::vector<sstable_run> partitioned_sstable_set::all_runs() const {
+    return boost::copy_range<std::vector<sstable_run>>(_all_runs | boost::adaptors::map_values);
+}
+
 void partitioned_sstable_set::for_each_sstable(std::function<void(const shared_sstable&)> func) const {
     for (auto& sst : *_all) {
         func(sst);
@@ -402,6 +411,16 @@ std::vector<shared_sstable> time_series_sstable_set::select(const dht::partition
 
 lw_shared_ptr<sstable_list> time_series_sstable_set::all() const {
     return make_lw_shared<sstable_list>(boost::copy_range<sstable_list>(*_sstables | boost::adaptors::map_values));
+}
+
+std::vector<sstable_run> time_series_sstable_set::all_runs() const {
+    auto sst_to_run = [] (const shared_sstable& sst) {
+        sstable_run r;
+        r.insert(sst);
+        return r;
+    };
+    return boost::copy_range<std::vector<sstable_run>>(*_sstables | boost::adaptors::map_values
+        | boost::adaptors::transformed(sst_to_run));
 }
 
 void time_series_sstable_set::for_each_sstable(std::function<void(const shared_sstable&)> func) const {
@@ -963,6 +982,28 @@ lw_shared_ptr<sstable_list> compound_sstable_set::all() const {
         auto ssts = set->all();
         ret->reserve(ret->size() + ssts->size());
         ret->insert(ssts->begin(), ssts->end());
+    }
+    return ret;
+}
+
+std::vector<sstable_run> compound_sstable_set::all_runs() const {
+    auto sets = _sets;
+    auto it = std::partition(sets.begin(), sets.end(), [] (const auto& set) { return !set->all()->empty(); });
+    auto non_empty_set_count = std::distance(sets.begin(), it);
+
+    if (!non_empty_set_count) {
+        return std::vector<sstable_run>();
+    }
+    if (non_empty_set_count == 1) {
+        const auto& non_empty_set = *std::begin(sets);
+        return non_empty_set->all_runs();
+    }
+
+    std::vector<sstable_run> ret;
+    for (auto& set : boost::make_iterator_range(sets.begin(), it)) {
+        auto runs = set->all_runs();
+        ret.reserve(ret.size() + runs.size());
+        ret.insert(ret.end(), std::make_move_iterator(runs.begin()), std::make_move_iterator(runs.end()));
     }
     return ret;
 }
