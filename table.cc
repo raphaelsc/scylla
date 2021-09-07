@@ -1106,11 +1106,13 @@ std::vector<sstables::shared_sstable> table::select_sstables(const dht::partitio
     return _sstables->select(range);
 }
 
-std::vector<sstables::shared_sstable> table::in_strategy_sstables() const {
-    auto sstables = _main_sstables->all();
-    return boost::copy_range<std::vector<sstables::shared_sstable>>(*sstables
-            | boost::adaptors::filtered([this] (auto& sst) {
-        return !_sstables_staging.contains(sst->generation());
+std::vector<sstables::sstable_run> table::in_strategy_sstable_runs() const {
+    auto sstable_runs = _main_sstables->all_runs();
+    auto staging_run_ids = boost::copy_range<std::unordered_set<utils::UUID>>(_sstables_staging  | boost::adaptors::map_values
+        | boost::adaptors::transformed(std::mem_fn(&sstables::sstable::run_identifier)));
+    return boost::copy_range<std::vector<sstables::sstable_run>>(sstable_runs
+            | boost::adaptors::filtered([this, &staging_run_ids] (const sstables::sstable_run& run) {
+        return !staging_run_ids.contains(run.run_id());
     }));
 }
 

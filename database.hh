@@ -866,7 +866,7 @@ public:
     const std::vector<sstables::shared_sstable>& compacted_undeleted_sstables() const;
     std::vector<sstables::shared_sstable> select_sstables(const dht::partition_range& range) const;
     // Return all sstables but those that are off-strategy like the ones in maintenance set and staging dir.
-    std::vector<sstables::shared_sstable> in_strategy_sstables() const;
+    std::vector<sstables::sstable_run> in_strategy_sstable_runs() const;
     size_t sstables_count() const;
     std::vector<uint64_t> sstable_count_per_level() const;
     int64_t get_unleveled_sstables() const;
