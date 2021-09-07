@@ -42,6 +42,7 @@ class incremental_selector_impl;
 class sstable_run {
     lw_shared_ptr<sstable_list> _all;
     std::optional<utils::UUID> _run_id;
+    size_t _data_size = 0;
 public:
     sstable_run();
     void insert(shared_sstable sst);

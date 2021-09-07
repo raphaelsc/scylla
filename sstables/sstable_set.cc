@@ -44,15 +44,20 @@ void sstable_run::insert(shared_sstable sst) {
     // sstables in the same run must share the same id.
     assert(!_run_id || _run_id == sst_run_id);
     _run_id = std::move(sst_run_id);
+    _data_size += sst->data_size();
     _all->insert(std::move(sst));
 }
 
 void sstable_run::erase(shared_sstable sst) {
     _all->erase(sst);
+#ifdef SEASTAR_DEBUG
+    assert(_data_size >= sst->data_size());
+#endif
+    _data_size -= sst->data_size();
 }
 
 uint64_t sstable_run::data_size() const {
-    return boost::accumulate(*_all | boost::adaptors::transformed(std::mem_fn(&sstable::data_size)), uint64_t(0));
+    return _data_size;
 }
 
 std::ostream& operator<<(std::ostream& os, const sstables::sstable_run& run) {
