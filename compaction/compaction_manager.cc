@@ -180,11 +180,13 @@ std::vector<sstables::shared_sstable> compaction_manager::get_candidates(const c
     // selected for compaction, which could potentially result in wrong behavior.
     auto partial_run_identifiers = boost::copy_range<std::unordered_set<utils::UUID>>(_compactions
             | boost::adaptors::transformed(std::mem_fn(&sstables::compaction_info::run_identifier)));
+    auto compacting_run_identifiers = boost::copy_range<std::unordered_set<utils::UUID>>(_compacting_sstables
+            | boost::adaptors::transformed(std::mem_fn(&sstables::sstable::run_identifier)));
     auto& cs = cf.get_compaction_strategy();
 
     // Filter out sstables that are being compacted.
     for (auto& sst : cf.in_strategy_sstables()) {
-        if (_compacting_sstables.contains(sst)) {
+        if (compacting_run_identifiers.contains(sst->run_identifier())) {
             continue;
         }
         if (!cs.can_compact_partial_runs() && partial_run_identifiers.contains(sst->run_identifier())) {
