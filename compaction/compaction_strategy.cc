@@ -68,6 +68,10 @@ compaction_descriptor compaction_strategy_impl::get_major_compaction_job(column_
     return compaction_descriptor(std::move(candidates), cf.get_sstable_set(), service::get_local_compaction_priority());
 }
 
+compaction_descriptor compaction_strategy_impl::get_sstables_for_compaction(column_family& cf, compaction_candidates candidates) {
+    return get_sstables_for_compaction(cf, std::move(candidates).sstables());
+}
+
 bool compaction_strategy_impl::worth_dropping_tombstones(const shared_sstable& sst, gc_clock::time_point gc_before) {
     if (_disable_tombstone_compaction) {
         return false;
@@ -636,6 +640,10 @@ compaction_strategy_type compaction_strategy::type() const {
 
 compaction_descriptor compaction_strategy::get_sstables_for_compaction(column_family& cfs, std::vector<sstables::shared_sstable> candidates) {
     return _compaction_strategy_impl->get_sstables_for_compaction(cfs, std::move(candidates));
+}
+
+compaction_descriptor compaction_strategy::get_sstables_for_compaction(column_family& cf, compaction_candidates candidates) {
+    return _compaction_strategy_impl->get_sstables_for_compaction(cf, std::move(candidates));
 }
 
 compaction_descriptor compaction_strategy::get_major_compaction_job(column_family& cf, std::vector<sstables::shared_sstable> candidates) {

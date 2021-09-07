@@ -178,4 +178,21 @@ struct compaction_descriptor {
     {}
 };
 
+class compaction_candidates {
+    std::vector<sstable_run> _runs;
+public:
+    explicit compaction_candidates(std::vector<sstable_run> runs) : _runs(std::move(runs)) {}
+
+    const std::vector<sstable_run>& runs() const { return _runs; }
+
+    std::vector<shared_sstable> sstables() && {
+        std::vector<shared_sstable> ret;
+        for (auto&& r : _runs) {
+            ret.reserve(ret.size() + r.all().size());
+            ret.insert(ret.end(), std::make_move_iterator(r.all().begin()), std::make_move_iterator(r.all().end()));
+        }
+        return ret;
+    }
+};
+
 }
