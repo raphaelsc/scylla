@@ -40,13 +40,14 @@ class incremental_selector_impl;
 // Structure holds all sstables (a.k.a. fragments) that belong to same run identifier, which is an UUID.
 // SStables in that same run will not overlap with one another.
 class sstable_run {
-    sstable_list _all;
+    lw_shared_ptr<sstable_list> _all;
 public:
+    sstable_run();
     void insert(shared_sstable sst);
     void erase(shared_sstable sst);
     // Data size of the whole run, meaning it's a sum of the data size of all its fragments.
     uint64_t data_size() const;
-    const sstable_list& all() const { return _all; }
+    const sstable_list& all() const { return *_all; }
 };
 
 class sstable_set : public enable_lw_shared_from_this<sstable_set> {
