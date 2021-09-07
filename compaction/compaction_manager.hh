@@ -139,7 +139,7 @@ private:
     void deregister_weight(int weight);
 
     // Get candidates for compaction strategy, which are all sstables but the ones being compacted.
-    std::vector<sstables::shared_sstable> get_candidates(const column_family& cf);
+    sstables::compaction_candidates get_candidates(const column_family& cf);
 
     void register_compacting_sstables(const std::vector<sstables::shared_sstable>& sstables);
     void deregister_compacting_sstables(const std::vector<sstables::shared_sstable>& sstables);
