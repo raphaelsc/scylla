@@ -41,6 +41,7 @@ class incremental_selector_impl;
 // SStables in that same run will not overlap with one another.
 class sstable_run {
     lw_shared_ptr<sstable_list> _all;
+    std::optional<utils::UUID> _run_id;
 public:
     sstable_run();
     void insert(shared_sstable sst);
@@ -48,6 +49,7 @@ public:
     // Data size of the whole run, meaning it's a sum of the data size of all its fragments.
     uint64_t data_size() const;
     const sstable_list& all() const { return *_all; }
+    utils::UUID run_id() const { return *_run_id; }
 };
 
 class sstable_set : public enable_lw_shared_from_this<sstable_set> {

@@ -40,6 +40,10 @@ namespace sstables {
 sstable_run::sstable_run() : _all(make_lw_shared<sstable_list>()) {}
 
 void sstable_run::insert(shared_sstable sst) {
+    auto sst_run_id = sst->run_identifier();
+    // sstables in the same run must share the same id.
+    assert(!_run_id || _run_id == sst_run_id);
+    _run_id = std::move(sst_run_id);
     _all->insert(std::move(sst));
 }
 
