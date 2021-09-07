@@ -37,16 +37,22 @@
 
 namespace sstables {
 
+sstable_run::sstable_run() : _all(make_lw_shared<sstable_list>()) {}
+
 void sstable_run::insert(shared_sstable sst) {
-    _all.insert(std::move(sst));
+    copy_and_modify([sst = std::move(sst)] (sstable_list& all) mutable {
+        all.insert(std::move(sst));
+    });
 }
 
 void sstable_run::erase(shared_sstable sst) {
-    _all.erase(sst);
+    copy_and_modify([sst = std::move(sst)] (sstable_list& all) mutable {
+        all.erase(std::move(sst));
+    });
 }
 
 uint64_t sstable_run::data_size() const {
-    return boost::accumulate(_all | boost::adaptors::transformed(std::mem_fn(&sstable::data_size)), uint64_t(0));
+    return boost::accumulate(*_all | boost::adaptors::transformed(std::mem_fn(&sstable::data_size)), uint64_t(0));
 }
 
 std::ostream& operator<<(std::ostream& os, const sstables::sstable_run& run) {
