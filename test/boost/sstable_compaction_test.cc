@@ -72,6 +72,7 @@
 #include <boost/algorithm/cxx11/all_of.hpp>
 #include <boost/algorithm/cxx11/is_sorted.hpp>
 #include <boost/icl/interval_map.hpp>
+#include <boost/range/adaptor/map.hpp>
 #include "test/lib/test_services.hh"
 #include "test/lib/cql_test_env.hh"
 #include "test/lib/reader_concurrency_semaphore.hh"
@@ -2804,6 +2805,7 @@ SEASTAR_TEST_CASE(sstable_run_based_compaction_test) {
 
         auto tokens = token_generation_for_current_shard(16);
         std::unordered_set<shared_sstable> sstables;
+        std::unordered_map<utils::UUID, sstable_run> sstable_runs;
         std::vector<utils::observer<sstable&>> observers;
         sstables::sstable_run_based_compaction_strategy_for_tests cs;
 
@@ -2811,10 +2813,16 @@ SEASTAR_TEST_CASE(sstable_run_based_compaction_test) {
             for (auto& old_sst : old_sstables) {
                 BOOST_REQUIRE(sstables.contains(old_sst));
                 sstables.erase(old_sst);
+                auto run_id = old_sst->run_identifier();
+                sstable_runs[run_id].erase(old_sst);
+                if (sstable_runs[run_id].all().empty()) {
+                    sstable_runs.erase(run_id);
+                }
             }
             for (auto& new_sst : new_sstables) {
                 BOOST_REQUIRE(!sstables.contains(new_sst));
                 sstables.insert(new_sst);
+                sstable_runs[new_sst->run_identifier()].insert(new_sst);
             }
             column_family_test(cf).rebuild_sstable_list(new_sstables, old_sstables);
             cf->get_compaction_manager().propagate_replacement(&*cf, old_sstables, new_sstables);
@@ -2846,8 +2854,8 @@ SEASTAR_TEST_CASE(sstable_run_based_compaction_test) {
         };
 
         auto do_compaction = [&] (size_t expected_input, size_t expected_output) -> std::vector<shared_sstable> {
-            auto input_ssts = std::vector<shared_sstable>(sstables.begin(), sstables.end());
-            auto desc = cs.get_sstables_for_compaction(*cf, std::move(input_ssts));
+            auto input_runs = boost::copy_range<std::vector<sstable_run>>(sstable_runs | boost::adaptors::map_values);
+            auto desc = cs.get_sstables_for_compaction(*cf, std::move(input_runs));
 
             // nothing to compact, move on.
             if (desc.sstables.empty()) {
@@ -2888,6 +2896,7 @@ SEASTAR_TEST_CASE(sstable_run_based_compaction_test) {
             sst->set_sstable_level(1);
             BOOST_REQUIRE(sst->get_sstable_level() == 1);
             column_family_test(cf).add_sstable(sst);
+            sstable_runs[sst->run_identifier()].insert(sst);
             sstables.insert(std::move(sst));
             do_compaction(4, 4);
         }
