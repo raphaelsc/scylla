@@ -515,6 +515,7 @@ protected:
     // Unused sstables are tracked because if compaction is interrupted we can only delete them.
     // Deleting used sstables could potentially result in data loss.
     std::vector<shared_sstable> _new_unused_sstables;
+    std::vector<shared_sstable> _all_new_sstables;
     lw_shared_ptr<sstable_set> _compacting;
     uint64_t _max_sstable_size;
     uint32_t _sstable_level;
@@ -583,7 +584,7 @@ protected:
     }
 
     void setup_new_sstable(shared_sstable& sst) {
-        _info->new_sstables.push_back(sst);
+        _all_new_sstables.push_back(sst);
         _new_unused_sstables.push_back(sst);
         for (auto ancestor : _ancestors) {
             sst->add_ancestor(ancestor);
@@ -729,15 +730,19 @@ private:
         return _cf.get_compaction_strategy().use_interposer_consumer();
     }
 
-    compaction_info finish(std::chrono::time_point<db_clock> started_at, std::chrono::time_point<db_clock> ended_at) {
-        _info->ended_at = std::chrono::duration_cast<std::chrono::milliseconds>(ended_at.time_since_epoch()).count();
+    compaction_result finish(std::chrono::time_point<db_clock> started_at, std::chrono::time_point<db_clock> ended_at) {
+        compaction_result ret {
+            .new_sstables = std::move(_all_new_sstables),
+            .ended_at = ended_at,
+        };
+
         auto ratio = double(_info->end_size) / double(_info->start_size);
         auto duration = std::chrono::duration<float>(ended_at - started_at);
         // Don't report NaN or negative number.
 
         on_end_of_compaction();
 
-        formatted_sstables_list new_sstables_msg(_info->new_sstables, false);
+        formatted_sstables_list new_sstables_msg(ret.new_sstables, false);
 
         // FIXME: there is some missing information in the log message below.
         // look at CompactionTask::runMayThrow() in origin for reference.
@@ -753,8 +758,8 @@ private:
         backlog_tracker_adjust_charges();
 
         auto info = std::move(_info);
-        _cf.get_compaction_manager().deregister_compaction(info);
-        return std::move(*info);
+        _cf.get_compaction_manager().deregister_compaction(std::move(info));
+        return ret;
     }
 
     virtual std::string_view report_start_desc() const = 0;
@@ -847,7 +852,7 @@ public:
 
     template <typename GCConsumer = noop_compacted_fragments_consumer>
     requires CompactedFragmentsConsumer<GCConsumer>
-    static future<compaction_info> run(std::unique_ptr<compaction> c, GCConsumer gc_consumer = GCConsumer());
+    static future<compaction_result> run(std::unique_ptr<compaction> c, GCConsumer gc_consumer = GCConsumer());
 
     friend class compacting_sstable_writer;
     friend class garbage_collected_sstable_writer;
@@ -1584,7 +1589,7 @@ public:
 
 template <typename GCConsumer>
 requires CompactedFragmentsConsumer<GCConsumer>
-future<compaction_info> compaction::run(std::unique_ptr<compaction> c, GCConsumer gc_consumer) {
+future<compaction_result> compaction::run(std::unique_ptr<compaction> c, GCConsumer gc_consumer) {
     return seastar::async([c = std::move(c), gc_consumer = std::move(gc_consumer)] () mutable {
         auto consumer = c->setup(std::move(gc_consumer));
         auto start_time = db_clock::now();
@@ -1696,7 +1701,7 @@ future<bool> scrub_validate_mode_validate_reader(flat_mutation_reader reader, co
     co_return valid;
 }
 
-static future<compaction_info> scrub_sstables_validate_mode(sstables::compaction_descriptor descriptor, column_family& cf) {
+static future<compaction_result> scrub_sstables_validate_mode(sstables::compaction_descriptor descriptor, column_family& cf) {
     auto schema = cf.schema();
 
     formatted_sstables_list sstables_list_msg;
@@ -1726,13 +1731,16 @@ static future<compaction_info> scrub_sstables_validate_mode(sstables::compaction
 
     clogger.info("Finished scrubbing in validate mode {} - sstable(s) are {}", sstables_list_msg, valid ? "valid" : "invalid");
 
-    co_return *info;
+    co_return compaction_result {
+        .new_sstables = {},
+        .ended_at = db_clock::now(),
+    };
 }
 
-future<compaction_info>
+future<compaction_result>
 compact_sstables(sstables::compaction_descriptor descriptor, column_family& cf) {
     if (descriptor.sstables.empty()) {
-        return make_exception_future<compaction_info>(std::runtime_error(format("Called {} compaction with empty set on behalf of {}.{}",
+        return make_exception_future<compaction_result>(std::runtime_error(format("Called {} compaction with empty set on behalf of {}.{}",
                 compaction_name(descriptor.options.type()), cf.schema()->ks_name(), cf.schema()->cf_name())));
     }
     if (descriptor.options.type() == compaction_type::Scrub

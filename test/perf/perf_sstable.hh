@@ -191,10 +191,12 @@ public:
                 auto end = perf_sstable_test_env::now();
 
                 auto partitions_per_sstable = _cfg.partitions / _cfg.sstables;
-                assert(ret.total_keys_written == partitions_per_sstable);
+                assert(ret.new_sstables.size() == 1);
+                auto total_keys_written = ret.new_sstables.front()->get_estimated_key_count();
+                assert(total_keys_written >= partitions_per_sstable);
 
                 auto duration = std::chrono::duration<double>(end - start).count();
-                return ret.total_keys_written / duration;
+                return total_keys_written / duration;
             });
         });
     }

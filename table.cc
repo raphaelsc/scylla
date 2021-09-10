@@ -904,21 +904,28 @@ table::compact_sstables(sstables::compaction_descriptor descriptor) {
             release_exhausted(desc.old_sstables);
         }
     };
+    auto compaction_type = descriptor.options.type();
+    auto compaction_uuid = descriptor.run_identifier;
+    auto start_size = boost::accumulate(descriptor.sstables | boost::adaptors::transformed(std::mem_fn(&sstables::sstable::data_size)), uint64_t(0));
 
-    return sstables::compact_sstables(std::move(descriptor), *this).then([this] (auto info) {
-        if (info.type != sstables::compaction_type::Compaction) {
+    return sstables::compact_sstables(std::move(descriptor), *this).then([this, compaction_type, compaction_uuid, start_size] (sstables::compaction_result res) {
+        if (compaction_type != sstables::compaction_type::Compaction) {
             return make_ready_future<>();
         }
         // skip update if running without a query context, for example, when running a test case.
         if (!db::qctx) {
             return make_ready_future<>();
         }
+
+        auto end_size = boost::accumulate(res.new_sstables | boost::adaptors::transformed(std::mem_fn(&sstables::sstable::data_size)), uint64_t(0));
+        auto ended_at = std::chrono::duration_cast<std::chrono::milliseconds>(res.ended_at.time_since_epoch()).count();
+
         // FIXME: add support to merged_rows. merged_rows is a histogram that
         // shows how many sstables each row is merged from. This information
         // cannot be accessed until we make combined_reader more generic,
         // for example, by adding a reducer method.
-        return db::system_keyspace::update_compaction_history(info.compaction_uuid, info.ks_name, info.cf_name, info.ended_at,
-            info.start_size, info.end_size, std::unordered_map<int32_t, int64_t>{});
+        return db::system_keyspace::update_compaction_history(compaction_uuid, _schema->ks_name(), _schema->cf_name(), ended_at,
+            start_size, end_size, std::unordered_map<int32_t, int64_t>{});
     });
 }
 

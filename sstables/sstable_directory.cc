@@ -357,7 +357,7 @@ future<uint64_t> sstable_directory::reshape(compaction_manager& cm, table& table
             desc.creator = creator;
 
             return cm.run_custom_job(&table, compaction_type::Reshape, [this, &table, sstlist = std::move(sstlist), desc = std::move(desc)] () mutable {
-                return sstables::compact_sstables(std::move(desc), table).then([this, sstlist = std::move(sstlist)] (sstables::compaction_info result) mutable {
+                return sstables::compact_sstables(std::move(desc), table).then([this, sstlist = std::move(sstlist)] (sstables::compaction_result result) mutable {
                     return remove_input_sstables_from_reshaping(std::move(sstlist)).then([this, new_sstables = std::move(result.new_sstables)] () mutable {
                         return collect_output_sstables_from_reshaping(std::move(new_sstables));
                     });
@@ -413,7 +413,7 @@ sstable_directory::reshard(sstable_info_vector shared_info, compaction_manager& 
                     desc.options = sstables::compaction_options::make_reshard();
                     desc.creator = std::move(creator);
 
-                    return sstables::compact_sstables(std::move(desc), table).then([this, &sstlist] (sstables::compaction_info result) {
+                    return sstables::compact_sstables(std::move(desc), table).then([this, &sstlist] (sstables::compaction_result result) {
                         // input sstables are moved, to guarantee their resources are released once we're done
                         // resharding them.
                         return when_all_succeed(collect_output_sstables_from_resharding(std::move(result.new_sstables)), remove_input_sstables_from_resharding(std::move(sstlist))).discard_result();
