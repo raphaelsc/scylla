@@ -73,6 +73,7 @@ private:
         bool stopping = false;
         sstables::compaction_type type = sstables::compaction_type::Compaction;
         bool compaction_running = false;
+        lw_shared_ptr<sstables::compaction_info> compaction_info = make_lw_shared<sstables::compaction_info>();
     };
 
     // compaction manager may have N fibers to allow parallel compaction per shard.
@@ -98,8 +99,6 @@ private:
     stats _stats;
     seastar::metrics::metric_groups _metrics;
     double _last_backlog = 0.0f;
-
-    std::list<lw_shared_ptr<sstables::compaction_info>> _compactions;
 
     // Store sstables that are being compacted at the moment. That's needed to prevent
     // a sstable from being compacted twice.
@@ -128,7 +127,7 @@ private:
     timer<lowres_clock> _compaction_submission_timer = timer<lowres_clock>(compaction_submission_callback());
     static constexpr std::chrono::seconds periodic_compaction_submission_interval() { return std::chrono::seconds(3600); }
 private:
-    future<> task_stop(lw_shared_ptr<task> task);
+    future<> task_stop(lw_shared_ptr<task> task, sstring reason);
 
     // Return true if weight is not registered.
     bool can_register_weight(column_family* cf, int weight) const;
@@ -249,17 +248,7 @@ public:
         return _stats;
     }
 
-    void register_compaction(lw_shared_ptr<sstables::compaction_info> c) {
-        _compactions.push_back(c);
-    }
-
-    void deregister_compaction(lw_shared_ptr<sstables::compaction_info> c) {
-        _compactions.remove(c);
-    }
-
-    const std::list<lw_shared_ptr<sstables::compaction_info>>& get_compactions() const {
-        return _compactions;
-    }
+    const std::vector<lw_shared_ptr<sstables::compaction_info>> get_compactions() const;
 
     // Returns true if table has an ongoing compaction, running on its behalf
     bool has_table_ongoing_compaction(column_family* cf) const {
@@ -284,6 +273,7 @@ public:
 
     friend class compacting_sstable_registration;
     friend class compaction_weight_registration;
+    friend class compaction_manager_test;
 };
 
 bool needs_cleanup(const sstables::shared_sstable& sst, const dht::token_range_vector& owned_ranges, schema_ptr s);

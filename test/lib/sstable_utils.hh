@@ -343,5 +343,24 @@ public:
 
 } // namespace sstables
 
+class compaction_manager_test {
+    compaction_manager& _cm;
+public:
+    explicit compaction_manager_test(compaction_manager& cm) : _cm(cm) {}
+
+    void register_compaction(lw_shared_ptr<sstables::compaction_info> c) {
+        auto task = make_lw_shared<compaction_manager::task>();
+        task->compacting_cf = c->cf;
+        task->compaction_running = true;
+        task->compaction_info = c;
+        _cm._tasks.push_back(task);
+    }
+
+    void deregister_compaction(lw_shared_ptr<sstables::compaction_info> c) {
+        auto it = boost::find_if(_cm._tasks, [c] (auto& task) { return task->compaction_info == c; });
+        _cm._tasks.remove(*it);
+    }
+};
+
 future<compaction_result> compact_sstables(sstables::compaction_descriptor descriptor, column_family& cf,
         std::function<shared_sstable()> creator, sstables::compaction_sstable_replacer_fn replacer = sstables::replacer_fn_no_op());
