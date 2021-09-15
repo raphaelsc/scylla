@@ -3004,10 +3004,8 @@ SEASTAR_TEST_CASE(backlog_tracker_correctness_after_stop_tracking_compaction) {
 
             bool stopped_tracking = false;
             for (auto& info : cf._data->cm.get_compactions()) {
-                if (info->cf == &*cf) {
-                    info->stop_tracking();
-                    stopped_tracking = true;
-                }
+                info->stop_tracking();
+                stopped_tracking = true;
             }
             BOOST_REQUIRE(stopped_tracking);
 
