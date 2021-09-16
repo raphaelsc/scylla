@@ -51,6 +51,13 @@ void sstable_run::erase(shared_sstable sst) {
     });
 }
 
+utils::UUID sstable_run::run_id() const {
+    if (_all->size()) {
+        return (*_all->begin())->run_identifier();
+    }
+    return utils::UUID();
+}
+
 uint64_t sstable_run::data_size() const {
     return boost::accumulate(*_all | boost::adaptors::transformed(std::mem_fn(&sstable::data_size)), uint64_t(0));
 }

@@ -59,6 +59,7 @@ public:
     void erase(shared_sstable sst);
     // Data size of the whole run, meaning it's a sum of the data size of all its fragments.
     uint64_t data_size() const;
+    utils::UUID run_id() const;
     const sstable_list& all() const { return *_all; }
 };
 
