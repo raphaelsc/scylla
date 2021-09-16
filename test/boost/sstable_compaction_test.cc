@@ -2193,8 +2193,8 @@ SEASTAR_TEST_CASE(sstable_scrub_validate_mode_test) {
 
             table->add_sstable_and_update_cache(sst).get();
 
-            BOOST_REQUIRE(table->in_strategy_sstables().size() == 1);
-            BOOST_REQUIRE(table->in_strategy_sstables().front() == sst);
+            BOOST_REQUIRE(table->in_strategy_sstable_runs().size() == 1);
+            BOOST_REQUIRE(table->in_strategy_sstable_runs().front().run_id() == sst->run_identifier());
 
             auto verify_fragments = [&] (sstables::shared_sstable sst, const std::vector<mutation_fragment>& mfs) {
                 auto r = assert_that(sst->as_mutation_source().make_reader(schema, env.make_reader_permit()));
@@ -2215,8 +2215,8 @@ SEASTAR_TEST_CASE(sstable_scrub_validate_mode_test) {
             // No way to really test validation besides observing the log messages.
             compaction_manager.perform_sstable_scrub(table.get(), sstables::compaction_type_options::scrub::mode::validate).get();
 
-            BOOST_REQUIRE(table->in_strategy_sstables().size() == 1);
-            BOOST_REQUIRE(table->in_strategy_sstables().front() == sst);
+            BOOST_REQUIRE(table->in_strategy_sstable_runs().size() == 1);
+            BOOST_REQUIRE(table->in_strategy_sstable_runs().front().run_id() == sst->run_identifier());
             verify_fragments(sst, corrupt_fragments);
         });
     }, test_cfg);
@@ -2389,8 +2389,8 @@ SEASTAR_TEST_CASE(sstable_scrub_skip_mode_test) {
 
             table->add_sstable_and_update_cache(sst).get();
 
-            BOOST_REQUIRE(table->in_strategy_sstables().size() == 1);
-            BOOST_REQUIRE(table->in_strategy_sstables().front() == sst);
+            BOOST_REQUIRE(table->in_strategy_sstable_runs().size() == 1);
+            BOOST_REQUIRE(table->in_strategy_sstable_runs().front().run_id() == sst->run_identifier());
 
             auto verify_fragments = [&] (sstables::shared_sstable sst, const std::vector<mutation_fragment>& mfs) {
                 auto r = assert_that(sst->as_mutation_source().make_reader(schema, permit));
@@ -2411,7 +2411,7 @@ SEASTAR_TEST_CASE(sstable_scrub_skip_mode_test) {
             // We expect the scrub with mode=srub::mode::abort to stop on the first invalid fragment.
             compaction_manager.perform_sstable_scrub(table.get(), sstables::compaction_type_options::scrub::mode::abort).get();
 
-            BOOST_REQUIRE(table->in_strategy_sstables().size() == 1);
+            BOOST_REQUIRE(table->in_strategy_sstable_runs().size() == 1);
             verify_fragments(sst, corrupt_fragments);
 
             testlog.info("Scrub in skip mode");
@@ -2419,9 +2419,11 @@ SEASTAR_TEST_CASE(sstable_scrub_skip_mode_test) {
             // We expect the scrub with mode=srub::mode::skip to get rid of all invalid data.
             compaction_manager.perform_sstable_scrub(table.get(), sstables::compaction_type_options::scrub::mode::skip).get();
 
-            BOOST_REQUIRE(table->in_strategy_sstables().size() == 1);
-            BOOST_REQUIRE(table->in_strategy_sstables().front() != sst);
-            verify_fragments(table->in_strategy_sstables().front(), scrubbed_fragments);
+            BOOST_REQUIRE(table->in_strategy_sstable_runs().size() == 1);
+            auto run_fragments = table->in_strategy_sstable_runs().front().all();
+            BOOST_REQUIRE(run_fragments.size() == 1);
+            BOOST_REQUIRE(*run_fragments.begin() != sst);
+            verify_fragments(*run_fragments.begin(), scrubbed_fragments);
         });
     }, test_cfg);
 }
@@ -2486,8 +2488,8 @@ SEASTAR_TEST_CASE(sstable_scrub_segregate_mode_test) {
 
             table->add_sstable_and_update_cache(sst).get();
 
-            BOOST_REQUIRE(table->in_strategy_sstables().size() == 1);
-            BOOST_REQUIRE(table->in_strategy_sstables().front() == sst);
+            BOOST_REQUIRE(table->in_strategy_sstable_runs().size() == 1);
+            BOOST_REQUIRE(table->in_strategy_sstable_runs().front().run_id() == sst->run_identifier());
 
             auto verify_fragments = [&] (sstables::shared_sstable sst, const std::vector<mutation_fragment>& mfs) {
                 auto r = assert_that(sst->as_mutation_source().make_reader(schema, env.make_reader_permit()));
@@ -2508,7 +2510,7 @@ SEASTAR_TEST_CASE(sstable_scrub_segregate_mode_test) {
             // We expect the scrub with mode=srub::mode::abort to stop on the first invalid fragment.
             compaction_manager.perform_sstable_scrub(table.get(), sstables::compaction_type_options::scrub::mode::abort).get();
 
-            BOOST_REQUIRE(table->in_strategy_sstables().size() == 1);
+            BOOST_REQUIRE(table->in_strategy_sstable_runs().size() == 1);
             verify_fragments(sst, corrupt_fragments);
 
             testlog.info("Scrub in segregate mode");
@@ -2516,8 +2518,8 @@ SEASTAR_TEST_CASE(sstable_scrub_segregate_mode_test) {
             // We expect the scrub with mode=srub::mode::segregate to fix all out-of-order data.
             compaction_manager.perform_sstable_scrub(table.get(), sstables::compaction_type_options::scrub::mode::segregate).get();
 
-            testlog.info("Scrub resulted in {} sstables", table->in_strategy_sstables().size());
-            BOOST_REQUIRE(table->in_strategy_sstables().size() > 1);
+            testlog.info("Scrub resulted in {} sstables", table->in_strategy_sstable_runs().front().all().size());
+            BOOST_REQUIRE(table->in_strategy_sstable_runs().front().all().size() > 1);
             {
                 auto sst_reader = assert_that(table->as_mutation_source().make_reader(schema, env.make_reader_permit()));
                 auto mt_reader = scrubbed_mt->as_data_source().make_reader(schema, env.make_reader_permit());

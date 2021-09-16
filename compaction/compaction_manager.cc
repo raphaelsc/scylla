@@ -192,14 +192,17 @@ std::vector<sstables::shared_sstable> compaction_manager::get_candidates(const c
     auto& cs = cf.get_compaction_strategy();
 
     // Filter out sstables that are being compacted.
-    for (auto& sst : cf.in_strategy_sstables()) {
-        if (compacting_run_identifiers.contains(sst->run_identifier())) {
+    for (auto& run : cf.in_strategy_sstable_runs()) {
+        auto run_id = run.run_id();
+
+        if (compacting_run_identifiers.contains(run_id)) {
             continue;
         }
-        if (!cs.can_compact_partial_runs() && partial_run_identifiers.contains(sst->run_identifier())) {
+        if (!cs.can_compact_partial_runs() && partial_run_identifiers.contains(run_id)) {
             continue;
         }
-        candidates.push_back(sst);
+        candidates.reserve(candidates.size() + run.all().size());
+        candidates.insert(candidates.end(), std::make_move_iterator(run.all().begin()), std::make_move_iterator(run.all().end()));
     }
     return candidates;
 }
