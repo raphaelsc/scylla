@@ -41,6 +41,7 @@ class incremental_selector_impl;
 // SStables in that same run will not overlap with one another.
 class sstable_run {
     lw_shared_ptr<const sstable_list> _all;
+    uint64_t _data_size = 0;
 private:
     // allow in-progress users to continue using the old list
     // FIXME: switch to variant provided by Seastar.
