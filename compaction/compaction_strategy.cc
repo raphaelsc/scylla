@@ -64,6 +64,10 @@ logging::logger leveled_manifest::logger("LeveledManifest");
 
 namespace sstables {
 
+compaction_descriptor compaction_strategy_impl::get_sstables_for_compaction(column_family& cf, std::vector<sstable_run> candidates) {
+    return get_sstables_for_compaction(cf, sstable_run::to_sstables(std::move(candidates)));
+}
+
 compaction_descriptor compaction_strategy_impl::get_major_compaction_job(column_family& cf, std::vector<sstables::shared_sstable> candidates) {
     return compaction_descriptor(std::move(candidates), cf.get_sstable_set(), service::get_local_compaction_priority());
 }
@@ -636,6 +640,10 @@ compaction_strategy_type compaction_strategy::type() const {
 
 compaction_descriptor compaction_strategy::get_sstables_for_compaction(column_family& cfs, std::vector<sstables::shared_sstable> candidates) {
     return _compaction_strategy_impl->get_sstables_for_compaction(cfs, std::move(candidates));
+}
+
+compaction_descriptor compaction_strategy::get_sstables_for_compaction(column_family& cf, std::vector<sstable_run> candidates) {
+    return _compaction_strategy_impl->get_sstables_for_compaction(cf, std::move(candidates));
 }
 
 compaction_descriptor compaction_strategy::get_major_compaction_job(column_family& cf, std::vector<sstables::shared_sstable> candidates) {

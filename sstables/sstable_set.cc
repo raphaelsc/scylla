@@ -66,6 +66,15 @@ uint64_t sstable_run::data_size() const {
     return _data_size;
 }
 
+std::vector<shared_sstable> sstable_run::to_sstables(std::vector<sstable_run> runs) {
+    std::vector<shared_sstable> ret;
+    for (auto&& r : runs) {
+        ret.reserve(ret.size() + r.all().size());
+        ret.insert(ret.end(), std::make_move_iterator(r.all().begin()), std::make_move_iterator(r.all().end()));
+    }
+    return ret;
+}
+
 std::ostream& operator<<(std::ostream& os, const sstables::sstable_run& run) {
     os << "Run = {\n";
     if (run.all().empty()) {

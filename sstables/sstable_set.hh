@@ -62,6 +62,8 @@ public:
     uint64_t data_size() const;
     utils::UUID run_id() const;
     const sstable_list& all() const { return *_all; }
+
+    static std::vector<shared_sstable> to_sstables(std::vector<sstable_run> runs);
 };
 
 class sstable_set : public enable_lw_shared_from_this<sstable_set> {

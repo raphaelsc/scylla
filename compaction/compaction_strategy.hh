@@ -42,6 +42,7 @@ namespace sstables {
 class compaction_strategy_impl;
 class sstable;
 class sstable_set;
+class sstable_run;
 struct compaction_descriptor;
 struct resharding_descriptor;
 
@@ -58,6 +59,7 @@ public:
 
     // Return a list of sstables to be compacted after applying the strategy.
     compaction_descriptor get_sstables_for_compaction(column_family& cfs, std::vector<shared_sstable> candidates);
+    compaction_descriptor get_sstables_for_compaction(column_family& cf, std::vector<sstable_run> candidates);
 
     compaction_descriptor get_major_compaction_job(column_family& cf, std::vector<shared_sstable> candidates);
 
