@@ -421,13 +421,16 @@ void compaction_manager::postponed_compactions_reevaluation() {
                 _postponed.clear();
                 return stop_iteration::yes;
             }
-            auto postponed = std::move(_postponed);
+            if (_postponed.empty()) {
+                return stop_iteration::no;
+            }
+            auto postponed_cf = _postponed.front();
             try {
-                for (auto& cf : postponed) {
-                    submit(cf);
-                }
-            } catch (...) {
-                _postponed = std::move(postponed);
+                // submit one at a time, as compaction completion triggers reevaluation.
+                submit(postponed_cf);
+                _postponed.pop_front();
+            } catch(...) {
+                // swallow exception to allow reevaluation loop to keep going.
             }
             return stop_iteration::no;
         });
@@ -439,6 +442,9 @@ void compaction_manager::reevaluate_postponed_compactions() {
 }
 
 void compaction_manager::postpone_compaction_for_column_family(column_family* cf) {
+    if (boost::range::find(_postponed, cf) != _postponed.end()) {
+        return;
+    }
     _postponed.push_back(cf);
 }
 
@@ -546,7 +552,13 @@ inline bool compaction_manager::maybe_stop_on_error(future<> f, stop_iteration w
 }
 
 void compaction_manager::submit(column_family* cf) {
-    if (cf->is_auto_compaction_disabled_by_user()) {
+    // prevents unbounded growth of pending tasks.
+    auto has_pending_compaction = [this, cf] () {
+        return std::any_of(_tasks.begin(), _tasks.end(), [cf] (const lw_shared_ptr<task>& task) {
+            return task->compacting_cf == cf && !task->compaction_running;
+        });
+    };
+    if (cf->is_auto_compaction_disabled_by_user() || has_pending_compaction()) {
         return;
     }
 
