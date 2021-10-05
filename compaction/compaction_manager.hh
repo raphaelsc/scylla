@@ -134,6 +134,7 @@ private:
     static constexpr std::chrono::seconds periodic_compaction_submission_interval() { return std::chrono::seconds(3600); }
 private:
     future<> task_stop(lw_shared_ptr<task> task, sstring reason);
+    future<> stop_tasks(std::vector<lw_shared_ptr<task>> tasks, sstring reason);
 
     // Return true if weight is not registered.
     bool can_register_weight(column_family* cf, int weight) const;
