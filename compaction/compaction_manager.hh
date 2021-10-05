@@ -176,6 +176,7 @@ private:
     maintenance_scheduling_group _maintenance_sg;
     size_t _available_memory;
 
+    using shared_sstables = std::vector<sstables::shared_sstable>;
     using get_candidates_func = std::function<std::vector<sstables::shared_sstable>(const column_family&)>;
     class can_purge_tombstones_tag;
     using can_purge_tombstones = bool_class<can_purge_tombstones_tag>;
