@@ -927,20 +927,19 @@ future<> compaction_manager::perform_sstable_scrub(column_family* cf, sstables::
     if (scrub_mode == sstables::compaction_type_options::scrub::mode::validate) {
         return perform_sstable_scrub_validate_mode(cf);
     }
-  // FIXME: indentation
-  return do_with(shared_sstables{}, [this, cf, scrub_mode](shared_sstables& sstables) {
-    // since we might potentially have ongoing compactions, and we
-    // must ensure that all sstables created before we run are scrubbed,
-    // we need to barrier out any previously running compaction.
-    return run_with_compaction_disabled(cf, [this, cf, &sstables] () mutable {
-        sstables = get_candidates(*cf);
-        return make_ready_future<>();
-    }).then([this, cf, scrub_mode, &sstables] () mutable {
-        return rewrite_sstables(cf, sstables::compaction_type_options::make_scrub(scrub_mode), [&sstables] (const table&) mutable {
-            return std::exchange(sstables, {});
-        }, can_purge_tombstones::no);
+    return do_with(shared_sstables{}, [this, cf, scrub_mode](shared_sstables& sstables) {
+        // since we might potentially have ongoing compactions, and we
+        // must ensure that all sstables created before we run are scrubbed,
+        // we need to barrier out any previously running compaction.
+        return run_with_compaction_disabled(cf, [this, cf, &sstables] () mutable {
+            sstables = get_candidates(*cf);
+            return make_ready_future<>();
+        }).then([this, cf, scrub_mode, &sstables] () mutable {
+            return rewrite_sstables(cf, sstables::compaction_type_options::make_scrub(scrub_mode), [&sstables] (const table&) mutable {
+                return std::exchange(sstables, {});
+            }, can_purge_tombstones::no);
+        });
     });
-  });
 }
 
 future<> compaction_manager::remove(column_family* cf) {
