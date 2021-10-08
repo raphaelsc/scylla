@@ -494,6 +494,14 @@ future<> compaction_manager::stop_ongoing_compactions(sstring reason) {
     return stop_tasks(std::move(tasks), std::move(reason));
 }
 
+future<> compaction_manager::stop_ongoing_compactions(column_family* cf, sstring reason) {
+    auto tasks = boost::copy_range<std::vector<lw_shared_ptr<task>>>(_tasks | boost::adaptors::filtered([cf] (auto& task) {
+        return task->compacting_cf == cf;
+    }));
+    cmlog.info("Stopping {} ongoing compactions for table {}.{} due to {}", tasks.size(), cf->schema()->ks_name(), cf->schema()->cf_name(), reason);
+    return stop_tasks(std::move(tasks), std::move(reason));
+}
+
 future<> compaction_manager::drain() {
     _state = state::disabled;
     return stop_ongoing_compactions("drain");
@@ -921,19 +929,11 @@ future<> compaction_manager::perform_sstable_scrub(column_family* cf, sstables::
 future<> compaction_manager::remove(column_family* cf) {
     // We need to guarantee that a task being stopped will not retry to compact
     // a column family being removed.
-    auto tasks_to_stop = make_lw_shared<std::vector<lw_shared_ptr<task>>>();
-    for (auto& task : _tasks) {
-        if (task->compacting_cf == cf) {
-            tasks_to_stop->push_back(task);
-            task->stopping = true;
-        }
-    }
+    // The requirement above is provided by stop_ongoing_compactions().
     _postponed.erase(cf);
 
     // Wait for the termination of an ongoing compaction on cf, if any.
-    return parallel_for_each(*tasks_to_stop, [this, cf] (auto& task) {
-        return this->task_stop(task, "column family removal");
-    }).then([this, cf, tasks_to_stop] {
+    return stop_ongoing_compactions(cf, "column family removal").then([this, cf] {
 #ifdef DEBUG
         assert(std::find_if(_tasks.begin(), _tasks.end(), [cf] (auto& task) { return task->compacting_cf == cf; }) == _tasks.end());
 #endif
