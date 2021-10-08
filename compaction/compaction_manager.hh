@@ -123,6 +123,8 @@ private:
     semaphore _major_compaction_sem{1};
     // Prevents column family from running major and minor compaction at same time.
     std::unordered_map<column_family*, rwlock> _compaction_locks;
+    // Controls regular compaction temporarily disabled for a given table.
+    std::unordered_map<table*, int> _compaction_disabled;
 
     semaphore _custom_job_sem{1};
     seastar::named_semaphore _rewrite_sstables_sem = {1, named_semaphore_exception_factory{"rewrite sstables"}};
@@ -245,6 +247,9 @@ public:
     // parameter job is a function that will carry the operation
     future<> run_custom_job(column_family* cf, sstables::compaction_type type, noncopyable_function<future<>(sstables::compaction_data&)> job);
 
+    // Run a function with compaction temporarily disabled for a table T.
+    future<> run_with_compaction_disabled(table* t, std::function<future<> ()> func);
+
     // Remove a column family from the compaction manager.
     // Cancel requests on cf and wait for a possible ongoing compaction on cf.
     future<> remove(column_family* cf);
@@ -261,6 +266,10 @@ public:
             return task->compacting_cf == cf && task->compaction_running;
         });
     };
+
+    bool compaction_disabled(table* t) const {
+        return _compaction_disabled.at(t) > 0;
+    }
 
     // Stops ongoing compaction of a given type.
     void stop_compaction(sstring type);

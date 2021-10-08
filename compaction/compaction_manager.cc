@@ -332,6 +332,18 @@ future<> compaction_manager::run_custom_job(column_family* cf, sstables::compact
     return task->compaction_done.get_future().then([task] {});
 }
 
+future<>
+compaction_manager::run_with_compaction_disabled(table* t, std::function<future<> ()> func) {
+    ++_compaction_disabled[t];
+    return stop_ongoing_compactions(t, "user-triggered operation").then(std::move(func)).finally([this, t] {
+        if (--_compaction_disabled[t] == 0) {
+            // we're turning if on again, use function that does not increment
+            // the counter further.
+            submit(t);
+        }
+    });
+}
+
 void compaction_manager::task::setup_new_compaction() {
     compaction_data = create_compaction_data(*compacting_cf, type);
     compaction_running = true;
@@ -550,7 +562,7 @@ void compaction_manager::do_stop() noexcept {
 }
 
 inline bool compaction_manager::can_proceed(const lw_shared_ptr<task>& task) {
-    return (_state == state::enabled) && !task->stopping;
+    return (_state == state::enabled) && !task->stopping && !_compaction_disabled[task->compacting_cf];
 }
 
 inline future<> compaction_manager::put_task_to_sleep(lw_shared_ptr<task>& task) {
@@ -884,7 +896,7 @@ future<> compaction_manager::perform_sstable_upgrade(database& db, column_family
         // must ensure that all sstables created before we run are included
         // in the re-write, we need to barrier out any previously running
         // compaction.
-        return cf->run_with_compaction_disabled([this, cf, &tables, exclude_current_version] {
+        return run_with_compaction_disabled(cf, [this, cf, &tables, exclude_current_version] {
             auto last_version = cf->get_sstables_manager().get_highest_supported_format();
 
             for (auto& sst : get_candidates(*cf)) {
@@ -920,7 +932,7 @@ future<> compaction_manager::perform_sstable_scrub(column_family* cf, sstables::
     // since we might potentially have ongoing compactions, and we
     // must ensure that all sstables created before we run are scrubbed,
     // we need to barrier out any previously running compaction.
-    return cf->run_with_compaction_disabled([this, cf, &sstables] () mutable {
+    return run_with_compaction_disabled(cf, [this, cf, &sstables] () mutable {
         sstables = get_candidates(*cf);
         return make_ready_future<>();
     }).then([this, cf, scrub_mode, &sstables] () mutable {
@@ -943,6 +955,7 @@ future<> compaction_manager::remove(column_family* cf) {
         assert(std::find_if(_tasks.begin(), _tasks.end(), [cf] (auto& task) { return task->compacting_cf == cf; }) == _tasks.end());
 #endif
         _compaction_locks.erase(cf);
+        _compaction_disabled.erase(cf);
     });
 }
 
