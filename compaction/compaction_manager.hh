@@ -125,6 +125,8 @@ private:
     struct compaction_state {
         // Prevents table from running major and minor compaction at the same time.
         rwlock lock;
+        // Controls if compaction is temporarily disabled. Disabled if value > 0.
+        int compaction_disabled = 0;
     };
     std::unordered_map<table*, compaction_state> _compaction_state;
 
@@ -248,6 +250,9 @@ public:
     // parameter job is a function that will carry the operation
     future<> run_custom_job(column_family* cf, sstables::compaction_type type, noncopyable_function<future<>(sstables::compaction_data&)> job);
 
+    // Run a function with compaction temporarily disabled for a table T.
+    future<> run_with_compaction_disabled(table* t, std::function<future<> ()> func);
+
     // Remove a column family from the compaction manager.
     // Cancel requests on cf and wait for a possible ongoing compaction on cf.
     future<> remove(column_family* cf);
@@ -264,6 +269,10 @@ public:
             return task->compacting_cf == cf && task->compaction_running;
         });
     };
+
+    bool compaction_disabled(table* t) const {
+        return _compaction_state.at(t).compaction_disabled > 0;
+    }
 
     // Stops ongoing compaction of a given type.
     void stop_compaction(sstring type);
