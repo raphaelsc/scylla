@@ -205,6 +205,17 @@ def test_concurrent_create_and_drop_keyspace(cql, this_dc):
             cql.execute(f"DROP KEYSPACE {keyspace}")
         cql.execute(f"CREATE KEYSPACE {keyspace} {ksdef}")
 
+def test_storage_options(cql, scylla_only):
+    ksdef = "WITH REPLICATION = { 'class' : 'SimpleStrategy', 'replication_factor' : '1' } " \
+            "AND STORAGE = { 'type' : 'S3', 'bucket' : '42', 'key_id' : '43', 'endpoint' : 'localhost' }"
+    with new_test_keyspace(cql, ksdef) as keyspace:
+        res = cql.execute(f"SELECT * FROM system_schema.keyspaces WHERE keyspace_name = '{keyspace}'")
+        info = res.one().storage
+        assert info['type'] == 'S3'
+        assert info['bucket'] == '42'
+        assert info['key_id'] == '43'
+        assert info['endpoint'] == 'localhost'
+
 # TODO: more tests for "WITH REPLICATION" syntax in CREATE TABLE.
 # TODO: check the "AND DURABLE_WRITES" option of CREATE TABLE.
 # TODO: confirm case insensitivity without quotes, and case sensitivity with them.
