@@ -37,9 +37,12 @@
 
 #include <boost/intrusive/list.hpp>
 
+class database;
+
 namespace db {
 
 class large_data_handler;
+class system_distributed_keyspace;
 class config;
 
 }   // namespace db
@@ -58,7 +61,9 @@ class sstables_manager {
             boost::intrusive::member_hook<sstable, sstable::manager_link_type, &sstable::_manager_link>,
             boost::intrusive::constant_time_size<false>>;
 private:
+    database& _db;
     db::large_data_handler& _large_data_handler;
+    sharded<db::system_distributed_keyspace>& _sys_dist_ks;
     const db::config& _db_config;
     gms::feature_service& _features;
     // _sstables_format is the format used for writing new sstables.
@@ -79,7 +84,7 @@ private:
     promise<> _done;
     cache_tracker& _cache_tracker;
 public:
-    explicit sstables_manager(db::large_data_handler& large_data_handler, const db::config& dbcfg, gms::feature_service& feat, cache_tracker&);
+    explicit sstables_manager(database& db, db::large_data_handler& large_data_handler, sharded<db::system_distributed_keyspace>& sys_dist_ks, const db::config& dbcfg, gms::feature_service& feat, cache_tracker&);
     ~sstables_manager();
 
     // Constructs a shared sstable
@@ -99,6 +104,10 @@ public:
 
     void set_format(sstable_version_types format) noexcept { _format = format; }
     sstables::sstable::version_types get_highest_supported_format() const noexcept { return _format; }
+
+    future<> add_shared_sstable_owner(sstable& sst);
+    future<bool> remove_shared_sstable_owner(sstable& sst);
+    future<std::vector<sstring>> shared_sstables_owned_by(utils::UUID table_id);
 
     // Wait until all sstables managed by this sstables_manager instance
     // (previously created by make_sstable()) have been disposed of:

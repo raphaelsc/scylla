@@ -264,6 +264,16 @@ future<> connection::close() {
     co_await _in.close();
 }
 
+class s3_file_handle_impl : public file_handle_impl {
+    client_ptr _client;
+    sstring _path;
+public:
+    s3_file_handle_impl(client_ptr ptr, sstring path) : _client(std::move(ptr)), _path(std::move(path)) { }
+    virtual ~s3_file_handle_impl() = default;
+    virtual std::unique_ptr<file_handle_impl> clone() const override;
+    virtual shared_ptr<file_impl> to_file() && override;
+};
+
 class s3_file_impl : public file_impl {
     client_ptr _client;
     sstring _path;
@@ -299,7 +309,7 @@ public:
     }
 
     virtual std::unique_ptr<seastar::file_handle_impl> dup() override {
-        unsupported(__FUNCTION__); // FIXME
+        return std::make_unique<s3_file_handle_impl>(s3_file_handle_impl(_client, _path));
     }
 
     virtual future<temporary_buffer<uint8_t>> dma_read_bulk(uint64_t offset, size_t size, const io_priority_class& pc) override {
@@ -308,13 +318,23 @@ public:
     }
 
     virtual future<size_t> read_dma(uint64_t pos, void* buffer, size_t len, const io_priority_class& pc) override {
-        unsupported(__FUNCTION__); // FIXME
+        auto buf = co_await _client->get_object(_path, pos, len);
+        std::copy_n(buf.get(), buf.size(), reinterpret_cast<uint8_t*>(buffer));
+        co_return size_t(buf.size());
     }
 
     virtual future<size_t> read_dma(uint64_t pos, std::vector<iovec> iov, const io_priority_class& pc) override {
         unsupported(__FUNCTION__); // FIXME
     }
 };
+
+std::unique_ptr<file_handle_impl> s3_file_handle_impl::clone() const {
+    return std::make_unique<s3_file_handle_impl>(s3_file_handle_impl(_client, _path));
+}
+
+shared_ptr<file_impl> s3_file_handle_impl::to_file() && {
+    return make_shared<s3_file_impl>(s3_file_impl(_client, _path));
+}
 
 connection_ptr::~connection_ptr() {
     if (!_ptr || !_ptr.owned() || _ptr->closed()) {

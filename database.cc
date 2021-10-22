@@ -319,7 +319,7 @@ void database::setup_scylla_memory_diagnostics_producer() {
 }
 
 database::database(const db::config& cfg, database_config dbcfg, service::migration_notifier& mn, gms::feature_service& feat, const locator::shared_token_metadata& stm,
-        abort_source& as, sharded<semaphore>& sst_dir_sem, utils::cross_shard_barrier barrier)
+        abort_source& as, sharded<semaphore>& sst_dir_sem, sharded<db::system_distributed_keyspace>& sys_dist_ks, utils::cross_shard_barrier barrier)
     : _stats(make_lw_shared<db_stats>())
     , _cl_stats(std::make_unique<cell_locker_stats>())
     , _cfg(cfg)
@@ -363,8 +363,8 @@ database::database(const db::config& cfg, database_config dbcfg, service::migrat
               _cfg.compaction_large_cell_warning_threshold_mb()*1024*1024,
               _cfg.compaction_rows_count_warning_threshold()))
     , _nop_large_data_handler(std::make_unique<db::nop_large_data_handler>())
-    , _user_sstables_manager(std::make_unique<sstables::sstables_manager>(*_large_data_handler, _cfg, feat, _row_cache_tracker))
-    , _system_sstables_manager(std::make_unique<sstables::sstables_manager>(*_nop_large_data_handler, _cfg, feat, _row_cache_tracker))
+    , _user_sstables_manager(std::make_unique<sstables::sstables_manager>(*this, *_large_data_handler, sys_dist_ks, _cfg, feat, _row_cache_tracker))
+    , _system_sstables_manager(std::make_unique<sstables::sstables_manager>(*this, *_nop_large_data_handler, sys_dist_ks, _cfg, feat, _row_cache_tracker))
     , _result_memory_limiter(dbcfg.available_memory / 10)
     , _data_listeners(std::make_unique<db::data_listeners>())
     , _mnotifier(mn)
@@ -2152,6 +2152,33 @@ future<> database::flush_all_memtables() {
 future<> database::flush(const sstring& ksname, const sstring& cfname) {
     auto& cf = find_column_family(ksname, cfname);
     return cf.flush();
+}
+
+future<std::vector<sstring>>
+database::share_sstables_with_new_owner(db::system_distributed_keyspace& sys_dist_ks, gms::inet_address owner, sstring ks_name, sstring cf_name) {
+    std::vector<sstring> ret;
+    auto& cf = find_column_family(ks_name, cf_name);
+
+    cf.disable_auto_compaction();
+    auto defer = [&cf] () mutable {
+        cf.enable_auto_compaction();
+    };
+
+    // flush memtables to guarantee that all data can be retrieved through sstable names.
+    co_await cf.flush();
+
+    // retrieve sstable names with no ongoing compaction to guarantee that no data is missed
+    co_await cf.run_with_compaction_disabled([&] () mutable {
+        ret = boost::copy_range<std::vector<sstring>>(*cf.get_sstables() | boost::adaptors::transformed(std::mem_fn(&sstables::sstable::get_filename)));
+        return make_ready_future<>();
+    });
+    // mark new node as co-owner of shared sstables
+    auto& table_id = find_uuid(cf.schema());
+    for (auto& sstable : ret) {
+        co_await sys_dist_ks.add_shared_sstable_owner(table_id, sstable, owner);
+    }
+
+    co_return ret;
 }
 
 future<> database::truncate(sstring ksname, sstring cfname, timestamp_func tsf) {

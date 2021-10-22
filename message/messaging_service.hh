@@ -47,6 +47,15 @@
 #include <optional>
 #include <seastar/net/tls.hh>
 
+struct sstable_list_cmd_request {
+    sstring ks_name;
+    sstring cf_name;
+};
+
+struct sstable_list_cmd_response {
+    std::vector<sstring> sstable_names;
+};
+
 // forward declarations
 namespace streaming {
     class prepare_message;
@@ -156,7 +165,8 @@ enum class messaging_verb : int32_t {
     RAFT_READ_QUORUM = 52,
     RAFT_READ_QUORUM_REPLY = 53,
     RAFT_EXECUTE_READ_BARRIER_ON_LEADER = 54,
-    LAST = 55,
+    SSTABLE_LIST_CMD = 55,
+    LAST = 56,
 };
 
 } // namespace netw
@@ -406,6 +416,11 @@ public:
     void register_node_ops_cmd(std::function<future<node_ops_cmd_response> (const rpc::client_info& cinfo, node_ops_cmd_request)>&& func);
     future<> unregister_node_ops_cmd();
     future<node_ops_cmd_response> send_node_ops_cmd(msg_addr id, node_ops_cmd_request);
+
+    // Wrapper for SSTABLE_LIST_CMD
+    void register_sstable_list_cmd(std::function<future<sstable_list_cmd_response> (const rpc::client_info& cinfo, sstable_list_cmd_request)>&& func);
+    future<> unregister_sstable_list_cmd();
+    future<sstable_list_cmd_response> send_sstable_list_cmd(msg_addr id, sstable_list_cmd_request);
 
     // Wrapper for GOSSIP_ECHO verb
     void register_gossip_echo(std::function<future<> (const rpc::client_info& cinfo, rpc::optional<int64_t> generation_number)>&& func);

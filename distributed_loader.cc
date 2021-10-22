@@ -20,6 +20,7 @@
  */
 
 #include <seastar/util/closeable.hh>
+#include <seastar/core/coroutine.hh>
 #include "distributed_loader.hh"
 #include "database.hh"
 #include "db/config.hh"
@@ -96,14 +97,14 @@ public:
 };
 
 future<>
-distributed_loader::process_sstable_dir(sharded<sstables::sstable_directory>& dir, bool sort_sstables_according_to_owner) {
+distributed_loader::process_sstable_dir(sharded<sstables::sstable_directory>& dir, bool sort_sstables_according_to_owner, filter_t filter_func) {
     return dir.invoke_on(0, [] (const sstables::sstable_directory& d) {
         return utils::directories::verify_owner_and_mode(d.sstable_dir());
-    }).then([&dir, sort_sstables_according_to_owner] {
-      return dir.invoke_on_all([&dir, sort_sstables_according_to_owner] (sstables::sstable_directory& d) {
+    }).then([&dir, sort_sstables_according_to_owner, filter_func] {
+      return dir.invoke_on_all([&dir, sort_sstables_according_to_owner, filter_func] (sstables::sstable_directory& d) {
         // Supposed to be called with the node either down or on behalf of maintenance tasks
         // like nodetool refresh
-        return d.process_sstable_dir(service::get_local_streaming_priority(), sort_sstables_according_to_owner).then([&dir, &d] {
+        return d.process_sstable_dir(service::get_local_streaming_priority(), sort_sstables_according_to_owner, filter_func).then([&dir, &d] {
             return d.move_foreign_sstables(dir);
         });
       });
@@ -387,6 +388,74 @@ distributed_loader::process_upload_dir(distributed<database>& db, distributed<db
     });
 }
 
+future<>
+distributed_loader::process_sstable_names(distributed<database>& db, sstring ks, sstring cf, std::unordered_set<sstring> sstable_names) {
+    std::vector<sstables::entry_descriptor> descriptors;
+    for (auto& sstable_name : sstable_names) {
+        try {
+            auto path = fs::path(sstable_name);
+            auto desc = sstables::entry_descriptor::make_descriptor(path.parent_path().string(), path.filename().string());
+            descriptors.push_back(std::move(desc));
+        } catch(...) {
+            dblog.error("failed to make desc for {}", sstable_name);
+            abort();
+        }
+    }
+    dblog.info("No descriptors found for S3-backed table {}.{}", ks, cf);
+    if (descriptors.empty()) {
+        co_return;
+    }
+
+    global_column_family_ptr global_table(db, ks, cf);
+    auto source_dir = fs::path(descriptors.front().sstdir);
+
+    dblog.info("Processing directory {} to load {} sstable generation(s)", source_dir, descriptors.size());
+
+    sharded<sstables::sstable_directory> directory;
+    co_await directory.start(source_dir, db.local().get_config().initial_sstable_loading_concurrency(), std::ref(db.local().get_sharded_sst_dir_semaphore()),
+        sstables::sstable_directory::need_mutate_level::no,
+        sstables::sstable_directory::lack_of_toc_fatal::no,
+        sstables::sstable_directory::enable_dangerous_direct_import_of_cassandra_counters(db.local().get_config().enable_dangerous_direct_import_of_cassandra_counters()),
+        sstables::sstable_directory::allow_loading_materialized_view::no,
+        [&global_table] (fs::path dir, int64_t gen, sstables::sstable_version_types v, sstables::sstable_format_types f) {
+            return global_table->make_sstable(dir.native(), gen, v, f, &error_handler_gen_for_upload_dir);
+        });
+
+    co_await lock_table(directory, db, ks, cf);
+    co_await directory.local().process_sstable_descriptors(std::move(descriptors), service::get_local_streaming_priority(), true).then([&directory] {
+        return directory.local().move_foreign_sstables(directory);
+    });
+
+    auto generation = co_await highest_generation_seen(directory);
+    auto shard_generation_base = generation / smp::count + 1;
+    std::vector<std::atomic<int64_t>> shard_gen(smp::count);
+    for (shard_id s = 0; s < smp::count; ++s) {
+        shard_gen[s].store(shard_generation_base * smp::count + s, std::memory_order_relaxed);
+    }
+
+    size_t loaded = co_await directory.map_reduce0([&db, &global_table] (sstables::sstable_directory& dir) -> future<size_t> {
+        auto& table = *global_table;
+        size_t new_sstables = 0;
+
+        // FIXME: if new node has different smp count, then we've to reshard sstables before loading them
+
+        co_await dir.do_for_each_sstable([&table, &new_sstables] (sstables::shared_sstable sst) -> future<> {
+            dblog.info("Loading {}", sst->get_filename());
+            new_sstables += 1;
+            return table.add_sstable_and_update_cache(sst).handle_exception([sst] (std::exception_ptr ep) {
+                dblog.error("Failed to load {}: {}. Aborting.", sst->toc_filename(), ep);
+                abort();
+            });
+        });
+
+        co_return new_sstables;
+    }, size_t(0), std::plus<size_t>());
+    dblog.info("Loaded {} SSTables for table {}.{}", loaded, ks, cf);
+
+    co_await directory.stop();
+    co_return;
+}
+
 future<std::tuple<utils::UUID, std::vector<std::vector<sstables::shared_sstable>>>>
 distributed_loader::get_sstables_from_upload_dir(distributed<database>& db, sstring ks, sstring cf) {
     return seastar::async([&db, ks = std::move(ks), cf = std::move(cf)] {
@@ -465,7 +534,13 @@ future<> distributed_loader::handle_sstables_pending_delete(sstring pending_dele
 }
 
 future<> distributed_loader::populate_column_family(distributed<database>& db, sstring sstdir, sstring ks, sstring cf) {
-    return async([&db, sstdir = std::move(sstdir), ks = std::move(ks), cf = std::move(cf)] {
+    if (db.local().find_keyspace(ks).metadata()->get_storage_options().type == storage_options::storage_type::S3) {
+        auto table_id = db.local().find_uuid(ks, cf);
+        auto sstable_names = co_await db.local().get_user_sstables_manager().shared_sstables_owned_by(table_id);
+        co_await process_sstable_names(db, ks, cf, boost::copy_range<std::unordered_set<sstring>>(sstable_names));
+        co_return;
+    }
+    co_return co_await async([&db, sstdir = std::move(sstdir), ks = std::move(ks), cf = std::move(cf)] {
         assert(this_shard_id() == 0);
         // First pass, cleanup temporary sstable directories and sstables pending delete.
         cleanup_column_family_temp_sst_dirs(sstdir).get();
@@ -639,33 +714,45 @@ future<> distributed_loader::init_non_system_keyspaces(distributed<database>& db
             }
         }).get();
 
-        std::vector<future<>> futures;
+        auto populate_keyspaces = [&] (std::function<bool(const sstring&)> filter_func) mutable {
+            std::vector<future<>> futures;
 
-        // treat "dirs" as immutable to avoid modifying it while still in 
-        // a range-iteration. Also to simplify the "finally"
-        for (auto i = dirs.begin(); i != dirs.end();) {
-            auto& ks_name = i->first;
-            auto e = dirs.equal_range(ks_name).second;
-            auto j = i++;
-            // might have more than one dir for a keyspace iff data_file_directories is > 1 and
-            // somehow someone placed sstables in more than one of them for a given ks. (import?) 
-            futures.emplace_back(parallel_for_each(j, e, [&](const std::pair<sstring, sstring>& p) {
-                auto& datadir = p.second;
-                return distributed_loader::populate_keyspace(db, datadir, ks_name);
-            }).finally([&] {
-                return db.invoke_on_all([ks_name] (database& db) {
-                    // can be false if running test environment
-                    // or ks_name was just a borked directory not representing
-                    // a keyspace in schema tables.
-                    if (db.has_keyspace(ks_name)) {
-                        db.find_keyspace(ks_name).mark_as_populated();
-                    }
-                    return make_ready_future<>();
-                });
-            }));
-        }
+            // treat "dirs" as immutable to avoid modifying it while still in
+            // a range-iteration. Also to simplify the "finally"
+            for (auto i = dirs.begin(); i != dirs.end();) {
+                auto &ks_name = i->first;
+                if (!filter_func(ks_name)) {
+                    i++;
+                    continue;
+                }
+                auto e = dirs.equal_range(ks_name).second;
+                auto j = i++;
+                // might have more than one dir for a keyspace iff data_file_directories is > 1 and
+                // somehow someone placed sstables in more than one of them for a given ks. (import?)
+                futures.emplace_back(parallel_for_each(j, e, [&](const std::pair<sstring, sstring> &p) {
+                    auto &datadir = p.second;
+                    return distributed_loader::populate_keyspace(db, datadir, ks_name);
+                }).finally([&] {
+                    return db.invoke_on_all([ks_name](database &db) {
+                        // can be false if running test environment
+                        // or ks_name was just a borked directory not representing
+                        // a keyspace in schema tables.
+                        if (db.has_keyspace(ks_name)) {
+                            db.find_keyspace(ks_name).mark_as_populated();
+                        }
+                        return make_ready_future<>();
+                    });
+                }));
+            }
+            when_all_succeed(futures.begin(), futures.end()).discard_result().get();
+        };
 
-        when_all_succeed(futures.begin(), futures.end()).discard_result().get();
+        populate_keyspaces([] (const sstring& ks_name) {
+            return is_internal_keyspace(ks_name);
+        });
+        populate_keyspaces([] (const sstring& ks_name) {
+            return !is_internal_keyspace(ks_name);
+        });
 
         db.invoke_on_all([] (database& db) {
             return parallel_for_each(db.get_non_system_column_families(), [] (lw_shared_ptr<table> table) {

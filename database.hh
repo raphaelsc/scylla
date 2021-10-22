@@ -120,6 +120,7 @@ class extensions;
 class rp_handle;
 class data_listeners;
 class large_data_handler;
+class system_distributed_keyspace;
 
 future<> system_keyspace_make(database& db, service::storage_service& ss);
 
@@ -1065,6 +1066,8 @@ private:
     const storage_options& _storage_options;
 
 public:
+    const storage_options& get_storage_options() const { return _storage_options; }
+
     void update_off_strategy_trigger();
     void enable_off_strategy_trigger();
 };
@@ -1430,7 +1433,7 @@ public:
 
     future<> parse_system_tables(distributed<service::storage_proxy>&);
     database(const db::config&, database_config dbcfg, service::migration_notifier& mn, gms::feature_service& feat, const locator::shared_token_metadata& stm,
-            abort_source& as, sharded<semaphore>& sst_dir_sem, utils::cross_shard_barrier barrier = utils::cross_shard_barrier(utils::cross_shard_barrier::solo{}) /* for single-shard usage */);
+            abort_source& as, sharded<semaphore>& sst_dir_sem, sharded<db::system_distributed_keyspace>& sys_dist_ks, utils::cross_shard_barrier barrier = utils::cross_shard_barrier(utils::cross_shard_barrier::solo{}) /* for single-shard usage */);
     database(database&&) = delete;
     ~database();
 
@@ -1586,6 +1589,8 @@ public:
 
     future<> flush_all_memtables();
     future<> flush(const sstring& ks, const sstring& cf);
+
+    future<std::vector<sstring>> share_sstables_with_new_owner(db::system_distributed_keyspace& sys_dist_ks, gms::inet_address owner, sstring ks_name, sstring cf_name);
 
     // See #937. Truncation now requires a callback to get a time stamp
     // that must be guaranteed to be the same for all shards.

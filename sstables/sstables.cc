@@ -1426,9 +1426,14 @@ future<> sstable::create_data() noexcept {
     file_open_options opt;
     opt.extent_allocation_size_hint = 32 << 20;
     opt.sloppy_size = true;
-    return open_or_create_data(oflags, std::move(opt)).then([this, oflags] {
+    co_await open_or_create_data(oflags, std::move(opt)).then([this, oflags] {
         _open_mode.emplace(oflags);
     });
+
+    if (_storage_options.type == storage_options::storage_type::S3) {
+        co_await _manager.add_shared_sstable_owner(*this);
+    }
+    co_return;
 }
 
 future<> sstable::drop_caches() {
@@ -2864,6 +2869,12 @@ delete_sstables(std::vector<sstring> tocs) {
 future<>
 sstable::unlink() noexcept {
     if (_storage_options.type == storage_options::storage_type::S3) {
+        auto owners_left = co_await _manager.remove_shared_sstable_owner(*this);
+        if (owners_left) {
+            sstlog.info("Found owners for S3-backed sstable {}, so still not unlinking it", get_filename());
+            co_return;
+        }
+
         sstlog.error("FIXME: unlinking S3 is neither atomic nor safe - it does not even sync with TOC");
         co_await read_toc();
         auto client = s3::make_client(s3::make_basic_connection_factory(_storage_options.endpoint, 9000));

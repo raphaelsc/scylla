@@ -23,7 +23,9 @@
 #include "sstables/sstables_manager.hh"
 #include "sstables/partition_index_cache.hh"
 #include "sstables/sstables.hh"
+#include "database.hh"
 #include "db/config.hh"
+#include "db/system_distributed_keyspace.hh"
 #include "gms/feature.hh"
 #include "gms/feature_service.hh"
 
@@ -32,8 +34,8 @@ namespace sstables {
 logging::logger smlogger("sstables_manager");
 
 sstables_manager::sstables_manager(
-    db::large_data_handler& large_data_handler, const db::config& dbcfg, gms::feature_service& feat, cache_tracker& ct)
-    : _large_data_handler(large_data_handler), _db_config(dbcfg), _features(feat), _cache_tracker(ct) {
+    database& db, db::large_data_handler& large_data_handler, sharded<db::system_distributed_keyspace>& sys_dist_ks, const db::config& dbcfg, gms::feature_service& feat, cache_tracker& ct)
+    : _db(db), _large_data_handler(large_data_handler), _sys_dist_ks(sys_dist_ks), _db_config(dbcfg), _features(feat), _cache_tracker(ct) {
 }
 
 sstables_manager::~sstables_manager() {
@@ -101,6 +103,25 @@ future<> sstables_manager::close() {
     _closing = true;
     maybe_done();
     return _done.get_future();
+}
+
+future<> sstables_manager::add_shared_sstable_owner(sstable& sst) {
+    auto sstable_name = sst.get_filename();
+    gms::inet_address owner(_db_config.rpc_address());
+    auto table_id = _db.find_uuid(sst.get_schema());
+    co_return co_await _sys_dist_ks.local().add_shared_sstable_owner(table_id, sstable_name, owner);
+}
+
+future<bool> sstables_manager::remove_shared_sstable_owner(sstable& sst) {
+    auto sstable_name = sst.get_filename();
+    gms::inet_address owner(_db_config.rpc_address());
+    auto table_id = _db.find_uuid(sst.get_schema());
+    co_return co_await _sys_dist_ks.local().remove_shared_sstable_owner(table_id, sstable_name, owner);
+}
+
+future<std::vector<sstring>> sstables_manager::shared_sstables_owned_by(utils::UUID table_id) {
+    gms::inet_address owner(_db_config.rpc_address());
+    co_return co_await _sys_dist_ks.local().shared_sstables_owned_by(owner, table_id);
 }
 
 }   // namespace sstables

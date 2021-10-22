@@ -881,7 +881,7 @@ int main(int ac, char** av) {
             supervisor::notify("starting database");
             debug::the_database = &db;
             db.start(std::ref(*cfg), dbcfg, std::ref(mm_notifier), std::ref(feature_service), std::ref(token_metadata),
-                    std::ref(stop_signal.as_sharded_abort_source()), std::ref(sst_dir_semaphore), utils::cross_shard_barrier()).get();
+                    std::ref(stop_signal.as_sharded_abort_source()), std::ref(sst_dir_semaphore), std::ref(sys_dist_ks), utils::cross_shard_barrier()).get();
             auto stop_database_and_sstables = defer_verbose_shutdown("database", [&db] {
                 // #293 - do not stop anything - not even db (for real)
                 //return db.stop();
@@ -971,6 +971,12 @@ int main(int ac, char** av) {
             supervisor::notify("loading system sstables");
 
             distributed_loader::ensure_system_table_directories(db).get();
+
+            // start sys_dist_ks earlier for population of s3 backed keyspaces.
+            sys_dist_ks.start(std::ref(qp), std::ref(mm), std::ref(proxy)).get();
+            auto stop_sdks = defer_verbose_shutdown("system distributed keyspace", [] {
+                sys_dist_ks.invoke_on_all(&db::system_distributed_keyspace::stop).get();
+            });
 
             // making compaction manager api available, after system keyspace has already been established.
             api::set_server_compaction_manager(ctx).get();
@@ -1153,11 +1159,6 @@ int main(int ac, char** av) {
             gossiper.local().register_(ss.local().shared_from_this());
             auto stop_listening = defer_verbose_shutdown("storage service notifications", [&gossiper, &ss] {
                 gossiper.local().unregister_(ss.local().shared_from_this()).get();
-            });
-
-            sys_dist_ks.start(std::ref(qp), std::ref(mm), std::ref(proxy)).get();
-            auto stop_sdks = defer_verbose_shutdown("system distributed keyspace", [] {
-                sys_dist_ks.invoke_on_all(&db::system_distributed_keyspace::stop).get();
             });
 
             // Register storage_service to migration_notifier so we can update

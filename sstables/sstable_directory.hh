@@ -167,7 +167,16 @@ public:
     // This function doesn't change on-storage state. If files are to be removed, a separate call
     // (commit_file_removals()) has to be issued. This is to make sure that all instances of this
     // class in a sharded service have the opportunity to validate its files.
-    future<> process_sstable_dir(const ::io_priority_class& iop, bool sort_sstables_according_to_owner = true);
+
+    using filter_t = std::function<bool(int64_t)>;
+    static filter_t default_filter_func() {
+        static filter_t f = [] (int64_t gen) { return true; };
+        return f;
+    }
+
+    future<> process_sstable_dir(const ::io_priority_class& iop, bool sort_sstables_according_to_owner = true, filter_t filter_func = default_filter_func());
+
+    future<> process_sstable_descriptors(std::vector<sstables::entry_descriptor> descriptors, const ::io_priority_class& iop, bool sort_sstables_according_to_owner = true);
 
     // Sort the sstable according to owner
     future<> sort_sstable(sstables::shared_sstable sst);

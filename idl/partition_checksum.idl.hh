@@ -142,3 +142,12 @@ struct node_ops_cmd_response {
     // Optional field, set by query_pending_ops cmd
     std::list<utils::UUID> pending_ops;
 };
+
+struct sstable_list_cmd_request {
+    sstring ks_name;
+    sstring cf_name;
+};
+
+struct sstable_list_cmd_response {
+    std::vector<sstring> sstable_names;
+};

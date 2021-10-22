@@ -38,6 +38,7 @@
 #include "utils/bit_cast.hh"
 #include "service/migration_manager.hh"
 #include "partition_range_compat.hh"
+#include "db/storage_options.hh"
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/split.hpp>
@@ -1298,11 +1299,19 @@ future<> repair_service::bootstrap_with_repair(locator::token_metadata_ptr tmptr
         auto reason = streaming::stream_reason::bootstrap;
         // Calculate number of ranges to sync data
         size_t nr_ranges_total = 0;
+
+        auto streaming_alternative = [] (keyspace& ks) {
+            return ks.metadata()->get_storage_options().type == storage_options::storage_type::S3;
+        };
+
         for (auto& keyspace_name : keyspaces) {
             if (!db.local().has_keyspace(keyspace_name)) {
                 continue;
             }
             auto& ks = db.local().find_keyspace(keyspace_name);
+            if (streaming_alternative(ks)) {
+                continue;
+            }
             auto& strat = ks.get_replication_strategy();
             dht::token_range_vector desired_ranges = strat.get_pending_address_ranges(tmptr, tokens, myip).get0();
             seastar::thread::maybe_yield();
@@ -1319,6 +1328,9 @@ future<> repair_service::bootstrap_with_repair(locator::token_metadata_ptr tmptr
                 continue;
             }
             auto& ks = db.local().find_keyspace(keyspace_name);
+            if (streaming_alternative(ks)) {
+                continue;
+            }
             auto& strat = ks.get_replication_strategy();
             dht::token_range_vector desired_ranges = strat.get_pending_address_ranges(tmptr, tokens, myip).get0();
             bool find_node_in_local_dc_only = strat.get_type() == locator::replication_strategy_type::network_topology;
