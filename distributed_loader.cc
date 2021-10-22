@@ -20,6 +20,7 @@
  */
 
 #include <seastar/util/closeable.hh>
+#include <seastar/core/coroutine.hh>
 #include "distributed_loader.hh"
 #include "database.hh"
 #include "db/config.hh"
@@ -96,14 +97,14 @@ public:
 };
 
 future<>
-distributed_loader::process_sstable_dir(sharded<sstables::sstable_directory>& dir, bool sort_sstables_according_to_owner) {
+distributed_loader::process_sstable_dir(sharded<sstables::sstable_directory>& dir, bool sort_sstables_according_to_owner, filter_t filter_func) {
     return dir.invoke_on(0, [] (const sstables::sstable_directory& d) {
         return utils::directories::verify_owner_and_mode(d.sstable_dir());
-    }).then([&dir, sort_sstables_according_to_owner] {
-      return dir.invoke_on_all([&dir, sort_sstables_according_to_owner] (sstables::sstable_directory& d) {
+    }).then([&dir, sort_sstables_according_to_owner, filter_func] {
+      return dir.invoke_on_all([&dir, sort_sstables_according_to_owner, filter_func] (sstables::sstable_directory& d) {
         // Supposed to be called with the node either down or on behalf of maintenance tasks
         // like nodetool refresh
-        return d.process_sstable_dir(service::get_local_streaming_priority(), sort_sstables_according_to_owner).then([&dir, &d] {
+        return d.process_sstable_dir(service::get_local_streaming_priority(), sort_sstables_according_to_owner, filter_func).then([&dir, &d] {
             return d.move_foreign_sstables(dir);
         });
       });
@@ -385,6 +386,80 @@ distributed_loader::process_upload_dir(distributed<database>& db, distributed<db
 
         dblog.info("Loaded {} SSTables into {}", loaded, datadir.native());
     });
+}
+
+future<>
+distributed_loader::process_sstable_names(distributed<database>& db, sstring ks, sstring cf, std::unordered_set<sstring> sstable_names) {
+    using generation_list_t = std::unordered_set<int64_t>;
+    std::unordered_map<sstring, generation_list_t> sst_generations;
+    for (auto& sstable_name : sstable_names) {
+        try {
+            auto path = fs::path(sstable_name);
+            auto comps = sstables::entry_descriptor::make_descriptor(path.parent_path().string(), path.filename().string());
+            sst_generations[comps.sstdir].insert(comps.generation);
+        } catch(...) {
+            dblog.error("failed to make desc for {}", sstable_name);
+            abort();
+        }
+    }
+
+    global_column_family_ptr global_table(db, ks, cf);
+
+    for (auto& entry : sst_generations) {
+        dblog.info("Processing directory {} to load sstable generations {}", entry.first, entry.second);
+
+        sharded<sstables::sstable_directory> directory;
+        auto source_dir = fs::path(entry.first);
+        co_await directory.start(source_dir, db.local().get_config().initial_sstable_loading_concurrency(), std::ref(db.local().get_sharded_sst_dir_semaphore()),
+            sstables::sstable_directory::need_mutate_level::no,
+            sstables::sstable_directory::lack_of_toc_fatal::no,
+            sstables::sstable_directory::enable_dangerous_direct_import_of_cassandra_counters(db.local().get_config().enable_dangerous_direct_import_of_cassandra_counters()),
+            sstables::sstable_directory::allow_loading_materialized_view::no,
+            [&global_table] (fs::path dir, int64_t gen, sstables::sstable_version_types v, sstables::sstable_format_types f) {
+                return global_table->make_sstable(dir.native(), gen, v, f, &error_handler_gen_for_upload_dir);
+            });
+
+        auto stop = deferred_stop(directory);
+
+        co_await lock_table(directory, db, ks, cf);
+        filter_t filter = [&sst_generations, &dir = entry.first] (int64_t gen) -> bool {
+            return sst_generations[dir].contains(gen);
+        };
+        co_await process_sstable_dir(directory, true, filter);
+
+        auto generation = highest_generation_seen(directory).get0();
+        auto shard_generation_base = generation / smp::count + 1;
+        std::vector<std::atomic<int64_t>> shard_gen(smp::count);
+        for (shard_id s = 0; s < smp::count; ++s) {
+            shard_gen[s].store(shard_generation_base * smp::count + s, std::memory_order_relaxed);
+        }
+
+        auto destination_dir = global_table->dir();
+
+        size_t loaded = co_await directory.map_reduce0([&db, &global_table, &destination_dir] (sstables::sstable_directory& dir) -> future<size_t> {
+            auto& table = *global_table;
+            std::vector<sstables::shared_sstable> new_sstables;
+
+            co_await dir.do_for_each_sstable([&table, &new_sstables, &destination_dir] (sstables::shared_sstable sst) -> future<> {
+                auto gen = table.calculate_generation_for_new_table();
+                dblog.info("Loading {} into {}, new generation {}", sst->get_filename(), destination_dir, gen);
+                return sst->create_links(destination_dir, gen).then([sst, &new_sstables] {
+                    new_sstables.push_back(sst);
+                });
+            });
+            // FIXME: if new node has different smp count, then we've to reshard sstables before loading them
+
+            for (auto& sst : new_sstables) {
+               co_await table.add_sstable_and_update_cache(sst).handle_exception([&sst] (std::exception_ptr ep) {
+                   dblog.error("Failed to load {}: {}. Aborting.", sst->toc_filename(), ep);
+                   abort();
+               });
+            }
+            co_return new_sstables.size();
+        }, size_t(0), std::plus<size_t>());
+        dblog.info("Loaded {} SSTables into {}", loaded, destination_dir);
+    }
+    co_return;
 }
 
 future<std::tuple<utils::UUID, std::vector<std::vector<sstables::shared_sstable>>>>

@@ -73,6 +73,8 @@
 class node_ops_cmd_request;
 class node_ops_cmd_response;
 class node_ops_info;
+struct sstable_list_cmd_request;
+struct sstable_list_cmd_response;
 enum class node_ops_cmd : uint32_t;
 class repair_service;
 namespace service {
@@ -779,6 +781,9 @@ public:
     future<node_ops_cmd_response> node_ops_cmd_handler(gms::inet_address coordinator, node_ops_cmd_request req);
     void node_ops_cmd_check(gms::inet_address coordinator, const node_ops_cmd_request& req);
     future<> node_ops_cmd_heartbeat_updater(const node_ops_cmd& cmd, utils::UUID uuid, std::list<gms::inet_address> nodes, lw_shared_ptr<bool> heartbeat_updater_done);
+
+    future<sstable_list_cmd_response> sstable_list_cmd_handler(gms::inet_address coordinator, sstable_list_cmd_request req);
+    future<> load_sstable_list(sstring ks_name, sstring cf_name, std::unordered_set<sstring> sstable_names);
 
     future<sstring> get_operation_mode();
 

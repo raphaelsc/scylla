@@ -1571,6 +1571,8 @@ public:
     future<> flush_all_memtables();
     future<> flush(const sstring& ks, const sstring& cf);
 
+    future<std::vector<sstring>> get_sstable_names(sstring ks_name, sstring cf_name);
+
     // See #937. Truncation now requires a callback to get a time stamp
     // that must be guaranteed to be the same for all shards.
     typedef std::function<future<db_clock::time_point>()> timestamp_func;

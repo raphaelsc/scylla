@@ -2107,6 +2107,32 @@ future<> database::flush(const sstring& ksname, const sstring& cfname) {
     return cf.flush();
 }
 
+future<std::vector<sstring>> database::get_sstable_names(sstring ks_name, sstring cf_name) {
+    std::vector<sstring> ret;
+    auto& cf = find_column_family(ks_name, cf_name);
+
+    cf.disable_auto_compaction();
+    // FIXME: silly way to guarantee that shared sstable remains alive. later switch to distributed table which holds refcount for shared ssts.
+    auto defer = [&cf] () mutable {
+        (void) with_gate(cf.async_gate(), [&cf] () -> future<> {
+            co_await sleep(std::chrono::minutes(5));
+            cf.enable_auto_compaction();
+            co_return;
+        });
+    };
+
+    // flush memtables to guarantee that all data can be retrieved through sstable names.
+    co_await cf.flush();
+
+    // retrieve sstable names with no ongoing compaction to guarantee that no data is missed
+    co_await cf.run_with_compaction_disabled([&] () mutable {
+        ret = boost::copy_range<std::vector<sstring>>(*cf.get_sstables() | boost::adaptors::transformed(std::mem_fn(&sstables::sstable::get_filename)));
+        return make_ready_future<>();
+    });
+
+    co_return ret;
+}
+
 future<> database::truncate(sstring ksname, sstring cfname, timestamp_func tsf) {
     auto& ks = find_keyspace(ksname);
     auto& cf = find_column_family(ksname, cfname);

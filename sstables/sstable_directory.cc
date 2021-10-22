@@ -163,7 +163,7 @@ sstable_directory::highest_version_seen() const {
 }
 
 future<>
-sstable_directory::process_sstable_dir(const ::io_priority_class& iop, bool sort_sstables_according_to_owner) {
+sstable_directory::process_sstable_dir(const ::io_priority_class& iop, bool sort_sstables_according_to_owner, filter_t filter_func) {
     dirlog.debug("Start processing directory {} for SSTables", _sstable_dir);
 
     // It seems wasteful that each shard is repeating this scan, and to some extent it is.
@@ -177,11 +177,13 @@ sstable_directory::process_sstable_dir(const ::io_priority_class& iop, bool sort
     //   to make sure they all update their own version of scan_state and then merge it.
     // - If all shards scan in parallel, they can start loading sooner. That is faster than having
     //   a separate step to fetch all files, followed by another step to distribute and process.
-    return do_with(scan_state{}, [this, sort_sstables_according_to_owner, &iop] (scan_state& state) {
+    return do_with(scan_state{}, std::move(filter_func), [this, sort_sstables_according_to_owner, &iop] (scan_state& state, filter_t& filter_func) {
         return lister::scan_dir(_sstable_dir, { directory_entry_type::regular },
-                [this, sort_sstables_according_to_owner, &state] (fs::path parent_dir, directory_entry de) {
+                [this, sort_sstables_according_to_owner, &state, &filter_func] (fs::path parent_dir, directory_entry de) {
             auto comps = sstables::entry_descriptor::make_descriptor(_sstable_dir.native(), de.name);
-            handle_component(state, std::move(comps), parent_dir / fs::path(de.name));
+            if (filter_func(comps.generation)) {
+                handle_component(state, std::move(comps), parent_dir / fs::path(de.name));
+            }
             return make_ready_future<>();
         }, &manifest_json_filter).then([this, sort_sstables_according_to_owner, &state, &iop] {
             // Always okay to delete files with a temporary TOC. We want to do it before we process

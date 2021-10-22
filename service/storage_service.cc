@@ -89,6 +89,7 @@
 #include "utils/generation-number.hh"
 #include <seastar/core/coroutine.hh>
 #include "utils/stall_free.hh"
+#include "distributed_loader.hh"
 
 #include <boost/algorithm/string/split.hpp>
 #include <boost/algorithm/string/classification.hpp>
@@ -2036,6 +2037,30 @@ void storage_service::run_bootstrap_ops() {
         }
     }
 
+    for (auto& cf : _db.local().get_non_system_column_families()) {
+        sstable_list_cmd_request req { .ks_name = cf->schema()->ks_name(), .cf_name = cf->schema()->cf_name() };
+
+        std::unordered_set<sstring> sstable_names;
+
+        parallel_for_each(sync_nodes, [this, &req, &sstable_names] (const gms::inet_address& node) {
+            if (node == get_broadcast_address()) {
+                return make_ready_future<>();
+            }
+
+            return _messaging.local().send_sstable_list_cmd(netw::msg_addr(node), req).then([node, &req, &sstable_names] (sstable_list_cmd_response resp) {
+                slogger.info("Got sstable_list_cmd response from node={} for {}.{}: list {}", node, req.ks_name, req.cf_name, resp.sstable_names);
+                sstable_names.insert(resp.sstable_names.begin(), resp.sstable_names.end());
+                return make_ready_future<>();
+            });
+        }).handle_exception([] (std::exception_ptr ep) {
+            abort();
+        }).get();
+
+        load_sstable_list(req.ks_name, req.cf_name, std::move(sstable_names)).get();
+    }
+    // FIXME: conditionally use streaming alternative based on configuration value.
+    return;
+
     std::unordered_set<gms::inet_address> nodes_unknown_verb;
     std::unordered_set<gms::inet_address> nodes_down;
     std::unordered_set<gms::inet_address> nodes_aborted;
@@ -2596,6 +2621,27 @@ future<node_ops_cmd_response> storage_service::node_ops_cmd_handler(gms::inet_ad
         node_ops_cmd_response resp(ok);
         return resp;
     });
+}
+
+template <class T>
+static std::vector<T> concat(std::vector<T> a, std::vector<T>&& b) {
+    a.reserve( a.size() + b.size());
+    a.insert(a.end(), b.begin(), b.end());
+    return a;
+}
+
+future<sstable_list_cmd_response> storage_service::sstable_list_cmd_handler(gms::inet_address coordinator, sstable_list_cmd_request req) {
+    slogger.info("sstable_list_cmd handler -> coordinator: {}, table: {}", coordinator, req.ks_name, req.cf_name);
+
+    return _db.map_reduce0([req] (database& db) {
+        return db.get_sstable_names(req.ks_name, req.cf_name);
+    }, std::vector<sstring>(), concat<sstring>).then([] (const std::vector<sstring> res) {
+        return sstable_list_cmd_response{ std::move(res) };
+    });
+}
+
+future<> storage_service::load_sstable_list(sstring ks_name, sstring cf_name, std::unordered_set<sstring> sstable_names) {
+    return distributed_loader::process_sstable_names(_db, std::move(ks_name), std::move(cf_name), std::move(sstable_names));
 }
 
 // Runs inside seastar::async context
@@ -3289,12 +3335,20 @@ void storage_service::init_messaging_service() {
             return ss.node_ops_cmd_handler(coordinator, std::move(req));
         });
     });
+
+    _messaging.local().register_sstable_list_cmd([this] (const rpc::client_info& cinfo, sstable_list_cmd_request req) {
+        auto coordinator = cinfo.retrieve_auxiliary<gms::inet_address>("baddr");
+        return container().invoke_on(0, [coordinator, req = std::move(req)] (auto& ss) mutable {
+            return ss.sstable_list_cmd_handler(coordinator, std::move(req));
+        });
+    });
 }
 
 future<> storage_service::uninit_messaging_service() {
     return when_all_succeed(
         _messaging.local().unregister_replication_finished(),
-        _messaging.local().unregister_node_ops_cmd()
+        _messaging.local().unregister_node_ops_cmd(),
+        _messaging.local().unregister_sstable_list_cmd()
     ).discard_result();
 }
 

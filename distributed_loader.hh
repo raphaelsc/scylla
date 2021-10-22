@@ -57,13 +57,19 @@ class storage_service;
 
 }
 
+using filter_t = std::function<bool(int64_t)>;
+static inline filter_t default_filter_func() {
+    static filter_t f = [] (int64_t gen) { return true; };
+    return f;
+}
+
 class distributed_loader {
     friend class distributed_loader_for_tests;
 
     static future<> reshape(sharded<sstables::sstable_directory>& dir, sharded<database>& db, sstables::reshape_mode mode,
             sstring ks_name, sstring table_name, sstables::compaction_sstable_creator_fn creator);
     static future<> reshard(sharded<sstables::sstable_directory>& dir, sharded<database>& db, sstring ks_name, sstring table_name, sstables::compaction_sstable_creator_fn creator);
-    static future<> process_sstable_dir(sharded<sstables::sstable_directory>& dir, bool sort_sstables_according_to_owner = true);
+    static future<> process_sstable_dir(sharded<sstables::sstable_directory>& dir, bool sort_sstables_according_to_owner = true, filter_t filter_func = default_filter_func());
     static future<> lock_table(sharded<sstables::sstable_directory>& dir, sharded<database>& db, sstring ks_name, sstring cf_name);
     static future<size_t> make_sstables_available(sstables::sstable_directory& dir,
             sharded<database>& db, sharded<db::view::view_update_generator>& view_update_generator,
@@ -86,4 +92,6 @@ public:
             get_sstables_from_upload_dir(distributed<database>& db, sstring ks, sstring cf);
     static future<> process_upload_dir(distributed<database>& db, distributed<db::system_distributed_keyspace>& sys_dist_ks,
             distributed<db::view::view_update_generator>& view_update_generator, sstring ks_name, sstring cf_name);
+
+    static future<> process_sstable_names(distributed<database>& db, sstring ks, sstring cf, std::unordered_set<sstring> sstable_names);
 };
