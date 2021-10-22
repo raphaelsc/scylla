@@ -34,6 +34,7 @@
 #include "cql3/query_processor.hh"
 #include "service/storage_proxy.hh"
 #include "service/migration_manager.hh"
+#include "gms/inet_address.hh"
 
 #include <seastar/core/seastar.hh>
 #include <seastar/core/shared_ptr.hh>
@@ -831,6 +832,37 @@ future<> system_distributed_keyspace::set_service_level(sstring service_level_na
 future<> system_distributed_keyspace::drop_service_level(sstring service_level_name) const {
     static sstring prepared_query = format("DELETE FROM {}.{} WHERE service_level= ?;", NAME, SERVICE_LEVELS);
     return _qp.execute_internal(prepared_query, db::consistency_level::ONE, internal_distributed_query_state(), {service_level_name}).discard_result();
+}
+
+future<> system_distributed_keyspace::add_shared_sstable_owner(utils::UUID table_id, sstring sstable, gms::inet_address owner) {
+    static const sstring insert_new_query = format("INSERT INTO {}.{} (table, sstable, owners) VALUES (?, ?, {{?}}) IF NOT EXISTS", NAME_EVERYWHERE, SHARED_SSTABLES);
+    const auto insert_res = co_await _qp.execute_internal(insert_new_query,
+        db::consistency_level::SERIAL,
+        internal_distributed_query_state(),
+        {table_id, sstable, owner.addr()});
+    if (insert_res->one().get_as<bool>("[applied]")) {
+        co_return;
+    }
+    static const sstring update_query = format("UPDATE {}.{} SET owners=owners+{{?}} WHERE table=? AND sstable=? IF EXISTS", NAME_EVERYWHERE, SHARED_SSTABLES);
+    co_return co_await _qp.execute_internal(update_query,
+        db::consistency_level::SERIAL,
+        internal_distributed_query_state(),
+        {table_id, sstable, owner.addr()}).discard_result();
+}
+
+future<bool> system_distributed_keyspace::remove_shared_sstable_owner(utils::UUID table_id, sstring sstable, gms::inet_address owner) {
+    static const sstring update_query = format("UPDATE {}.{} SET owners=owners-{{?}} WHERE table=? AND sstable=? IF owners!={{}}", NAME_EVERYWHERE, SHARED_SSTABLES);
+    co_await _qp.execute_internal(update_query,
+        db::consistency_level::SERIAL,
+        internal_distributed_query_state(),
+        {table_id, sstable, owner.addr()}).discard_result();
+
+    static const sstring delete_empty_query = format("DELETE FROM {}.{} WHERE table=? AND sstable=? IF owners!={{}}", NAME_EVERYWHERE, SHARED_SSTABLES);
+    const auto delete_res = co_await _qp.execute_internal(delete_empty_query,
+        db::consistency_level::SERIAL,
+        internal_distributed_query_state(),
+        {table_id, sstable});
+    co_return delete_res->one().get_as<bool>("[applied]");
 }
 
 }

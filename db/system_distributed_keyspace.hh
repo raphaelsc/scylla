@@ -47,6 +47,8 @@ namespace service {
     class migration_manager;
 }
 
+namespace gms { class inet_address; }
+
 namespace db {
 
 class system_distributed_keyspace {
@@ -132,6 +134,9 @@ public:
     future<qos::service_levels_info> get_service_level(sstring service_level_name) const;
     future<> set_service_level(sstring service_level_name, qos::service_level_options slo) const;
     future<> drop_service_level(sstring service_level_name) const;
+
+    future<> add_shared_sstable_owner(utils::UUID table_id, sstring sstable, gms::inet_address owner);
+    future<bool> remove_shared_sstable_owner(utils::UUID table_id, sstring sstable, gms::inet_address owner);
 };
 
 }
