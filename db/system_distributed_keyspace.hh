@@ -75,6 +75,8 @@ public:
      * in the old table also appear in the new table, if necessary. */
     static constexpr auto CDC_DESC_V1 = "cdc_streams_descriptions";
 
+    static constexpr auto SHARED_SSTABLES = "shared_sstables";
+
     /* Information required to modify/query some system_distributed tables, passed from the caller. */
     struct context {
         /* How many different token owners (endpoints) are there in the token ring? */

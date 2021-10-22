@@ -163,6 +163,19 @@ schema_ptr service_levels() {
     return schema;
 }
 
+schema_ptr shared_sstables() {
+    static thread_local auto schema = [] {
+        auto id = generate_legacy_id(system_distributed_keyspace::NAME_EVERYWHERE, system_distributed_keyspace::SHARED_SSTABLES);
+        return schema_builder(system_distributed_keyspace::NAME_EVERYWHERE, system_distributed_keyspace::SHARED_SSTABLES, std::make_optional(id))
+            .with_column("table", uuid_type, column_kind::partition_key)
+            .with_column("sstable", utf8_type, column_kind::clustering_key)
+            .with_column("owners", set_type_impl::get_instance(inet_addr_type, true))
+            .with_version(db::system_keyspace::generate_schema_version(id))
+            .build();
+    }();
+    return schema;
+}
+
 // This is the set of tables which this node ensures to exist in the cluster.
 // It does that by announcing the creation of these schemas on initialization
 // of the `system_distributed_keyspace` service (see `start()`), unless it first
@@ -180,6 +193,7 @@ static std::vector<schema_ptr> ensured_tables() {
         cdc_desc(),
         cdc_timestamps(),
         service_levels(),
+        shared_sstables(),
     };
 }
 
