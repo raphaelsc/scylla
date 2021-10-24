@@ -47,6 +47,8 @@ namespace service {
     class migration_manager;
 }
 
+namespace gms { class inet_address; }
+
 namespace db {
 
 class system_distributed_keyspace {
@@ -74,6 +76,8 @@ public:
      * We use it in the upgrade procedure to ensure that CDC generations appearing
      * in the old table also appear in the new table, if necessary. */
     static constexpr auto CDC_DESC_V1 = "cdc_streams_descriptions";
+
+    static constexpr auto SHARED_SSTABLES = "shared_sstables";
 
     /* Information required to modify/query some system_distributed tables, passed from the caller. */
     struct context {
@@ -130,6 +134,9 @@ public:
     future<qos::service_levels_info> get_service_level(sstring service_level_name) const;
     future<> set_service_level(sstring service_level_name, qos::service_level_options slo) const;
     future<> drop_service_level(sstring service_level_name) const;
+
+    future<> add_shared_sstable_owner(utils::UUID table_id, sstring sstable, gms::inet_address owner);
+    future<bool> remove_shared_sstable_owner(utils::UUID table_id, sstring sstable, gms::inet_address owner);
 };
 
 }
