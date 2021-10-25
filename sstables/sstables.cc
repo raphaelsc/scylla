@@ -144,7 +144,7 @@ future<file> sstable::open_sstable_component_file_non_checked(std::string_view n
 
 future<> sstable::rename_new_sstable_component_file(sstring from_name, sstring to_name) {
     if (_storage_options.type == storage_options::storage_type::S3) {
-        sstlog.warn("FIXME: not renaming for testing purposes, rename API not yet implemented for S3");
+        sstlog.error("FIXME: not renaming {} to {} for testing purposes, rename API not yet implemented for S3", from_name, to_name);
         return make_ready_future<>();
     }
     return sstable_write_io_check(rename_file, from_name, to_name).handle_exception([from_name, to_name] (std::exception_ptr ep) {
