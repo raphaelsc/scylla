@@ -588,6 +588,18 @@ public:
         });
     }
 
+    future<bool> exists(const seastar::sstring& path) override {
+        try {
+            co_await get_size(path);
+            co_return true;
+        } catch (const http_request_failed_error& e) {
+            if (e.response().status == 404) {
+                co_return false;
+            }
+            throw;
+        }
+    }
+
     future<file> open(const sstring& path) override {
         co_return file(make_shared<s3_file_impl>(shared_from_this(), path));
     }

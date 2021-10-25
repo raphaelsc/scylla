@@ -127,6 +127,10 @@ public:
     // The path does not have to outlive this call.
     virtual future<uint64_t> get_size(const seastar::sstring& path) = 0;
 
+    // Get the size of the object.
+    // The path does not have to outlive this call.
+    virtual future<bool> exists(const seastar::sstring& path) = 0;
+
     // Adapts an S3 object to a seastar::file
     // The returned file shares ownership of this client instance.
     // The path does not have to outlive this call.
