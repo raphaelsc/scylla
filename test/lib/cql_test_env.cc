@@ -134,6 +134,7 @@ private:
     sharded<service::migration_notifier>& _mnotifier;
     sharded<qos::service_level_controller>& _sl_controller;
     sharded<service::migration_manager>& _mm;
+    sharded<db::system_distributed_keyspace>& _sys_dist_ks;
 private:
     struct core_local_state {
         service::client_state client_state;
@@ -181,7 +182,8 @@ public:
             sharded<db::view::view_update_generator>& view_update_generator,
             sharded<service::migration_notifier>& mnotifier,
             sharded<service::migration_manager>& mm,
-            sharded<qos::service_level_controller> &sl_controller)
+            sharded<qos::service_level_controller> &sl_controller,
+            sharded<db::system_distributed_keyspace>& sys_dist_ks)
             : _db(db)
             , _qp(qp)
             , _auth_service(auth_service)
@@ -190,6 +192,7 @@ public:
             , _mnotifier(mnotifier)
             , _sl_controller(sl_controller)
             , _mm(mm)
+            , _sys_dist_ks(sys_dist_ks)
     {
         adjust_rlimit();
     }
@@ -393,6 +396,10 @@ public:
         return _core_local.invoke_on_all([] (core_local_state& state) {
             return state.client_state.maybe_update_per_service_level_params();
         });
+    }
+
+    virtual sharded<db::system_distributed_keyspace>& sys_dist_ks() override {
+        return _sys_dist_ks;
     }
 
     future<> start() {
@@ -766,7 +773,7 @@ public:
                 // The default user may already exist if this `cql_test_env` is starting with previously populated data.
             }
 
-            single_node_cql_env env(db, qp, auth_service, view_builder, view_update_generator, mm_notif, mm, std::ref(sl_controller));
+            single_node_cql_env env(db, qp, auth_service, view_builder, view_update_generator, mm_notif, mm, std::ref(sl_controller), sys_dist_ks);
             env.start().get();
             auto stop_env = defer([&env] { env.stop().get(); });
 

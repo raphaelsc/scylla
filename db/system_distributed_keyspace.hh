@@ -137,6 +137,7 @@ public:
 
     future<> add_shared_sstable_owner(utils::UUID table_id, sstring sstable, gms::inet_address owner);
     future<bool> remove_shared_sstable_owner(utils::UUID table_id, sstring sstable, gms::inet_address owner);
+    future<std::vector<sstring>> shared_sstables_owned_by(gms::inet_address owner, utils::UUID table_id);
 };
 
 }
