@@ -153,7 +153,7 @@ future<file> sstable::open_sstable_component_file_non_checked(std::string_view n
         case storage_options::storage_type::S3: {
             // FIXME: do not hardcode port
             sstlog.warn("Opening S3 file: {}/{}", _storage_options.bucket, name);
-            sstlog.warn("ednpoint {}", _storage_options.endpoint);
+            sstlog.warn("endpoint {}", _storage_options.endpoint);
             auto factory = s3::make_basic_connection_factory(_storage_options.endpoint, 9000);
             sstlog.warn("Factory done");
             auto client = s3::make_client(std::move(factory));
