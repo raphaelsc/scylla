@@ -566,7 +566,7 @@ private:
         assert(_sstable_generation);
         // FIXME: better way of ensuring we don't attempt to
         // overwrite an existing table.
-        return _generation_node_signature + uint64_t(1'000'000) * (*_sstable_generation)++ * smp::count + this_shard_id();
+        return _generation_node_signature + uint64_t(1'000'000) * ((*_sstable_generation)++ * smp::count + this_shard_id());
     }
 
     // inverse of calculate_generation_for_new_table(), used to determine which
