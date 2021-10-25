@@ -1889,6 +1889,10 @@ const bool sstable::has_component(component_type f) const {
 }
 
 future<> sstable::touch_temp_dir() {
+    if (_storage_options.type == storage_options::storage_type::S3) {
+        sstlog.warn("Temporary directory is not used for S3 sstables");
+        return make_ready_future<>();
+    }
     if (_temp_dir) {
         return make_ready_future<>();
     }
