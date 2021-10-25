@@ -2864,7 +2864,17 @@ delete_sstables(std::vector<sstring> tocs) {
 future<>
 sstable::unlink() noexcept {
     if (_storage_options.type == storage_options::storage_type::S3) {
-        sstlog.error("FIXME: unlinking not implemented yet");
+        sstlog.error("FIXME: unlinking S3 is neither atomic nor safe - it does not even sync with TOC");
+        co_await read_toc();
+        auto client = s3::make_client(s3::make_basic_connection_factory(_storage_options.endpoint, 9000));
+        for (auto component : _recognized_components) {
+            sstlog.warn("Removing {}/{}", _storage_options.bucket, filename(component));
+            co_await client->remove_file(format("/{}/{}", _storage_options.bucket, filename(component)));
+        }
+        for (const sstring& component_path : _unrecognized_components) {
+            sstlog.warn("Removing {}/{}",_storage_options.bucket, component_path);
+            co_await client->remove_file(format("/{}/{}", _storage_options.bucket, component_path));
+        }
         co_return;
     }
 
