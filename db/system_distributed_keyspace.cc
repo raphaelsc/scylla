@@ -836,33 +836,68 @@ future<> system_distributed_keyspace::drop_service_level(sstring service_level_n
 
 future<> system_distributed_keyspace::add_shared_sstable_owner(utils::UUID table_id, sstring sstable, gms::inet_address owner) {
     static const sstring insert_new_query = format("INSERT INTO {}.{} (\"table\", sstable, owners) VALUES (?, ?, ?) IF NOT EXISTS", NAME_EVERYWHERE, SHARED_SSTABLES);
-    const auto insert_res = co_await _qp.execute_internal(insert_new_query,
-        db::consistency_level::SERIAL,
-        internal_distributed_query_state(),
-        {table_id, sstable, make_set_value(inet_addr_type, {owner.addr()})});
-    if (insert_res->one().get_as<bool>("[applied]")) {
+
+    auto inet_set_type = set_type_impl::get_instance(inet_addr_type, true);
+
+    // ONE consistency level stands for CAS learn step, which should be sufficient for our purposes
+    cql3::query_options qo(db::consistency_level::ONE,
+        {cql3::raw_value::make_value(uuid_type->decompose(table_id)),
+         cql3::raw_value::make_value(utf8_type->decompose(sstable)),
+         cql3::raw_value::make_value(inet_set_type->decompose(make_set_value(inet_set_type, {owner.addr()})))});
+
+    // FIXME: forced to use `execute_direct` interface since `execute_internal` is not allowed
+    // to handle distributed tables modification (and also doesn't support proper handling
+    // of LWT requests).
+    const auto insert_res = co_await _qp.execute_direct(insert_new_query, internal_distributed_query_state(), qo);
+    if (insert_res->move_to_shard()) {
+        // Hop to another shard if requested to serve the request
+        co_return co_await container().invoke_on(*insert_res->move_to_shard(),
+            &system_distributed_keyspace::add_shared_sstable_owner,
+            std::move(table_id), std::move(sstable), std::move(owner));
+    }
+    cql3::untyped_result_set untyped_res(insert_res);
+    if (untyped_res.one().get_as<bool>("[applied]")) {
         co_return;
     }
+
     static const sstring update_query = format("UPDATE {}.{} SET owners=owners+? WHERE \"table\"=? AND sstable=? IF EXISTS", NAME_EVERYWHERE, SHARED_SSTABLES);
-    co_return co_await _qp.execute_internal(update_query,
-        db::consistency_level::SERIAL,
+    cql3::query_options update_qo(db::consistency_level::ONE,
+        {cql3::raw_value::make_value(inet_set_type->decompose(make_set_value(inet_set_type, {owner.addr()}))),
+         cql3::raw_value::make_value(uuid_type->decompose(table_id)),
+         cql3::raw_value::make_value(utf8_type->decompose(sstable))});
+    // Don't need to handle `bounce_to_shard` message there since at this
+    // point we probably bounced one time on the right shard already. 
+    co_return co_await _qp.execute_direct(update_query,
         internal_distributed_query_state(),
-        {table_id, sstable, make_set_value(inet_addr_type, {owner.addr()})}).discard_result();
+        update_qo).discard_result();
 }
 
 future<bool> system_distributed_keyspace::remove_shared_sstable_owner(utils::UUID table_id, sstring sstable, gms::inet_address owner) {
     static const sstring update_query = format("UPDATE {}.{} SET owners=owners-? WHERE \"table\"=? AND sstable=? IF owners!={{}}", NAME_EVERYWHERE, SHARED_SSTABLES);
-    co_await _qp.execute_internal(update_query,
-        db::consistency_level::SERIAL,
-        internal_distributed_query_state(),
-        {table_id, sstable, make_set_value(inet_addr_type, {owner.addr()})}).discard_result();
 
-    static const sstring delete_empty_query = format("DELETE FROM {}.{} WHERE \"table\"=? AND sstable=? IF owners!={{}}", NAME_EVERYWHERE, SHARED_SSTABLES);
-    const auto delete_res = co_await _qp.execute_internal(delete_empty_query,
-        db::consistency_level::SERIAL,
+    auto inet_set_type = set_type_impl::get_instance(inet_addr_type, true);
+
+    cql3::query_options update_qo(db::consistency_level::ONE,
+        {cql3::raw_value::make_value(inet_set_type->decompose(make_set_value(inet_set_type, {owner.addr()}))),
+         cql3::raw_value::make_value(uuid_type->decompose(table_id)),
+         cql3::raw_value::make_value(utf8_type->decompose(sstable))});
+    auto res = co_await _qp.execute_direct(update_query,
+        internal_distributed_query_state(), update_qo);
+    if (res->move_to_shard()) {
+        co_return co_await container().invoke_on(*res->move_to_shard(),
+            &system_distributed_keyspace::remove_shared_sstable_owner,
+            std::move(table_id), std::move(sstable), std::move(owner));
+    }
+
+    static const sstring delete_empty_query = format("DELETE FROM {}.{} WHERE \"table\"=? AND sstable=? IF owners={{}}", NAME_EVERYWHERE, SHARED_SSTABLES);
+    cql3::query_options delete_qo(db::consistency_level::ONE,
+        {cql3::raw_value::make_value(uuid_type->decompose(table_id)),
+         cql3::raw_value::make_value(utf8_type->decompose(sstable))});
+    const auto delete_res = co_await _qp.execute_direct(delete_empty_query,
         internal_distributed_query_state(),
-        {table_id, sstable});
-    co_return delete_res->one().get_as<bool>("[applied]");
+        delete_qo);
+    cql3::untyped_result_set untyped_res(delete_res);
+    co_return untyped_res.one().get_as<bool>("[applied]");
 }
 
 future<std::vector<sstring>> system_distributed_keyspace::shared_sstables_owned_by(gms::inet_address owner, utils::UUID table_id) {

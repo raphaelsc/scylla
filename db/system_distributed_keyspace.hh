@@ -29,6 +29,7 @@
 
 #include <seastar/core/future.hh>
 #include <seastar/core/sstring.hh>
+#include <seastar/core/sharded.hh>
 
 #include <unordered_map>
 
@@ -51,7 +52,9 @@ namespace gms { class inet_address; }
 
 namespace db {
 
-class system_distributed_keyspace {
+// Inheriting `peering_sharded_service` since the service would likely need
+// to handle bounce requests when calling `shared_sstables*` methods (using LWT).
+class system_distributed_keyspace : public peering_sharded_service<system_distributed_keyspace> {
 public:
     static constexpr auto NAME = "system_distributed";
     static constexpr auto NAME_EVERYWHERE = "system_distributed_everywhere";
