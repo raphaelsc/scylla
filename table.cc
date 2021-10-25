@@ -1201,6 +1201,7 @@ table::table(schema_ptr schema, config config, db::commitlog* cl, compaction_man
     , _compaction_manager(compaction_manager)
     , _index_manager(*this)
     , _counter_cell_locks(_schema->is_counter() ? std::make_unique<cell_locker>(_schema, cl_stats) : nullptr)
+    , _generation_node_signature(utils::fb_utilities::get_broadcast_rpc_address().raw_addr() & 0xffff)
     , _row_locker(_schema)
     , _off_strategy_trigger([this] { trigger_offstrategy_compaction(); })
     , _storage_options(storage_opts)

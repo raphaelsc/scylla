@@ -527,6 +527,7 @@ public:
                        const std::vector<sstables::shared_sstable>& new_sstables,
                        const std::vector<sstables::shared_sstable>& old_sstables);
     };
+    unsigned _generation_node_signature;
 private:
     bool cache_enabled() const {
         return _config.enable_cache && _schema->caching_options().enabled();
@@ -558,14 +559,14 @@ private:
         if (!_sstable_generation) {
             _sstable_generation = 1;
         }
-        _sstable_generation = std::max<uint64_t>(*_sstable_generation, generation /  smp::count + 1);
+        _sstable_generation = std::max<uint64_t>(*_sstable_generation, generation / 1'000'000 /  smp::count + 1);
     }
 
     uint64_t calculate_generation_for_new_table() {
         assert(_sstable_generation);
         // FIXME: better way of ensuring we don't attempt to
         // overwrite an existing table.
-        return (*_sstable_generation)++ * smp::count + this_shard_id();
+        return _generation_node_signature + uint64_t(1'000'000) * (*_sstable_generation)++ * smp::count + this_shard_id();
     }
 
     // inverse of calculate_generation_for_new_table(), used to determine which

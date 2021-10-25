@@ -345,7 +345,7 @@ distributed_loader::process_upload_dir(distributed<database>& db, distributed<db
         process_sstable_dir(directory).get();
 
         auto generation = highest_generation_seen(directory).get0();
-        auto shard_generation_base = generation / smp::count + 1;
+        auto shard_generation_base = generation / 1'000'000 / smp::count + 1;
 
         // We still want to do our best to keep the generation numbers shard-friendly.
         // Each destination shard will manage its own generation counter.
