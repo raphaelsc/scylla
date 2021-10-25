@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <seastar/core/file.hh>
 #include <seastar/core/seastar.hh>
+#include <seastar/util/noncopyable_function.hh>
 #include "bytes.hh"
 #include "log.hh"
 
@@ -102,5 +103,8 @@ open_integrity_checked_file_dma(std::string_view name, open_flags flags, file_op
 
 future<file>
 open_integrity_checked_file_dma(std::string_view name, open_flags flags) noexcept;
+
+future<file>
+open_integrity_checked_file_dma(std::string_view name, noncopyable_function<future<file>()> opener) noexcept;
 
 }

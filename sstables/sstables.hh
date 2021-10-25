@@ -61,6 +61,7 @@
 #include "sstables/open_info.hh"
 #include "query-request.hh"
 #include "mutation_fragment_stream_validator.hh"
+#include "db/storage_options.hh"
 
 #include <seastar/util/optimized_optional.hh>
 
@@ -139,6 +140,7 @@ public:
             int64_t generation,
             version_types v,
             format_types f,
+            const storage_options& storage_opts,
             db::large_data_handler& large_data_handler,
             sstables_manager& manager,
             gc_clock::time_point now,
@@ -200,6 +202,10 @@ public:
 
     int64_t generation() const {
         return _generation;
+    }
+
+    bool is_s3() const {
+        return _storage_options.type == storage_options::storage_type::S3;
     }
 
     // Returns a mutation_reader for given range of partitions.
@@ -521,6 +527,7 @@ private:
     unsigned long _generation = 0;
     version_types _version;
     format_types _format;
+    const storage_options& _storage_options;
 
     filter_tracker _filter_tracker;
     std::unique_ptr<partition_index_cache> _index_cache;
@@ -598,6 +605,9 @@ private:
     void write_summary(const io_priority_class& pc) {
         write_simple<component_type::Summary>(_components->summary, pc);
     }
+
+    future<file> open_sstable_component_file_non_checked(std::string_view name, open_flags flags, file_open_options options,
+            bool check_integrity) noexcept;
 
     // To be called when we try to load an SSTable that lacks a Summary. Could
     // happen if old tools are being used.

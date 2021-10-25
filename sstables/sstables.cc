@@ -88,6 +88,7 @@
 #include "mx/reader.hh"
 #include "utils/bit_cast.hh"
 #include "utils/cached_file.hh"
+#include "s3/s3.hh"
 
 thread_local disk_error_signal_type sstable_read_error;
 thread_local disk_error_signal_type sstable_write_error;
@@ -139,15 +140,35 @@ read_monitor_generator& default_read_monitor_generator() {
     return noop_read_monitor_generator;
 }
 
-static future<file> open_sstable_component_file_non_checked(std::string_view name, open_flags flags, file_open_options options,
+future<file> sstable::open_sstable_component_file_non_checked(std::string_view name, open_flags flags, file_open_options options,
         bool check_integrity) noexcept {
-    if (flags != open_flags::ro && check_integrity) {
-        return open_integrity_checked_file_dma(name, flags, options);
+    switch (_storage_options.type) {
+        case storage_options::storage_type::NATIVE: {
+            sstlog.warn("Opening regular file: {}", name);
+            if (flags != open_flags::ro && check_integrity) {
+                return open_integrity_checked_file_dma(name, flags, options);
+            }
+            return open_file_dma(name, flags, options);
+        }
+        case storage_options::storage_type::S3: {
+            // FIXME: do not hardcode port
+            sstlog.warn("Opening S3 file: {}/{}", _storage_options.bucket, name);
+            sstlog.warn("ednpoint {}", _storage_options.endpoint);
+            auto factory = s3::make_basic_connection_factory(_storage_options.endpoint, 9000);
+            sstlog.warn("Factory done");
+            auto client = s3::make_client(std::move(factory));
+            sstlog.warn("client created");
+            return client->open(format("{}/{}", _storage_options.bucket, name));
+            // FIXME: add integrity checking as well        
+        }
     }
-    return open_file_dma(name, flags, options);
 }
 
 future<> sstable::rename_new_sstable_component_file(sstring from_name, sstring to_name) {
+    if (_storage_options.type == storage_options::storage_type::S3) {
+        sstlog.warn("FIXME: not renaming for testing purposes, rename API not yet implemented for S3");
+        return make_ready_future<>();
+    }
     return sstable_write_io_check(rename_file, from_name, to_name).handle_exception([from_name, to_name] (std::exception_ptr ep) {
         sstlog.error("Could not rename SSTable component {} to {}. Found exception: {}", from_name, to_name, ep);
         return make_exception_future<>(ep);
@@ -2849,6 +2870,13 @@ delete_atomically(std::vector<shared_sstable> ssts) {
     if (ssts.empty()) {
         return make_ready_future<>();
     }
+    if (ssts.front()->is_s3()) {
+        sstlog.warn("S3! returning");
+        // FIXME: proceed, but without the .tmp trick
+        return make_ready_future<>();
+    } else {
+        sstlog.warn("not S3! proceeding");
+    }
     return seastar::async([ssts = std::move(ssts)] {
         sstring sstdir;
         min_max_tracker<int64_t> gen_tracker;
@@ -3077,6 +3105,7 @@ sstable::sstable(schema_ptr schema,
         int64_t generation,
         version_types v,
         format_types f,
+        const storage_options& storage_opts,
         db::large_data_handler& large_data_handler,
         sstables_manager& manager,
         gc_clock::time_point now,
@@ -3088,6 +3117,7 @@ sstable::sstable(schema_ptr schema,
     , _generation(generation)
     , _version(v)
     , _format(f)
+    , _storage_options(storage_opts)
     , _index_cache(std::make_unique<partition_index_cache>(
             manager.get_cache_tracker().get_lru(), manager.get_cache_tracker().region()))
     , _now(now)
