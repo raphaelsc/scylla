@@ -96,6 +96,28 @@ namespace sstables {
 
 logging::logger sstlog("sstable");
 
+/*!
+ * A hack for the hackathon, a global way of telling what is this node id.
+ */
+class node_id_holder {
+    uint16_t _id = 0;
+    bool _updated = false;
+public:
+    void update_ip(const sstring& address) {
+        if (_updated) {
+            return;
+        }
+        _updated = true;
+        gms::inet_address ip(address);
+        _id = static_cast<uint16_t>(ip.raw_addr() & 0xffff);
+    }
+    uint16_t operator()() const {
+        return _id;
+    }
+};
+
+node_id_holder current_node_holder;
+
 // Because this is a noop and won't hold any state, it is better to use a global than a
 // thread_local. It will be faster, specially on non-x86.
 struct noop_write_monitor final : public write_monitor {
@@ -1860,6 +1882,7 @@ bool sstable::requires_view_building() const {
 sstring sstable::component_basename(const sstring& ks, const sstring& cf, version_types version, int64_t generation,
                                     format_types format, sstring component) {
     sstring v = _version_string.at(version);
+    generation += current_node_holder() *1000000; // A hack for the Hackathon
     sstring g = to_sstring(generation);
     sstring f = _format_string.at(format);
     switch (version) {
@@ -3074,6 +3097,7 @@ sstable::sstable(schema_ptr schema,
     , _manager(manager)
 {
     manager.add(this);
+    current_node_holder.update_ip(manager._db_config.rpc_address());
 }
 
 file sstable::uncached_index_file() {
