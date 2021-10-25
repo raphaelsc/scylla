@@ -1882,7 +1882,7 @@ bool sstable::requires_view_building() const {
 sstring sstable::component_basename(const sstring& ks, const sstring& cf, version_types version, int64_t generation,
                                     format_types format, sstring component) {
     sstring v = _version_string.at(version);
-    generation += current_node_holder() *1000000; // A hack for the Hackathon
+    generation += current_node_holder() * uint64_t(1'000'000'000); // A hack for the Hackathon
     sstring g = to_sstring(generation);
     sstring f = _format_string.at(format);
     switch (version) {
