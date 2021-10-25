@@ -111,9 +111,10 @@ keyspace_metadata::new_keyspace(std::string_view name,
                                 std::string_view strategy_name,
                                 locator::replication_strategy_config_options options,
                                 bool durables_writes,
-                                std::vector<schema_ptr> cf_defs)
+                                std::vector<schema_ptr> cf_defs,
+                                storage_options storage_opts)
 {
-    return ::make_lw_shared<keyspace_metadata>(name, strategy_name, options, durables_writes, cf_defs);
+    return ::make_lw_shared<keyspace_metadata>(name, strategy_name, options, durables_writes, cf_defs, user_types_metadata{}, storage_opts);
 }
 
 void keyspace_metadata::add_user_type(const user_type ut) {
@@ -878,9 +879,9 @@ void database::add_column_family(keyspace& ks, schema_ptr schema, column_family:
 
     lw_shared_ptr<column_family> cf;
     if (cfg.enable_commitlog && _commitlog) {
-       cf = make_lw_shared<column_family>(schema, std::move(cfg), *_commitlog, *_compaction_manager, *_cl_stats, _row_cache_tracker);
+       cf = make_lw_shared<column_family>(schema, std::move(cfg), *_commitlog, *_compaction_manager, *_cl_stats, _row_cache_tracker, ks.metadata()->get_storage_options());
     } else {
-       cf = make_lw_shared<column_family>(schema, std::move(cfg), column_family::no_commitlog(), *_compaction_manager, *_cl_stats, _row_cache_tracker);
+       cf = make_lw_shared<column_family>(schema, std::move(cfg), column_family::no_commitlog(), *_compaction_manager, *_cl_stats, _row_cache_tracker, ks.metadata()->get_storage_options());
     }
     cf->set_durable_writes(ks.metadata()->durable_writes());
 
@@ -1215,11 +1216,27 @@ keyspace_metadata::keyspace_metadata(std::string_view name,
              bool durable_writes,
              std::vector<schema_ptr> cf_defs,
              user_types_metadata user_types)
+    : keyspace_metadata(name,
+                        strategy_name,
+                        std::move(strategy_options),
+                        durable_writes,
+                        std::move(cf_defs),
+                        user_types_metadata{},
+                        storage_options{}) { }
+
+keyspace_metadata::keyspace_metadata(std::string_view name,
+             std::string_view strategy_name,
+             locator::replication_strategy_config_options strategy_options,
+             bool durable_writes,
+             std::vector<schema_ptr> cf_defs,
+             user_types_metadata user_types,
+             storage_options storage_opts)
     : _name{name}
     , _strategy_name{locator::abstract_replication_strategy::to_qualified_class_name(strategy_name.empty() ? "NetworkTopologyStrategy" : strategy_name)}
     , _strategy_options{std::move(strategy_options)}
     , _durable_writes{durable_writes}
     , _user_types{std::move(user_types)}
+    , _storage_options{std::move(storage_opts)}
 {
     for (auto&& s : cf_defs) {
         _cf_meta_data.emplace(s->cf_name(), s);
@@ -1229,6 +1246,36 @@ keyspace_metadata::keyspace_metadata(std::string_view name,
 void keyspace_metadata::validate(const locator::topology& topology) const {
     using namespace locator;
     abstract_replication_strategy::validate_replication_strategy(name(), strategy_name(), strategy_options(), topology);
+}
+
+storage_options::storage_type storage_options::parse_type(std::string_view str) {
+    if (str == "NATIVE") {
+        return storage_type::NATIVE;
+    }
+    if (str == "S3") {
+        return storage_type::S3;
+    }
+    throw std::runtime_error(format("Unknown storage type: {}", str));
+}
+
+sstring storage_options::print_type(storage_type type) {
+    switch (type) {
+        case storage_type::NATIVE: return "NATIVE";
+        case storage_type::S3: return "S3";
+    }
+}
+
+std::map<sstring, sstring> storage_options::to_map() const {
+    std::map<sstring, sstring> ret{{"type", print_type(type)}};
+    auto add_nonempty = [&ret] (const char* key, const sstring& str) {
+        if (!str.empty()) {
+            ret.emplace(key, str);
+        }
+    };
+    add_nonempty("bucket", bucket);
+    add_nonempty("key_id", key_id);
+    add_nonempty("endpoint", endpoint);
+    return ret;
 }
 
 void database::validate_keyspace_update(keyspace_metadata& ksm) {

@@ -266,6 +266,7 @@ schema_ptr keyspaces() {
         {
             {"durable_writes", boolean_type},
             {"replication", map_type_impl::get_instance(utf8_type, utf8_type, false)},
+            {"storage", map_type_impl::get_instance(utf8_type, utf8_type, false)},
         },
         // static columns
         {},
@@ -1707,6 +1708,11 @@ std::vector<mutation> make_create_keyspace_mutations(lw_shared_ptr<keyspace_meta
     map["class"] = keyspace->strategy_name();
     store_map(m, ckey, "replication", timestamp, map);
 
+    auto storage_map = keyspace->get_storage_options().to_map();
+    if (!storage_map.empty()) {
+        store_map(m, ckey, "storage", timestamp, storage_map);
+    }
+
     mutations.emplace_back(std::move(m));
 
     if (with_tables_and_types_and_functions) {
@@ -1762,7 +1768,33 @@ lw_shared_ptr<keyspace_metadata> create_keyspace_from_schema_partition(const sch
     auto strategy_name = strategy_options["class"];
     strategy_options.erase("class");
     bool durable_writes = row.get_nonnull<bool>("durable_writes");
-    return make_lw_shared<keyspace_metadata>(keyspace_name, strategy_name, strategy_options, durable_writes);
+
+    auto storage = row.get<map_type_impl::native_type>("storage");
+    storage_options storage_opts;
+    if (storage) {
+        for (const auto& entry : *storage) {
+            sstring key = value_cast<sstring>(entry.first);
+            if (key == "type") {
+                storage_opts.type = storage_options::parse_type(value_cast<sstring>(entry.second));
+            }
+            auto set_field = [&key, &entry] (sstring& field, sstring target) {
+                if (key == target) {
+                    field = value_cast<sstring>(entry.second);
+                }
+            };
+            set_field(storage_opts.bucket, "bucket");
+            set_field(storage_opts.key_id, "key_id");
+            set_field(storage_opts.endpoint, "endpoint");
+        }
+        auto it = std::find_if(storage->begin(), storage->end(), [] (std::pair<data_value, data_value> entry) {
+            return value_cast<sstring>(entry.first) == "type";
+        });
+        if (it != storage->end()) {
+            storage_opts.type = storage_options::parse_type(value_cast<sstring>(it->second));
+        }
+    }
+    return make_lw_shared<keyspace_metadata>(keyspace_name, strategy_name, strategy_options, durable_writes,
+            std::vector<schema_ptr>{}, user_types_metadata{}, storage_opts);
 }
 
 template<typename V>

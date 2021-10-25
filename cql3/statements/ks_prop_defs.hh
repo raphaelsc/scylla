@@ -42,6 +42,7 @@
 #pragma once
 
 #include "cql3/statements/property_definitions.hh"
+#include "db/storage_options.hh"
 
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/core/sstring.hh>
@@ -64,6 +65,7 @@ class ks_prop_defs : public property_definitions {
 public:
     static constexpr auto KW_DURABLE_WRITES = "durable_writes";
     static constexpr auto KW_REPLICATION = "replication";
+    static constexpr auto KW_STORAGE = "storage";
 
     static constexpr auto REPLICATION_STRATEGY_CLASS_KEY = "class";
     static constexpr auto REPLICATION_FACTOR_KEY = "replication_factor";
@@ -73,6 +75,7 @@ public:
     void validate();
     std::map<sstring, sstring> get_replication_options() const;
     std::optional<sstring> get_replication_strategy_class() const;
+    storage_options get_storage_options() const;
     lw_shared_ptr<keyspace_metadata> as_ks_metadata(sstring ks_name, const locator::token_metadata&);
     lw_shared_ptr<keyspace_metadata> as_ks_metadata_update(lw_shared_ptr<keyspace_metadata> old, const locator::token_metadata&);
 

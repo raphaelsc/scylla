@@ -66,6 +66,7 @@ public:
 
 namespace db {
     class config;
+    class system_distributed_keyspace;
 }
 
 struct scheduling_groups {
@@ -163,6 +164,8 @@ public:
     virtual sharded<service::migration_manager>& migration_manager() = 0;
 
     virtual future<> refresh_client_state() = 0;
+
+    virtual sharded<db::system_distributed_keyspace>& sys_dist_ks() = 0;
 };
 
 future<> do_with_cql_env(std::function<future<>(cql_test_env&)> func, cql_test_config = {});

@@ -76,6 +76,7 @@
 #include "query_class_config.hh"
 #include "absl-flat_hash_map.hh"
 #include "utils/cross-shard-barrier.hh"
+#include "db/storage_options.hh"
 
 class cell_locker;
 class cell_locker_stats;
@@ -723,12 +724,12 @@ public:
 
     logalloc::occupancy_stats occupancy() const;
 private:
-    table(schema_ptr schema, config cfg, db::commitlog* cl, compaction_manager&, cell_locker_stats& cl_stats, cache_tracker& row_cache_tracker);
+    table(schema_ptr schema, config cfg, db::commitlog* cl, compaction_manager&, cell_locker_stats& cl_stats, cache_tracker& row_cache_tracker, const storage_options& opts);
 public:
-    table(schema_ptr schema, config cfg, db::commitlog& cl, compaction_manager& cm, cell_locker_stats& cl_stats, cache_tracker& row_cache_tracker)
-        : table(schema, std::move(cfg), &cl, cm, cl_stats, row_cache_tracker) {}
-    table(schema_ptr schema, config cfg, no_commitlog, compaction_manager& cm, cell_locker_stats& cl_stats, cache_tracker& row_cache_tracker)
-        : table(schema, std::move(cfg), nullptr, cm, cl_stats, row_cache_tracker) {}
+    table(schema_ptr schema, config cfg, db::commitlog& cl, compaction_manager& cm, cell_locker_stats& cl_stats, cache_tracker& row_cache_tracker, const storage_options& storage_opts)
+        : table(schema, std::move(cfg), &cl, cm, cl_stats, row_cache_tracker, storage_opts) {}
+    table(schema_ptr schema, config cfg, no_commitlog, compaction_manager& cm, cell_locker_stats& cl_stats, cache_tracker& row_cache_tracker, const storage_options& storage_opts)
+        : table(schema, std::move(cfg), nullptr, cm, cl_stats, row_cache_tracker, storage_opts) {}
     table(column_family&&) = delete; // 'this' is being captured during construction
     ~table();
     const schema_ptr& schema() const { return _schema; }
@@ -1060,6 +1061,8 @@ private:
     timer<> _off_strategy_trigger;
     void do_update_off_strategy_trigger();
 
+    const storage_options& _storage_options;
+
 public:
     void update_off_strategy_trigger();
     void enable_off_strategy_trigger();
@@ -1074,6 +1077,7 @@ class keyspace_metadata final {
     std::unordered_map<sstring, schema_ptr> _cf_meta_data;
     bool _durable_writes;
     user_types_metadata _user_types;
+    storage_options _storage_options;
 public:
     keyspace_metadata(std::string_view name,
                  std::string_view strategy_name,
@@ -1086,12 +1090,20 @@ public:
                  bool durable_writes,
                  std::vector<schema_ptr> cf_defs,
                  user_types_metadata user_types);
+    keyspace_metadata(std::string_view name,
+                 std::string_view strategy_name,
+                 locator::replication_strategy_config_options strategy_options,
+                 bool durable_writes,
+                 std::vector<schema_ptr> cf_defs,
+                 user_types_metadata user_types,
+                 storage_options storage_opts);
     static lw_shared_ptr<keyspace_metadata>
     new_keyspace(std::string_view name,
                  std::string_view strategy_name,
                  locator::replication_strategy_config_options options,
                  bool durables_writes,
-                 std::vector<schema_ptr> cf_defs = std::vector<schema_ptr>{});
+                 std::vector<schema_ptr> cf_defs = std::vector<schema_ptr>{},
+                 storage_options storage_opts = {});
     void validate(const locator::topology&) const;
     const sstring& name() const {
         return _name;
@@ -1113,6 +1125,9 @@ public:
     }
     const user_types_metadata& user_types() const {
         return _user_types;
+    }
+    const storage_options& get_storage_options() const {
+        return _storage_options;
     }
     void add_or_update_column_family(const schema_ptr& s) {
         _cf_meta_data[s->cf_name()] = s;

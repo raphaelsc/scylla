@@ -106,7 +106,7 @@ void ks_prop_defs::validate() {
         return;
     }
 
-    static std::set<sstring> keywords({ sstring(KW_DURABLE_WRITES), sstring(KW_REPLICATION) });
+    static std::set<sstring> keywords({ sstring(KW_DURABLE_WRITES), sstring(KW_REPLICATION), sstring(KW_STORAGE) });
     property_definitions::validate(keywords);
 
     auto replication_options = get_replication_options();
@@ -123,6 +123,27 @@ std::map<sstring, sstring> ks_prop_defs::get_replication_options() const {
     return std::map<sstring, sstring>{};
 }
 
+storage_options ks_prop_defs::get_storage_options() const {
+    storage_options opts;
+    auto options_map = get_map(KW_STORAGE);
+    if (options_map) {
+        auto set_field = [&options_map] (sstring& var, sstring key) {
+            auto it = options_map->find(key);
+            if (it != options_map->end()) {
+                var = it->second;
+            }
+        };
+        auto it = options_map->find("type");
+        if (it != options_map->end()) {
+            opts.type = storage_options::parse_type(it->second);
+        }
+        set_field(opts.bucket, "bucket");
+        set_field(opts.key_id, "key_id");
+        set_field(opts.endpoint, "endpoint");
+    }
+    return opts;
+}
+
 std::optional<sstring> ks_prop_defs::get_replication_strategy_class() const {
     return _strategy_class;
 }
@@ -130,7 +151,7 @@ std::optional<sstring> ks_prop_defs::get_replication_strategy_class() const {
 lw_shared_ptr<keyspace_metadata> ks_prop_defs::as_ks_metadata(sstring ks_name, const locator::token_metadata& tm) {
     auto sc = get_replication_strategy_class().value();
     return keyspace_metadata::new_keyspace(ks_name, sc,
-            prepare_options(sc, tm, get_replication_options()), get_boolean(KW_DURABLE_WRITES, true));
+            prepare_options(sc, tm, get_replication_options()), get_boolean(KW_DURABLE_WRITES, true), std::vector<schema_ptr>{}, get_storage_options());
 }
 
 lw_shared_ptr<keyspace_metadata> ks_prop_defs::as_ks_metadata_update(lw_shared_ptr<keyspace_metadata> old, const locator::token_metadata& tm) {
@@ -144,7 +165,7 @@ lw_shared_ptr<keyspace_metadata> ks_prop_defs::as_ks_metadata_update(lw_shared_p
         options = old_options;
     }
 
-    return keyspace_metadata::new_keyspace(old->name(), *sc, options, get_boolean(KW_DURABLE_WRITES, true));
+    return keyspace_metadata::new_keyspace(old->name(), *sc, options, get_boolean(KW_DURABLE_WRITES, true), std::vector<schema_ptr>{}, get_storage_options());
 }
 
 
