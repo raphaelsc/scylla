@@ -865,4 +865,19 @@ future<bool> system_distributed_keyspace::remove_shared_sstable_owner(utils::UUI
     co_return delete_res->one().get_as<bool>("[applied]");
 }
 
+future<std::vector<sstring>> system_distributed_keyspace::shared_sstables_owned_by(gms::inet_address owner, utils::UUID table_id) {
+    static const sstring query = format("SELECT sstable FROM {}.{} WHERE \"table\"=? AND owners CONTAINS ? ALLOW FILTERING", NAME_EVERYWHERE, SHARED_SSTABLES);
+    auto res = co_await _qp.execute_internal(query,
+        db::consistency_level::ONE,
+        internal_distributed_query_state(),
+        {table_id, owner.addr()});
+
+    std::vector<sstring> sstables;
+    sstables.reserve(res->size());
+    for (const auto& row : *res) {
+        sstables.emplace_back(row.get_as<sstring>("sstable"));
+    }
+    co_return std::move(sstables);
+}
+
 }
