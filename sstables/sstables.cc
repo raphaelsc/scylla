@@ -122,7 +122,7 @@ future<file> sstable::open_sstable_component_file_non_checked(std::string_view n
         bool check_integrity) noexcept {
     switch (_storage_options.type) {
         case storage_options::storage_type::NATIVE: {
-            sstlog.warn("Opening regular file: {}", name);
+            sstlog.debug("Opening regular file: {}", name);
             if (flags != open_flags::ro && check_integrity) {
                 return open_integrity_checked_file_dma(name, flags, options);
             }
@@ -130,12 +130,12 @@ future<file> sstable::open_sstable_component_file_non_checked(std::string_view n
         }
         case storage_options::storage_type::S3: {
             // FIXME: do not hardcode port
-            sstlog.warn("Opening S3 file: {}/{}", _storage_options.bucket, name);
-            sstlog.warn("endpoint {}", _storage_options.endpoint);
+            sstlog.debug("Opening S3 file: {}/{}", _storage_options.bucket, name);
+            sstlog.debug("endpoint {}", _storage_options.endpoint);
             auto factory = s3::make_basic_connection_factory(_storage_options.endpoint, 9000);
-            sstlog.warn("Factory done");
+            sstlog.debug("Factory done");
             auto client = s3::make_client(std::move(factory));
-            sstlog.warn("client created");
+            sstlog.debug("client created");
             return client->open(format("/{}/{}", _storage_options.bucket, name));
             // FIXME: add integrity checking as well        
         }
