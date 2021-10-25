@@ -2863,6 +2863,11 @@ delete_sstables(std::vector<sstring> tocs) {
 
 future<>
 sstable::unlink() noexcept {
+    if (_storage_options.type == storage_options::storage_type::S3) {
+        sstlog.error("FIXME: unlinking not implemented yet");
+        co_return;
+    }
+
     // We must be able to generate toc_filename()
     // in order to delete the sstable.
     // Running out of memory here will terminate.
@@ -2904,11 +2909,9 @@ delete_atomically(std::vector<shared_sstable> ssts) {
         return make_ready_future<>();
     }
     if (ssts.front()->is_s3()) {
-        sstlog.warn("S3! returning");
-        // FIXME: proceed, but without the .tmp trick
-        return make_ready_future<>();
-    } else {
-        sstlog.warn("not S3! proceeding");
+        return parallel_for_each(ssts, [] (shared_sstable sst) {
+            return sst->unlink();
+        });
     }
     return seastar::async([ssts = std::move(ssts)] {
         sstring sstdir;
