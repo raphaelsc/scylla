@@ -58,7 +58,7 @@ struct http_response {
     }
 };
 
-std::ostream& operator<<(std::ostream& out, http_response& r) {
+std::ostream& operator<<(std::ostream& out, const http_response& r) {
     return out << "http_response{"
         << "status=" << r.status
         << ", headers=" << r.headers
@@ -110,6 +110,18 @@ std::pair<sstring, sstring> parse_header(const sstring& line) {
         return std::make_pair(line, sstring());
     }
 }
+
+class http_request_failed_error : public std::runtime_error {
+    http_response resp;
+public:
+    http_request_failed_error(http_response resp)
+            : std::runtime_error(fmt::format("request failed: {}", resp))
+    { }
+
+    const http_response& response() const {
+        return resp;
+    }
+};
 
 // Keep headers alive around async operation.
 static
@@ -189,15 +201,17 @@ future<http_response> make_http_request(connection_ptr con,
     }
 
     temporary_buffer<char> response_content;
-    if (response_code != 204) { // 204 = No Content
+    if (response_code != 204 && method != "HEAD") { // 204 = No Content
         response_content = co_await in.read_exactly(content_length);
     }
 
+    auto resp = http_response{response_code, content_length, std::move(response_content), std::move(response_headers)};
+
     if (response_code < 200 || response_code >= 300) {
-        throw std::runtime_error(format("request failed: {}", status_line));
+        throw http_request_failed_error(std::move(resp));
     }
 
-    co_return http_response{response_code, content_length, std::move(response_content), std::move(response_headers)};
+    co_return std::move(resp);
 }
 
 // Keep headers alive around async operation.
@@ -572,6 +586,18 @@ public:
             http_response resp = co_await make_http_request(con, "HEAD", path, _headers);
             co_return resp.content_length;
         });
+    }
+
+    future<bool> exists(const seastar::sstring& path) override {
+        try {
+            co_await get_size(path);
+            co_return true;
+        } catch (const http_request_failed_error& e) {
+            if (e.response().status == 404) {
+                co_return false;
+            }
+            throw;
+        }
     }
 
     future<file> open(const sstring& path) override {

@@ -30,7 +30,7 @@ struct storage_options {
         NATIVE, S3,
     };
 
-    storage_type type;
+    storage_type type = storage_type::NATIVE;
     sstring bucket;
     sstring key_id;
     sstring endpoint;
