@@ -953,6 +953,14 @@ const char* file_writer::get_filename() const noexcept {
 }
 
 future<file_writer> sstable::make_component_file_writer(component_type c, file_output_stream_options options, open_flags oflags) noexcept {
+    if (is_s3()) {
+        auto factory = s3::make_basic_connection_factory(_storage_options.endpoint, 9000);
+        auto client = s3::make_client(std::move(factory));
+        return client->upload(format("/{}/{}", _storage_options.bucket, filename(c)))
+            .then([c, this, client] (data_sink sink) {
+                return file_writer(output_stream<char>(std::move(sink)), filename(c));
+            });
+    }
     // Note: file_writer::make closes the file if file_writer creation fails
     // so we don't need to use with_file_close_on_failure here.
     return futurize_invoke([this, c] { return filename(c); }).then([this, c, options = std::move(options), oflags] (sstring filename) mutable {
@@ -975,8 +983,10 @@ void sstable::write_toc(const io_priority_class& pc) {
     file_output_stream_options options;
     options.buffer_size = 4096;
     options.io_priority_class = pc;
-    auto w = make_component_file_writer(component_type::TemporaryTOC, std::move(options)).get0();
+    // XXX: For S3 the atomicity is managed by LWT on system tables, not TOC renames
+    auto w = make_component_file_writer(is_s3() ? component_type::TOC : component_type::TemporaryTOC, std::move(options)).get0();
 
+  if (!is_s3()) { // FIXME
     bool toc_exists = file_exists(filename(component_type::TOC)).get0();
     if (toc_exists) {
         // TOC will exist at this point if write_components() was called with
@@ -985,6 +995,7 @@ void sstable::write_toc(const io_priority_class& pc) {
         remove_file(file_path).get();
         throw std::runtime_error(format("SSTable write failed due to existence of TOC file for generation {:d} of {}.{}", _generation, _schema->ks_name(), _schema->cf_name()));
     }
+  }
 
     for (auto&& key : _recognized_components) {
             // new line character is appended to the end of each component name.
@@ -997,14 +1008,24 @@ void sstable::write_toc(const io_priority_class& pc) {
 
     // Flushing parent directory to guarantee that temporary TOC file reached
     // the disk.
-    file dir_f = open_checked_directory(_write_error_handler, _dir).get0();
-    sstable_write_io_check([&] {
-        dir_f.flush().get();
-        dir_f.close().get();
-    });
+    if (!is_s3()) {
+        file dir_f = open_checked_directory(_write_error_handler, _dir).get0();
+        sstable_write_io_check([&] {
+            dir_f.flush().get();
+            dir_f.close().get();
+        });
+    }
 }
 
 future<> sstable::seal_sstable() {
+    if (is_s3()) {
+        if (_marked_for_deletion == mark_for_deletion::implicit) {
+            _marked_for_deletion = mark_for_deletion::none;
+        }
+        // If this point was reached, sstable should be safe in disk.
+        sstlog.debug("SSTable with generation {} of {}.{} was sealed successfully.", _generation, _schema->ks_name(), _schema->cf_name());
+        return make_ready_future<>();
+    }
     // SSTable sealing is about renaming temporary TOC file after guaranteeing
     // that each component reached the disk safely.
     return remove_temp_dir().then([this] {
@@ -1341,13 +1362,44 @@ future<> sstable::open_data() noexcept {
     });
 }
 
+static
+future<uint64_t> sst_file_size(const storage_options& so, std::string_view name) {
+    if (so.type == storage_options::storage_type::S3) {
+        auto client = s3::make_client(
+                s3::make_basic_connection_factory(so.endpoint, 9000));
+        co_return co_await client->get_size(format("/{}/{}", so.bucket, name));
+    } else {
+        co_return co_await ::file_size(name);
+    }
+}
+
+static
+future<bool> sst_file_exists(const storage_options& so, std::string_view name) {
+    if (so.type == storage_options::storage_type::S3) {
+        auto client = s3::make_client(
+                s3::make_basic_connection_factory(so.endpoint, 9000));
+        co_return co_await client->exists(format("/{}/{}", so.bucket, name));
+    } else {
+        co_return co_await file_exists(name);
+    }
+}
+
 future<> sstable::update_info_for_opened_data() {
-    return _data_file.stat().then([this] (struct stat st) {
+    return _data_file.size().then([this] (uint64_t size) {
         if (this->has_component(component_type::CompressionInfo)) {
-            _components->compression.update(st.st_size);
+            _components->compression.update(size);
         }
-        _data_file_size = st.st_size;
-        _data_file_write_time = db_clock::from_time_t(st.st_mtime);
+        _data_file_size = size;
+    }).then([this] () -> future<> {
+        // determine write time
+        if (is_s3()) {
+            _data_file_write_time = db_clock::now(); // FIXME
+            return make_ready_future<>();
+        } else {
+            return _data_file.stat().then([this](struct stat st) {
+                _data_file_write_time = db_clock::from_time_t(st.st_mtime);
+            });
+        }
     }).then([this] {
         return _index_file.size().then([this] (auto size) {
             _index_file_size = size;
@@ -1362,7 +1414,7 @@ future<> sstable::update_info_for_opened_data() {
     }).then([this] {
         if (this->has_component(component_type::Filter)) {
             return io_check([&] {
-                return file_size(this->filename(component_type::Filter));
+                return sst_file_size(_storage_options, this->filename(component_type::Filter));
             }).then([this] (auto size) {
                 _filter_file_size = size;
             });
@@ -1377,12 +1429,12 @@ future<> sstable::update_info_for_opened_data() {
         _bytes_on_disk = 0;
         return do_for_each(_recognized_components, [this] (component_type c) {
             return this->sstable_write_io_check([&, c] {
-                return file_exists(this->filename(c)).then([this, c] (bool exists) {
+                return sst_file_exists(this->_storage_options, this->filename(c)).then([this, c] (bool exists) {
                     // ignore summary that isn't present in disk but was previously generated by read_summary().
                     if (!exists && c == component_type::Summary && _components->summary.memory_footprint()) {
                         return make_ready_future<uint64_t>(0);
                     }
-                    return file_size(this->filename(c));
+                    return sst_file_size(_storage_options, this->filename(c));
                 });
             }).then([this] (uint64_t bytes) {
                 _bytes_on_disk += bytes;

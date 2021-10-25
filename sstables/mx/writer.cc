@@ -23,6 +23,7 @@
 #include "sstables/writer.hh"
 #include "encoding_stats.hh"
 #include "schema.hh"
+#include "s3/s3.hh"
 #include "mutation_fragment.hh"
 #include "vint-serialization.hh"
 #include "sstables/types.hh"
@@ -884,19 +885,43 @@ void writer::init_file_writers() {
     options.buffer_size = _sst.sstable_buffer_size;
     options.write_behind = 10;
 
+    data_sink out = [&] {
+        switch (_sst._storage_options.type) {
+            case storage_options::storage_type::NATIVE: {
+                return make_file_data_sink(std::move(_sst._data_file), options).get0();
+            }
+            case storage_options::storage_type::S3: {
+                auto factory = s3::make_basic_connection_factory(_sst._storage_options.endpoint, 9000);
+                auto client = s3::make_client(std::move(factory));
+                return client->upload(format("/{}/{}", _sst._storage_options.bucket, _sst.filename(component_type::Data))).get0();
+            }
+        }
+    }();
+
     if (!_compression_enabled) {
-        auto out = make_file_data_sink(std::move(_sst._data_file), options).get0();
         _data_writer = std::make_unique<crc32_checksummed_file_writer>(std::move(out), options.buffer_size, _sst.filename(component_type::Data));
     } else {
-        auto out = make_file_output_stream(std::move(_sst._data_file), options).get0();
         _data_writer = std::make_unique<file_writer>(
             make_compressed_file_m_format_output_stream(
-                std::move(out),
+                output_stream<char>(std::move(out)),
                 &_sst._components->compression,
                 _schema.get_compressor_params()), _sst.filename(component_type::Data));
     }
-    auto w = file_writer::make(std::move(_sst._index_file), std::move(options), _sst.filename(component_type::Index));
-    _index_writer = std::make_unique<file_writer>(w.get0());
+
+    data_sink index_out = [&] {
+        switch (_sst._storage_options.type) {
+            case storage_options::storage_type::NATIVE: {
+                return make_file_data_sink(std::move(_sst._index_file), options).get0();
+            }
+            case storage_options::storage_type::S3: {
+                auto factory = s3::make_basic_connection_factory(_sst._storage_options.endpoint, 9000);
+                auto client = s3::make_client(std::move(factory));
+                return client->upload(format("/{}/{}", _sst._storage_options.bucket, _sst.filename(component_type::Index))).get0();
+            }
+        }
+    }();
+
+    _index_writer = std::make_unique<file_writer>(std::move(index_out), _sst.filename(component_type::Index));
 }
 
 std::unique_ptr<file_writer> writer::close_writer(std::unique_ptr<file_writer>& w) {
