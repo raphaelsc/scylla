@@ -158,7 +158,7 @@ future<file> sstable::open_sstable_component_file_non_checked(std::string_view n
             sstlog.warn("Factory done");
             auto client = s3::make_client(std::move(factory));
             sstlog.warn("client created");
-            return client->open(format("{}/{}", _storage_options.bucket, name));
+            return client->open(format("/{}/{}", _storage_options.bucket, name));
             // FIXME: add integrity checking as well        
         }
     }
