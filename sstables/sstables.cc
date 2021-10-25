@@ -144,7 +144,7 @@ future<file> sstable::open_sstable_component_file_non_checked(std::string_view n
 
 future<> sstable::rename_new_sstable_component_file(sstring from_name, sstring to_name) {
     if (_storage_options.type == storage_options::storage_type::S3) {
-        sstlog.warn("FIXME: not renaming for testing purposes, rename API not yet implemented for S3");
+        sstlog.error("FIXME: not renaming {} to {} for testing purposes, rename API not yet implemented for S3", from_name, to_name);
         return make_ready_future<>();
     }
     return sstable_write_io_check(rename_file, from_name, to_name).handle_exception([from_name, to_name] (std::exception_ptr ep) {
@@ -1889,6 +1889,10 @@ const bool sstable::has_component(component_type f) const {
 }
 
 future<> sstable::touch_temp_dir() {
+    if (_storage_options.type == storage_options::storage_type::S3) {
+        sstlog.warn("Temporary directory is not used for S3 sstables");
+        return make_ready_future<>();
+    }
     if (_temp_dir) {
         return make_ready_future<>();
     }
@@ -2859,6 +2863,11 @@ delete_sstables(std::vector<sstring> tocs) {
 
 future<>
 sstable::unlink() noexcept {
+    if (_storage_options.type == storage_options::storage_type::S3) {
+        sstlog.error("FIXME: unlinking not implemented yet");
+        co_return;
+    }
+
     // We must be able to generate toc_filename()
     // in order to delete the sstable.
     // Running out of memory here will terminate.
@@ -2900,11 +2909,9 @@ delete_atomically(std::vector<shared_sstable> ssts) {
         return make_ready_future<>();
     }
     if (ssts.front()->is_s3()) {
-        sstlog.warn("S3! returning");
-        // FIXME: proceed, but without the .tmp trick
-        return make_ready_future<>();
-    } else {
-        sstlog.warn("not S3! proceeding");
+        return parallel_for_each(ssts, [] (shared_sstable sst) {
+            return sst->unlink();
+        });
     }
     return seastar::async([ssts = std::move(ssts)] {
         sstring sstdir;
