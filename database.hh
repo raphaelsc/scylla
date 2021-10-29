@@ -76,6 +76,7 @@
 #include "query_class_config.hh"
 #include "absl-flat_hash_map.hh"
 #include "utils/cross-shard-barrier.hh"
+#include "table_state.hh"
 
 class cell_locker;
 class cell_locker_stats;
@@ -347,7 +348,7 @@ struct table_stats {
     utils::estimated_histogram estimated_coordinator_read;
 };
 
-class table : public enable_lw_shared_from_this<table> {
+class table : public enable_lw_shared_from_this<table>, public table_state {
 public:
     struct config {
         std::vector<sstring> all_datadirs;
@@ -731,7 +732,7 @@ public:
         : table(schema, std::move(cfg), nullptr, cm, cl_stats, row_cache_tracker) {}
     table(column_family&&) = delete; // 'this' is being captured during construction
     ~table();
-    const schema_ptr& schema() const { return _schema; }
+    const schema_ptr& schema() const noexcept override { return _schema; }
     void set_schema(schema_ptr);
     db::commitlog* commitlog() { return _commitlog; }
     future<const_mutation_partition_ptr> find_partition(schema_ptr, reader_permit permit, const dht::decorated_key& key) const;
@@ -833,11 +834,11 @@ public:
         _config.enable_incremental_backups = val;
     }
 
-    bool compaction_enforce_min_threshold() const {
+    bool compaction_enforce_min_threshold() const noexcept override {
         return _config.compaction_enforce_min_threshold || _is_bootstrap_or_replace;
     }
 
-    unsigned min_compaction_threshold() {
+    unsigned min_compaction_threshold() const noexcept override {
         // During receiving stream operations, the less we compact the faster streaming is. For
         // bootstrap and replace thereThere are no readers so it is fine to be less aggressive with
         // compactions as long as we don't ignore them completely (this could create a problem for
@@ -850,6 +851,9 @@ public:
         }
     }
 
+    bool has_ongoing_compaction() const override;
+    std::unordered_set<sstables::shared_sstable> fully_expired_sstables(const std::vector<sstables::shared_sstable>& sstables) const override;
+
     /*!
      * \brief get sstables by key
      * Return a set of the sstables names that contain the given
@@ -857,7 +861,7 @@ public:
      */
     future<std::unordered_set<sstring>> get_sstables_by_partition_key(const sstring& key) const;
 
-    const sstables::sstable_set& get_sstable_set() const;
+    const sstables::sstable_set& get_sstable_set() const noexcept override;
     lw_shared_ptr<const sstable_list> get_sstables() const;
     lw_shared_ptr<const sstable_list> get_sstables_including_compacted_undeleted() const;
     const std::vector<sstables::shared_sstable>& compacted_undeleted_sstables() const;

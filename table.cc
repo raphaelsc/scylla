@@ -1100,6 +1100,14 @@ int64_t table::get_unleveled_sstables() const {
     return 0;
 }
 
+bool table::has_ongoing_compaction() const {
+    return _compaction_manager.has_table_ongoing_compaction(this);
+}
+
+std::unordered_set<sstables::shared_sstable> table::fully_expired_sstables(const std::vector<sstables::shared_sstable>& sstables) const {
+    return sstables::get_fully_expired_sstables(*this, sstables, gc_clock::now() - schema()->gc_grace_seconds());
+}
+
 future<std::unordered_set<sstring>> table::get_sstables_by_partition_key(const sstring& key) const {
     return do_with(std::unordered_set<sstring>(), make_lw_shared<sstables::sstable_set::incremental_selector>(get_sstable_set().make_incremental_selector()),
             partition_key(partition_key::from_nodetool_style_string(_schema, key)),
@@ -1123,7 +1131,7 @@ future<std::unordered_set<sstring>> table::get_sstables_by_partition_key(const s
     });
 }
 
-const sstables::sstable_set& table::get_sstable_set() const {
+const sstables::sstable_set& table::get_sstable_set() const noexcept {
     // main sstables is enough for the outside world. sstables in other set like maintenance is not needed even for expiration purposes in compaction
     return *_main_sstables;
 }
