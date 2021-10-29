@@ -31,10 +31,45 @@
 #include "locator/abstract_replication_strategy.hh"
 #include "utils/fb_utilities.hh"
 #include "utils/UUID_gen.hh"
+#include "table_state.hh"
 #include <cmath>
 
 static logging::logger cmlog("compaction_manager");
 using namespace std::chrono_literals;
+
+class compaction_table_state : public table_state_impl {
+    table& _t;
+    compaction_manager& _cm;
+public:
+    explicit compaction_table_state(table& t, compaction_manager& cm)
+        : _t(t)
+        , _cm(cm)
+    {
+    }
+    schema_ptr schema() const override {
+        return _t.schema();
+    }
+    int min_compaction_threshold() const override {
+        return _t.min_compaction_threshold();
+    }
+    bool enforce_min_compaction_threshold() const override {
+        return _t.compaction_enforce_min_threshold();
+    }
+    bool has_ongoing_compaction() const override {
+        return _cm.has_table_ongoing_compaction(&_t);
+    }
+    const sstables::sstable_set& sstable_set() const override {
+        return _t.get_sstable_set();
+    }
+    std::unordered_set<sstables::shared_sstable> fully_expired_sstables(const std::vector<sstables::shared_sstable>& sstables) const override {
+        return sstables::get_fully_expired_sstables(_t, sstables, gc_clock::now() - schema()->gc_grace_seconds());
+    }
+};
+
+[[maybe_unused]] // FIXME: remove this once wired.
+static table_state make_compaction_table_state(table& t, compaction_manager& cm) {
+    return table_state(::make_shared<compaction_table_state>(t, cm));
+}
 
 class compacting_sstable_registration {
     compaction_manager* _cm;
