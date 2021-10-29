@@ -81,6 +81,7 @@ class cell_locker;
 class cell_locker_stats;
 class locked_cell;
 class mutation;
+class table_state;
 
 class frozen_mutation;
 class reconcilable_result;
@@ -1063,6 +1064,9 @@ private:
 public:
     void update_off_strategy_trigger();
     void enable_off_strategy_trigger();
+
+    class table_state;
+    std::unique_ptr<::table_state> make_table_state();
 };
 
 class user_types_metadata;

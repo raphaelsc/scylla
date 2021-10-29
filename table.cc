@@ -50,6 +50,7 @@
 #include "gms/gossiper.hh"
 #include "db/config.hh"
 #include "db/commitlog/commitlog.hh"
+#include "table_state.hh"
 
 #include <boost/range/algorithm/remove_if.hpp>
 
@@ -2343,4 +2344,34 @@ table::as_mutation_source_excluding(std::vector<sstables::shared_sstable>& ssts)
                                    mutation_reader::forwarding fwd_mr) {
         return this->make_reader_excluding_sstables(std::move(s), std::move(permit), ssts, range, slice, pc, std::move(trace_state), fwd, fwd_mr);
     });
+}
+
+class table::table_state : public ::table_state {
+    table& _t;
+public:
+    explicit table_state(table& t) : _t(t) {}
+
+    schema_ptr schema() const noexcept override {
+        return _t.schema();
+    }
+    int min_compaction_threshold() const noexcept override {
+        return _t.min_compaction_threshold();
+    }
+    bool enforce_min_compaction_threshold() const noexcept override {
+        return _t.compaction_enforce_min_threshold();
+    }
+    bool has_ongoing_compaction() const override {
+        auto& cm = _t.get_compaction_manager();
+        return cm.has_table_ongoing_compaction(&_t);
+    }
+    const sstables::sstable_set& sstable_set() const override {
+        return _t.get_sstable_set();
+    }
+    std::unordered_set<sstables::shared_sstable> fully_expired_sstables(const std::vector<sstables::shared_sstable>& sstables) const override {
+        return sstables::get_fully_expired_sstables(_t, sstables, gc_clock::now() - schema()->gc_grace_seconds());
+    }
+};
+
+std::unique_ptr<::table_state> table::make_table_state() {
+    return std::make_unique<table::table_state>(*this);
 }
