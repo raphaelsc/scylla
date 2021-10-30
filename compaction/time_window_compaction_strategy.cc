@@ -298,7 +298,7 @@ time_window_compaction_strategy::get_compaction_candidates(table_state table_s, 
 
     update_estimated_compaction_by_tasks(p.first, table_s.min_compaction_threshold(), table_s.schema()->max_compaction_threshold());
 
-    return newest_bucket(std::move(p.first), table_s.min_compaction_threshold(), table_s.schema()->max_compaction_threshold(),
+    return newest_bucket(table_s, std::move(p.first), table_s.min_compaction_threshold(), table_s.schema()->max_compaction_threshold(),
         _highest_window_seen);
 }
 
@@ -341,7 +341,7 @@ static std::ostream& operator<<(std::ostream& os, const std::map<timestamp_type,
 }
 
 std::vector<shared_sstable>
-time_window_compaction_strategy::newest_bucket(std::map<timestamp_type, std::vector<shared_sstable>> buckets,
+time_window_compaction_strategy::newest_bucket(table_state table_s, std::map<timestamp_type, std::vector<shared_sstable>> buckets,
         int min_threshold, int max_threshold, timestamp_type now) {
     clogger.debug("time_window_compaction_strategy::newest_bucket:\n  now {}\n{}", now, buckets);
 
@@ -349,7 +349,8 @@ time_window_compaction_strategy::newest_bucket(std::map<timestamp_type, std::vec
         auto key = key_bucket.first;
         auto& bucket = key_bucket.second;
 
-        if (is_last_active_bucket(key, now)) {
+        bool last_active_bucket = is_last_active_bucket(key, now);
+        if (last_active_bucket) {
             _recent_active_windows.insert(key);
         }
         switch (compaction_mode(bucket, key, now, min_threshold)) {
@@ -365,10 +366,16 @@ time_window_compaction_strategy::newest_bucket(std::map<timestamp_type, std::vec
             break;
         }
         case bucket_compaction_mode::major:
-            _recent_active_windows.erase(key);
+            // serializes major of past window, to avoid missing data being currently compacted.
+            if (table_s.has_ongoing_compaction()) {
+                break;
+            }
             clogger.debug("bucket size {} >= 2 and not in current bucket, key {}, compacting what's here", bucket.size(), key);
             return trim_to_threshold(std::move(bucket), max_threshold);
         default:
+            if (!last_active_bucket) {
+                _recent_active_windows.erase(key);
+            }
             clogger.debug("No compaction necessary for bucket size {} , key {}, now {}", bucket.size(), key, now);
             break;
         }

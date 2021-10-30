@@ -154,8 +154,8 @@ public:
     get_buckets(std::vector<shared_sstable> files, time_window_compaction_strategy_options& options);
 
     std::vector<shared_sstable>
-    newest_bucket(std::map<timestamp_type, std::vector<shared_sstable>> buckets, int min_threshold, int max_threshold,
-            timestamp_type now);
+    newest_bucket(table_state table_s, std::map<timestamp_type, std::vector<shared_sstable>> buckets,
+        int min_threshold, int max_threshold, timestamp_type now);
 
     static std::vector<shared_sstable>
     trim_to_threshold(std::vector<shared_sstable> bucket, int max_threshold);
