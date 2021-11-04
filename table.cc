@@ -956,9 +956,11 @@ table::compact_sstables(sstables::compaction_descriptor descriptor, sstables::co
     });
 }
 
-// Note: We assume that the column_family does not get destroyed during compaction.
 future<>
 table::compact_all_sstables() {
+    if (_async_gate.is_closed()) {
+        throw std::runtime_error(format("refused to perform major compaction for table {}.{} because it's being stopped", _schema->ks_name(), _schema->cf_name()));
+    }
     return _compaction_manager.perform_major_compaction(this);
 }
 
