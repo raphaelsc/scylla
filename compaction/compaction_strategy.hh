@@ -30,6 +30,7 @@
 #include "exceptions/exceptions.hh"
 #include "compaction_strategy_type.hh"
 #include "flat_mutation_reader.hh"
+#include "table_state.hh"
 
 class table;
 using column_family = table;
@@ -57,7 +58,7 @@ public:
     compaction_strategy& operator=(compaction_strategy&&);
 
     // Return a list of sstables to be compacted after applying the strategy.
-    compaction_descriptor get_sstables_for_compaction(column_family& cfs, std::vector<shared_sstable> candidates);
+    compaction_descriptor get_sstables_for_compaction(table_state& table_s, std::vector<shared_sstable> candidates);
 
     compaction_descriptor get_major_compaction_job(column_family& cf, std::vector<shared_sstable> candidates);
 
