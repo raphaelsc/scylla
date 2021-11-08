@@ -81,6 +81,7 @@ class cell_locker;
 class cell_locker_stats;
 class locked_cell;
 class mutation;
+class table_state;
 
 class frozen_mutation;
 class reconcilable_result;
@@ -488,6 +489,9 @@ private:
     db_clock::time_point _truncated_at = db_clock::time_point::min();
 
     bool _is_bootstrap_or_replace = false;
+
+    class table_state;
+    std::unique_ptr<table_state> _table_state;
 public:
     future<> add_sstable_and_update_cache(sstables::shared_sstable sst,
                                           sstables::offstrategy offstrategy = sstables::offstrategy::no);
@@ -1063,6 +1067,8 @@ private:
 public:
     void update_off_strategy_trigger();
     void enable_off_strategy_trigger();
+
+    ::table_state& as_table_state() const noexcept;
 };
 
 class user_types_metadata;
