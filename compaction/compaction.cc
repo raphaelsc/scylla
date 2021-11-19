@@ -307,11 +307,11 @@ public:
     void consume_new_partition(const dht::decorated_key& dk);
 
     void consume(tombstone t) { _compaction_writer->writer.consume(t); }
-    stop_iteration consume(static_row&& sr, tombstone, bool) {
+    stop_iteration consume(static_row&& sr, tombstone = {}, bool = {}) {
         maybe_abort_compaction();
         return _compaction_writer->writer.consume(std::move(sr));
     }
-    stop_iteration consume(clustering_row&& cr, row_tombstone, bool) {
+    stop_iteration consume(clustering_row&& cr, row_tombstone = {}, bool = {}) {
         maybe_abort_compaction();
         return _compaction_writer->writer.consume(std::move(cr));
     }
@@ -665,33 +665,51 @@ private:
         _ms_metadata.max_timestamp = timestamp_tracker.max();
     }
 
-    future<> consume() {
-        auto now = gc_clock::now();
-        auto consumer = make_interposer_consumer([this, now] (flat_mutation_reader reader) mutable
-        {
-            return seastar::async([this, reader = std::move(reader), now] () mutable {
-                auto close_reader = deferred_close(reader);
+    template <typename ConsumerFunc>
+    requires std::is_invocable_v<ConsumerFunc()>
+    static future<> consume_in_thread(flat_mutation_reader reader, ConsumerFunc get_consumer) {
+        return seastar::async([reader = std::move(reader), get_consumer = std::move(get_consumer)] () mutable {
+            auto close_reader = deferred_close(reader);
+            reader.consume_in_thread(get_consumer());
+        });
+    }
 
-                if (enable_garbage_collected_sstable_writer()) {
-                    using compact_mutations = compact_for_compaction<compacting_sstable_writer, compacting_sstable_writer>;
-                    auto cfc = make_stable_flattened_mutations_consumer<compact_mutations>(*schema(), now,
-                        max_purgeable_func(),
-                        get_compacting_sstable_writer(),
-                        get_gc_compacting_sstable_writer());
-
-                    reader.consume_in_thread(std::move(cfc));
-                    return;
-                }
-                using compact_mutations = compact_for_compaction<compacting_sstable_writer, noop_compacted_fragments_consumer>;
-                auto cfc = make_stable_flattened_mutations_consumer<compact_mutations>(*schema(), now,
-                    max_purgeable_func(),
-                    get_compacting_sstable_writer(),
-                    noop_compacted_fragments_consumer());
-
-                reader.consume_in_thread(std::move(cfc));
+    future<> consume_with_interposer(flat_mutation_reader reader, gc_clock::time_point now) {
+        auto consumer = make_interposer_consumer([this, now] (flat_mutation_reader reader) mutable {
+            return consume_in_thread(std::move(reader), [this, now] {
+                return make_stable_flattened_mutations_consumer<compacting_sstable_writer>(get_compacting_sstable_writer());
             });
         });
-        return consumer(make_sstable_reader());
+        if (enable_garbage_collected_sstable_writer()) {
+            return consumer(make_compacting_reader(std::move(reader), now, max_purgeable_func(), get_gc_compacting_sstable_writer()));
+        }
+        return consumer(make_compacting_reader(std::move(reader), now, max_purgeable_func()));
+    }
+
+    future<> consume() {
+        auto now = gc_clock::now();
+        auto reader = make_sstable_reader();
+
+        if (use_interposer_consumer()) {
+            return consume_with_interposer(std::move(reader), now);
+        }
+        if (enable_garbage_collected_sstable_writer()) {
+            return consume_in_thread(std::move(reader), [this, now] {
+                using compact_mutations = compact_for_compaction<compacting_sstable_writer, compacting_sstable_writer>;
+                return make_stable_flattened_mutations_consumer<compact_mutations>(*schema(), now,
+                    max_purgeable_func(),
+                    get_compacting_sstable_writer(),
+                    get_gc_compacting_sstable_writer());
+            });
+        }
+
+        return consume_in_thread(std::move(reader), [this, now] {
+            using compact_mutations = compact_for_compaction<compacting_sstable_writer, noop_compacted_fragments_consumer>;
+            return make_stable_flattened_mutations_consumer<compact_mutations>(*schema(), now,
+                max_purgeable_func(),
+                get_compacting_sstable_writer(),
+                noop_compacted_fragments_consumer());
+        });
     }
 
     virtual reader_consumer make_interposer_consumer(reader_consumer end_consumer) {
