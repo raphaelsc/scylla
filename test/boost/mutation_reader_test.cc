@@ -48,6 +48,7 @@
 
 #include "dht/sharder.hh"
 #include "mutation_reader.hh"
+#include "mutation_compactor.hh"
 #include "schema_builder.hh"
 #include "cell_locking.hh"
 #include "sstables/sstables.hh"

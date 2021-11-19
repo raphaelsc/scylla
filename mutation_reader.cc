@@ -2101,11 +2101,6 @@ std::pair<flat_mutation_reader, queue_reader_handle> make_queue_reader(schema_pt
     return {flat_mutation_reader(std::move(impl)), std::move(handle)};
 }
 
-flat_mutation_reader make_compacting_reader(flat_mutation_reader source, gc_clock::time_point compaction_time,
-        std::function<api::timestamp_type(const dht::decorated_key&)> get_max_purgeable) {
-    return make_flat_mutation_reader<compacting_reader>(std::move(source), compaction_time, get_max_purgeable);
-}
-
 position_reader_queue::~position_reader_queue() {}
 
 // Merges output of readers opened for a single partition query into a non-decreasing stream of mutation fragments.

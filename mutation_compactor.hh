@@ -575,13 +575,15 @@ struct compact_for_compaction : compact_mutation<emit_only_live_rows::no, compac
     using compact_mutation<emit_only_live_rows::no, compact_for_sstables::yes, Consumer, GCConsumer>::compact_mutation;
 };
 
+template<typename GCConsumer>
+requires CompactedFragmentsConsumer<GCConsumer>
 class compacting_reader : public flat_mutation_reader::impl {
     friend class compact_mutation_state<emit_only_live_rows::no, compact_for_sstables::yes>;
 
 private:
     flat_mutation_reader _reader;
     compact_mutation_state<emit_only_live_rows::no, compact_for_sstables::yes> _compactor;
-    noop_compacted_fragments_consumer _gc_consumer;
+    GCConsumer _gc_consumer;
 
     // Uncompacted stream
     partition_start _last_uncompacted_partition_start;
@@ -645,10 +647,12 @@ private:
 
 public:
     compacting_reader(flat_mutation_reader source, gc_clock::time_point compaction_time,
-                      std::function<api::timestamp_type(const dht::decorated_key&)> get_max_purgeable)
+                      std::function<api::timestamp_type(const dht::decorated_key&)> get_max_purgeable,
+                      GCConsumer gc_consumer)
             : impl(source.schema(), source.permit())
             , _reader(std::move(source))
             , _compactor(*_schema, compaction_time, get_max_purgeable)
+            , _gc_consumer(std::move(gc_consumer))
             , _last_uncompacted_partition_start(dht::decorated_key(dht::minimum_token(), partition_key::make_empty()), tombstone{}) {
     }
     virtual future<> fill_buffer() override {
@@ -717,3 +721,25 @@ public:
         return _reader.close();
     }
 };
+
+/// Creates a compacting reader.
+///
+/// The compaction is done with a \ref mutation_compactor, using compaction-type
+/// compaction (`compact_for_sstables::yes`).
+///
+/// \param source the reader whose output to compact.
+///
+/// Params \c compaction_time and \c get_max_purgeable are forwarded to the
+/// \ref mutation_compactor instance.
+///
+/// Inter-partition forwarding: `next_partition()` and
+/// `fast_forward_to(const dht::partition_range&)` is supported if the source
+/// reader supports it
+/// Intra-partition forwarding: `fast_forward_to(position_range)` is *not*
+/// supported.
+template<typename GCConsumer = noop_compacted_fragments_consumer>
+requires CompactedFragmentsConsumer<GCConsumer>
+flat_mutation_reader make_compacting_reader(flat_mutation_reader source, gc_clock::time_point compaction_time,
+        std::function<api::timestamp_type(const dht::decorated_key&)> get_max_purgeable, GCConsumer gc_consumer = GCConsumer()) {
+    return make_flat_mutation_reader<compacting_reader<GCConsumer>>(std::move(source), compaction_time, get_max_purgeable, std::move(gc_consumer));
+}
