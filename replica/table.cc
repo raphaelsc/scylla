@@ -736,6 +736,7 @@ table::stop() {
                             _maintenance_sstables = make_maintenance_sstable_set();
                             _sstables = make_compound_sstable_set();
                             _sstables_staging.clear();
+                            _compaction_strategy = make_compaction_strategy(_schema->compaction_strategy(), _schema->compaction_strategy_options());
                         })).then([this] {
                             _cache.refresh_snapshot();
                         });
