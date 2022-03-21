@@ -1177,6 +1177,75 @@ future<> compaction_manager::perform_sstable_scrub_validate_mode(replica::table*
     return perform_task(seastar::make_shared<validate_sstables_compaction_task>(*this, t, std::move(all_sstables)));
 }
 
+class compaction_manager::cleanup_sstables_compaction_task : public compaction_manager::task {
+    const sstables::compaction_type_options _cleanup_options;
+    compacting_sstable_registration _compacting;
+    std::vector<sstables::compaction_descriptor> _pending_cleanup_jobs;
+public:
+    cleanup_sstables_compaction_task(compaction_manager& mgr, replica::table* t, sstables::compaction_type_options options,
+                                     std::vector<sstables::shared_sstable> candidates, compacting_sstable_registration compacting)
+            : task(mgr, t, options.type(), sstring(sstables::to_string(options.type())))
+            , _cleanup_options(std::move(options))
+            , _compacting(std::move(compacting))
+            , _pending_cleanup_jobs(t->get_compaction_strategy().get_cleanup_compaction_jobs(t->as_table_state(), candidates))
+    {
+        // Cleanup is made more resilient under disk space pressure, by cleaning up smaller jobs first, so larger jobs
+        // will have more space available released by previous jobs.
+        std::ranges::sort(_pending_cleanup_jobs, std::ranges::greater(), std::mem_fn(&sstables::compaction_descriptor::sstables_size));
+        _cm._stats.pending_tasks += _pending_cleanup_jobs.size();
+    }
+
+    virtual ~cleanup_sstables_compaction_task() {
+        _cm._stats.pending_tasks -= _pending_cleanup_jobs.size();
+    }
+protected:
+    virtual future<> do_run() override {
+        switch_state(state::pending);
+        auto maintenance_permit = co_await seastar::get_units(_cm._maintenance_ops_sem, 1);
+
+        while (!_pending_cleanup_jobs.empty() && can_proceed()) {
+            auto active_job = std::move(_pending_cleanup_jobs.back());
+            active_job.options = _cleanup_options;
+            _pending_cleanup_jobs.pop_back();
+            _cm._stats.pending_tasks--;
+            co_await run_cleanup_job(active_job);
+        }
+    }
+
+private:
+    future<> run_cleanup_job(const sstables::compaction_descriptor& descriptor) {
+        co_await coroutine::switch_to(_cm._compaction_controller.sg());
+
+        for (;;) {
+            replica::table& t = *_compacting_table;
+            // Releases reference to cleaned files such that respective used disk space can be freed.
+            auto release_exhausted = [this] (const std::vector<sstables::shared_sstable>& exhausted_sstables) {
+                _compacting.release_compacting(exhausted_sstables);
+            };
+
+            compaction_backlog_tracker user_initiated(std::make_unique<user_initiated_backlog_tracker>(_cm._compaction_controller.backlog_of_shares(200), _cm._available_memory));
+            _cm.register_backlog_tracker(user_initiated);
+
+            std::exception_ptr ex;
+            try {
+                setup_new_compaction(descriptor.run_identifier);
+                co_await compact_sstables(descriptor, _compaction_data, std::move(release_exhausted));
+                finish_compaction();
+                _cm.reevaluate_postponed_compactions();
+                co_return;  // done with current job
+            } catch (...) {
+                ex = std::current_exception();
+            }
+
+            finish_compaction(state::failed);
+            // retry current job or rethrows exception
+            if ((co_await maybe_retry(std::move(ex))) == stop_iteration::yes) {
+                co_return;
+            }
+        }
+    }
+};
+
 bool needs_cleanup(const sstables::shared_sstable& sst,
                    const dht::token_range_vector& sorted_owned_ranges,
                    schema_ptr s) {
@@ -1208,7 +1277,7 @@ future<> compaction_manager::perform_cleanup(replica::database& db, replica::tab
         });
     };
     if (check_for_cleanup()) {
-        return make_exception_future<>(std::runtime_error(format("cleanup request failed: there is an ongoing cleanup on {}.{}",
+        co_return co_await make_exception_future<>(std::runtime_error(format("cleanup request failed: there is an ongoing cleanup on {}.{}",
             t->schema()->ks_name(), t->schema()->cf_name())));
     }
 
@@ -1226,7 +1295,16 @@ future<> compaction_manager::perform_cleanup(replica::database& db, replica::tab
         });
     };
 
-    return rewrite_sstables(t, sstables::compaction_type_options::make_cleanup(std::move(sorted_owned_ranges)), std::move(get_sstables));
+    std::vector<sstables::shared_sstable> sstables;
+    compacting_sstable_registration compacting(*this);
+    co_await run_with_compaction_disabled(t, [this, &sstables, &compacting, &get_sstables] () -> future<> {
+        // Getting sstables and registering them as compacting must be atomic, to avoid a race condition where
+        // regular compaction runs in between and picks the same files.
+        sstables = co_await get_sstables();
+        compacting.register_compacting(sstables);
+    });
+    co_await perform_task(seastar::make_shared<cleanup_sstables_compaction_task>(*this, t, sstables::compaction_type_options::make_cleanup(std::move(sorted_owned_ranges)),
+                                                                                 std::move(sstables), std::move(compacting)));
 }
 
 // Submit a table to be upgraded and wait for its termination.

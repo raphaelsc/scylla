@@ -222,6 +222,7 @@ public:
     class regular_compaction_task;
     class offstrategy_compaction_task;
     class rewrite_sstables_compaction_task;
+    class cleanup_sstables_compaction_task;
     class validate_sstables_compaction_task;
     class compaction_manager_test_task;
 
