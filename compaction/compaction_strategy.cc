@@ -40,6 +40,13 @@ compaction_descriptor compaction_strategy_impl::get_major_compaction_job(table_s
     return compaction_descriptor(std::move(candidates), service::get_local_compaction_priority());
 }
 
+std::vector<compaction_descriptor> compaction_strategy_impl::get_cleanup_compaction_jobs(table_state& table_s, const std::vector<shared_sstable>& candidates) const {
+    return boost::copy_range<std::vector<compaction_descriptor>>(candidates | boost::adaptors::transformed([] (const shared_sstable& sst) {
+        return compaction_descriptor({ sst }, service::get_local_compaction_priority(),
+            sst->get_sstable_level(), sstables::compaction_descriptor::default_max_sstable_bytes, sst->run_identifier());
+    }));
+}
+
 bool compaction_strategy_impl::worth_dropping_tombstones(const shared_sstable& sst, gc_clock::time_point compaction_time) {
     if (_disable_tombstone_compaction) {
         return false;
@@ -662,6 +669,10 @@ compaction_descriptor compaction_strategy::get_sstables_for_compaction(table_sta
 
 compaction_descriptor compaction_strategy::get_major_compaction_job(table_state& table_s, std::vector<sstables::shared_sstable> candidates) {
     return _compaction_strategy_impl->get_major_compaction_job(table_s, std::move(candidates));
+}
+
+std::vector<compaction_descriptor> compaction_strategy::get_cleanup_compaction_jobs(table_state& table_s, const std::vector<shared_sstable>& candidates) const {
+    return _compaction_strategy_impl->get_cleanup_compaction_jobs(table_s, candidates);
 }
 
 void compaction_strategy::notify_completion(const std::vector<shared_sstable>& removed, const std::vector<shared_sstable>& added) {
