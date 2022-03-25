@@ -64,14 +64,13 @@
 // certain point in time, whose size is the amount of bytes currently written. So all we need
 // to do is keep track of them too, and add the current estimate to the static part of (4).
 
-class size_tiered_backlog_tracker final : public compaction_backlog_tracker::impl {
-    sstables::size_tiered_compaction_strategy_options _stcs_options;
+class tiered_backlog_tracker : public compaction_backlog_tracker::impl {
+protected:
     uint64_t _total_bytes = 0;
     uint64_t _total_backlog_bytes = 0;
     double _sstables_backlog_contribution = 0.0f;
     std::unordered_set<utils::UUID> _sstable_runs_contributing_backlog;
-    std::unordered_set<sstables::shared_sstable> _all;
-
+protected:
     struct inflight_component {
         uint64_t total_bytes = 0;
         double contribution = 0;
@@ -85,16 +84,24 @@ class size_tiered_backlog_tracker final : public compaction_backlog_tracker::imp
     }
 
     void refresh_sstables_backlog_contribution();
+    virtual void do_refresh_sstables_backlog_contribution() = 0;
 public:
-    size_tiered_backlog_tracker(sstables::size_tiered_compaction_strategy_options stcs_options) : _stcs_options(stcs_options) {}
-
     virtual double backlog(const compaction_backlog_tracker::ongoing_writes& ow, const compaction_backlog_tracker::ongoing_compactions& oc) const override;
-
-    // Removing could be the result of a failure of an in progress write, successful finish of a
-    // compaction, or some one-off operation, like drop
-    virtual void replace_sstables(std::vector<sstables::shared_sstable> old_ssts, std::vector<sstables::shared_sstable> new_ssts) override;
 
     int64_t total_bytes() const {
         return _total_bytes;
     }
+};
+
+class size_tiered_backlog_tracker final : public tiered_backlog_tracker {
+    sstables::size_tiered_compaction_strategy_options _stcs_options;
+    std::unordered_set<sstables::shared_sstable> _all;
+private:
+    virtual void do_refresh_sstables_backlog_contribution() override;
+public:
+    size_tiered_backlog_tracker(sstables::size_tiered_compaction_strategy_options stcs_options) : _stcs_options(stcs_options) {}
+
+    // Removing could be the result of a failure of an in progress write, successful finish of a
+    // compaction, or some one-off operation, like drop
+    virtual void replace_sstables(std::vector<sstables::shared_sstable> old_ssts, std::vector<sstables::shared_sstable> new_ssts) override;
 };

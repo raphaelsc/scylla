@@ -100,8 +100,8 @@ compaction_strategy_impl::compaction_strategy_impl(const std::map<sstring, sstri
 
 } // namespace sstables
 
-size_tiered_backlog_tracker::inflight_component
-size_tiered_backlog_tracker::compacted_backlog(const compaction_backlog_tracker::ongoing_compactions& ongoing_compactions) const {
+tiered_backlog_tracker::inflight_component
+tiered_backlog_tracker::compacted_backlog(const compaction_backlog_tracker::ongoing_compactions& ongoing_compactions) const {
     inflight_component in;
     for (auto const& crp : ongoing_compactions) {
         // A SSTable being compacted may not contribute to backlog if compaction strategy decided
@@ -117,13 +117,16 @@ size_tiered_backlog_tracker::compacted_backlog(const compaction_backlog_tracker:
     return in;
 }
 
-void size_tiered_backlog_tracker::refresh_sstables_backlog_contribution() {
+void tiered_backlog_tracker::refresh_sstables_backlog_contribution() {
     _total_backlog_bytes = 0;
     _sstables_backlog_contribution = 0.0f;
     _sstable_runs_contributing_backlog = {};
-    if (_all.empty()) {
-        return;
+    if (_total_bytes > 0) {
+        do_refresh_sstables_backlog_contribution();
     }
+}
+
+void size_tiered_backlog_tracker::do_refresh_sstables_backlog_contribution() {
     using namespace sstables;
 
     // Deduce threshold from the last SSTable added to the set
@@ -148,7 +151,7 @@ void size_tiered_backlog_tracker::refresh_sstables_backlog_contribution() {
     }
 }
 
-double size_tiered_backlog_tracker::backlog(const compaction_backlog_tracker::ongoing_writes& ow, const compaction_backlog_tracker::ongoing_compactions& oc) const {
+double tiered_backlog_tracker::backlog(const compaction_backlog_tracker::ongoing_writes& ow, const compaction_backlog_tracker::ongoing_compactions& oc) const {
     inflight_component compacted = compacted_backlog(oc);
 
     // Bail out if effective backlog is zero, which happens in a small window where ongoing compaction exhausted
