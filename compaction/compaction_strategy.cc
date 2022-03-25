@@ -107,7 +107,7 @@ size_tiered_backlog_tracker::compacted_backlog(const compaction_backlog_tracker:
         // A SSTable being compacted may not contribute to backlog if compaction strategy decided
         // to perform a low-efficiency compaction when system is under little load, or when user
         // performs major even though strategy is completely satisfied
-        if (!_sstables_contributing_backlog.contains(crp.first)) {
+        if (!_sstable_runs_contributing_backlog.contains(crp.first->run_identifier())) {
             continue;
         }
         auto compacted = crp.second->compacted();
@@ -118,8 +118,9 @@ size_tiered_backlog_tracker::compacted_backlog(const compaction_backlog_tracker:
 }
 
 void size_tiered_backlog_tracker::refresh_sstables_backlog_contribution() {
+    _total_backlog_bytes = 0;
     _sstables_backlog_contribution = 0.0f;
-    _sstables_contributing_backlog = {};
+    _sstable_runs_contributing_backlog = {};
     if (_all.empty()) {
         return;
     }
@@ -138,22 +139,21 @@ void size_tiered_backlog_tracker::refresh_sstables_backlog_contribution() {
         if (!size_tiered_compaction_strategy::is_bucket_interesting(bucket, threshold)) {
             continue;
         }
-        _sstables_backlog_contribution += boost::accumulate(bucket | boost::adaptors::transformed([this] (const shared_sstable& sst) -> double {
-            return sst->data_size() * log4(sst->data_size());
-        }), double(0.0f));
         // Controller is disabled if exception is caught during add / remove calls, so not making any effort to make this exception safe
-        _sstables_contributing_backlog.insert(bucket.begin(), bucket.end());
+        for (const shared_sstable& sst : bucket) {
+            _sstable_runs_contributing_backlog.insert(sst->run_identifier());
+            _sstables_backlog_contribution += sst->data_size() * log4(sst->data_size());
+            _total_backlog_bytes += sst->data_size();
+        }
     }
 }
 
 double size_tiered_backlog_tracker::backlog(const compaction_backlog_tracker::ongoing_writes& ow, const compaction_backlog_tracker::ongoing_compactions& oc) const {
     inflight_component compacted = compacted_backlog(oc);
 
-    auto total_backlog_bytes = boost::accumulate(_sstables_contributing_backlog | boost::adaptors::transformed(std::mem_fn(&sstables::sstable::data_size)), uint64_t(0));
-
     // Bail out if effective backlog is zero, which happens in a small window where ongoing compaction exhausted
     // input files but is still sealing output files or doing managerial stuff like updating history table
-    if (total_backlog_bytes <= compacted.total_bytes) {
+    if (_total_backlog_bytes <= compacted.total_bytes) {
         return 0;
     }
 
@@ -163,7 +163,7 @@ double size_tiered_backlog_tracker::backlog(const compaction_backlog_tracker::on
     // For the meaning of each variable, please refer to the doc in size_tiered_backlog_tracker.hh
 
     // Sum of (Si - Ci) for all SSTables contributing backlog
-    auto effective_backlog_bytes = total_backlog_bytes - compacted.total_bytes;
+    auto effective_backlog_bytes = _total_backlog_bytes - compacted.total_bytes;
 
     // Sum of (Si - Ci) * log (Si) for all SSTables contributing backlog
     auto sstables_contribution = _sstables_backlog_contribution - compacted.contribution;

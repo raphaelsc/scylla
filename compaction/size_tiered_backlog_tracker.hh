@@ -67,8 +67,9 @@
 class size_tiered_backlog_tracker final : public compaction_backlog_tracker::impl {
     sstables::size_tiered_compaction_strategy_options _stcs_options;
     uint64_t _total_bytes = 0;
+    uint64_t _total_backlog_bytes = 0;
     double _sstables_backlog_contribution = 0.0f;
-    std::unordered_set<sstables::shared_sstable> _sstables_contributing_backlog;
+    std::unordered_set<utils::UUID> _sstable_runs_contributing_backlog;
     std::unordered_set<sstables::shared_sstable> _all;
 
     struct inflight_component {
