@@ -3165,7 +3165,7 @@ SEASTAR_TEST_CASE(compaction_strategy_aware_major_compaction_test) {
             auto cs = sstables::make_compaction_strategy(sstables::compaction_strategy_type::leveled, cf.schema()->compaction_strategy_options());
             auto descriptor = cs.get_major_compaction_job(*table_s, candidates);
             BOOST_REQUIRE(descriptor.sstables.size() == candidates.size());
-            BOOST_REQUIRE(uint32_t(descriptor.level) == sst2->get_sstable_level());
+            BOOST_REQUIRE(uint32_t(descriptor.level) == ideal_level_for_input(candidates, 160*1024*1024));
         }
 
         {
