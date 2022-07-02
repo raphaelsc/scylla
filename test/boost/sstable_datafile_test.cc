@@ -3149,3 +3149,113 @@ SEASTAR_TEST_CASE(test_index_fast_forwarding_after_eof) {
         return make_ready_future<>();
     });
 }
+
+// Validate the clustering range metadata for first and last partition keys in a sstable, and also
+// validate the correctness of the clustering key filtering using that metadata.
+SEASTAR_TEST_CASE(clustering_key_metadata_from_promoted_index_test) {
+    return test_env::do_with_async([] (test_env& env) {
+        class with_tombstone_tag;
+        using with_tombstone = bool_class<with_tombstone_tag>;
+
+        auto run_ck_metadata_test = [&] (with_tombstone with_tombstone) {
+            testlog.info("run_ck_metadata_test: with_tombstone={}", with_tombstone);
+            simple_schema ss;
+            auto s = ss.schema();
+            auto pks = ss.make_pkeys(3);
+            auto tmp = tmpdir();
+            auto sst_gen = [&env, s, &tmp]() {
+                return env.make_sstable(s, tmp.path().string(), 1, sstables::get_highest_sstable_version(), big);
+            };
+
+            // Ensure at least one promoted index is written.
+            const uint64_t target_size = env.db_config().column_index_size_in_kb() * 1024 * 1.5;
+
+            std::optional<clustering_key_prefix> first_ckey_prefix, last_ckey_prefix;
+            std::vector<mutation> muts;
+            static constexpr unsigned middle_partition_ckey_start = 0;
+            static constexpr unsigned first_and_last_partition_ckey_start = 1;
+
+            // optionally store partition tombstone in first pkey
+            if (with_tombstone) {
+                auto mut1 = mutation(s, pks[0]);
+                mut1.partition().apply(tombstone(ss.new_timestamp(), gc_clock::now()));
+                muts.push_back(std::move(mut1));
+            }
+
+            auto mut = mutation(s, pks[1]); // middle partition (token wise order)
+            auto ckey = ss.make_ckey(middle_partition_ckey_start);
+            first_ckey_prefix = ckey; // ckey idx is 0, so first ckey prefix in the sstable.
+            mut.partition().apply_insert(*s, ckey, ss.new_timestamp());
+            muts.push_back(std::move(mut));
+
+            muts.reserve(muts.size() + target_size / ckey.representation().size() * 2);
+            for (size_t idx = 0, estimated_size = 0; estimated_size < target_size; idx++) {
+                auto ckey = ss.make_ckey(first_and_last_partition_ckey_start + idx);
+                last_ckey_prefix = ckey;
+                estimated_size += ckey.representation().size();
+
+                auto mut1 = mutation(s, pks[0]);
+                mut1.partition().apply_insert(*s, ckey, ss.new_timestamp());
+                muts.push_back(std::move(mut1));
+
+                auto mut2 = mutation(s, pks[2]);
+                mut2.partition().apply_insert(*s, ckey, ss.new_timestamp());
+                muts.push_back(std::move(mut2));
+            }
+
+            auto sst = make_sstable_containing(sst_gen, std::move(muts));
+
+            position_in_partition::equal_compare eq(*s);
+
+            // If with_tombstone, then min and max metadata should include all clustered rows
+            if (with_tombstone) {
+                BOOST_REQUIRE(eq(sst->min_position(), position_in_partition::before_all_clustered_rows()));
+                BOOST_REQUIRE(eq(sst->max_position(), position_in_partition::after_all_clustered_rows()));
+            } else {
+                BOOST_REQUIRE(sst->min_position().key() == *first_ckey_prefix);
+                BOOST_REQUIRE(sst->max_position().key() == *last_ckey_prefix);
+            }
+
+            sstables::index_reader idx_reader(sst, env.make_reader_permit(), default_priority_class(), {}, sstables::use_caching::no);
+            auto close_idx_reader = deferred_close(idx_reader);
+
+            auto first_pkey_ck_range = idx_reader.clustering_range_for(dht::ring_position_view(sst->get_first_decorated_key())).get0();
+            auto last_pkey_ck_range = idx_reader.clustering_range_for(dht::ring_position_view(sst->get_last_decorated_key())).get0();
+
+            auto cmp_position_range = [&eq] (const position_range& a, const position_range& b) {
+                testlog.info("check if position_range {} is equal to {}...", a, b);
+                BOOST_REQUIRE(eq(a.start(), b.start()));
+                BOOST_REQUIRE(eq(a.end(), b.end()));
+            };
+
+            auto expected_range = position_range(
+                position_in_partition(position_in_partition::range_tag_t(), bound_kind::incl_start, ss.make_ckey(first_and_last_partition_ckey_start)),
+                position_in_partition(position_in_partition::range_tag_t(), bound_kind::incl_end, std::move(*last_ckey_prefix)));
+
+            // If with_tombstone, first key will have partition tombstone, so clustering_range_for() should return
+            // position_range::all_clustered_rows() for it.
+            cmp_position_range(first_pkey_ck_range, with_tombstone ? position_range::all_clustered_rows() : expected_range);
+            cmp_position_range(last_pkey_ck_range, expected_range);
+
+            cmp_position_range(sst->first_key_position_range(), with_tombstone ? position_range::all_clustered_rows() : expected_range);
+            cmp_position_range(sst->last_key_position_range(), expected_range);
+
+            // first and last pkeys start at ckey index of 1.
+            auto range_present_in_first_and_last_pkeys = query::clustering_range(ss.make_ckey(first_and_last_partition_ckey_start), ss.make_ckey(first_and_last_partition_ckey_start + 1));
+            auto range_not_present_in_first_and_last_pkeys = query::clustering_range(ss.make_ckey(middle_partition_ckey_start), ss.make_ckey(middle_partition_ckey_start));
+
+            BOOST_REQUIRE(sst->may_contain_rows(pks[0], { range_present_in_first_and_last_pkeys }) == true);
+            BOOST_REQUIRE(with_tombstone || sst->may_contain_rows(pks[0], { range_not_present_in_first_and_last_pkeys }) == false);
+
+            // extra ckey metadata is only for first and last pkeys, so may_contain_rows() returns true if queried range is possibly stored in the file.
+            BOOST_REQUIRE(sst->may_contain_rows(pks[1], { range_present_in_first_and_last_pkeys }) == true);
+            BOOST_REQUIRE(sst->may_contain_rows(pks[1], { range_not_present_in_first_and_last_pkeys }) == true);
+
+            BOOST_REQUIRE(sst->may_contain_rows(pks[2], { range_present_in_first_and_last_pkeys }) == true);
+            BOOST_REQUIRE(sst->may_contain_rows(pks[2], { range_not_present_in_first_and_last_pkeys }) == false);
+        };
+
+        run_ck_metadata_test(with_tombstone::yes);
+        run_ck_metadata_test(with_tombstone::no);
+    });
+}
