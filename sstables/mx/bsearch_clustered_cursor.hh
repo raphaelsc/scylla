@@ -526,6 +526,22 @@ public:
         });
     }
 
+    future<position_range> full_clustering_range() override {
+        if (_blocks_count == 0) {
+            co_return position_range::all_clustered_rows();
+        }
+
+        auto first_block = co_await _promoted_index.get_block(0, _trace_state);
+        auto last_block = co_await _promoted_index.get_block(_blocks_count - 1, _trace_state);
+
+        auto first_ckey_prefix = first_block->start->key(); // very first ckey prefix for current partition
+        auto last_ckey_prefix = last_block->end->key(); // very last ckey prefix for current partition
+
+        co_return position_range(
+            position_in_partition(position_in_partition::range_tag_t(), bound_kind::incl_start, std::move(first_ckey_prefix)),
+            position_in_partition(position_in_partition::range_tag_t(), bound_kind::incl_end, std::move(last_ckey_prefix)));
+    }
+
     // Advances the cursor to the first promoted index block whose start position is greater than `pos`
     // or to the end if there is no such block.
     //

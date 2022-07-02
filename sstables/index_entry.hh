@@ -197,6 +197,11 @@ public:
     //
     // The returned entry_info is only valid until the next invocation of any method on this instance.
     virtual future<std::optional<entry_info>> next_entry() = 0;
+
+    // Returns position_range containing all the clustering elements of this partition.
+    virtual future<position_range> full_clustering_range() {
+        return make_ready_future<position_range>(position_range::all_clustered_rows());
+    }
 };
 
 // Allocated inside LSA.

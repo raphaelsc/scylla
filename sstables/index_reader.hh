@@ -1036,6 +1036,29 @@ public:
         return cur_bsearch->last_block_offset();
     }
 
+    // Return position_range on the first partition which is not smaller than pos.
+    // Must be called for non-decreasing positions.
+    // If (sstable version < mc), then position_range::all_clustered_rows() is returned
+    future<position_range> clustering_range_for(dht::ring_position_view pos) {
+        co_await advance_to(pos);
+        co_await read_partition_data();
+        assert(partition_data_ready());
+        sstlog.trace("clustering_range_for {}: pkey: {}, pi size: {}", pos, get_partition_key(), get_promoted_index_size());
+
+        if (partition_tombstone() && tombstone(*partition_tombstone())) {
+            sstlog.trace("clustering_range_for {}: has partition tombstone {}", pos, partition_tombstone());
+            co_return position_range::all_clustered_rows();
+        }
+
+        auto cur = current_clustered_cursor();
+        if (!cur) {
+            sstlog.trace("clustering_range_for {}: has not clustered cursor", pos);
+            co_return position_range::all_clustered_rows();
+        }
+
+        co_return co_await cur->full_clustering_range();
+    }
+
     // Moves the cursor to the beginning of next partition.
     // Can be called only when !eof().
     future<> advance_to_next_partition() {
