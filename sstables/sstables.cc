@@ -1149,16 +1149,32 @@ void sstable::validate_max_local_deletion_time() {
     }
 }
 
-void sstable::set_position_range() {
+future<> sstable::set_position_range() {
     if (!_schema->clustering_key_size()) {
-        return;
+        co_return;
+    }
+
+    auto sem = reader_concurrency_semaphore(reader_concurrency_semaphore::no_limits{}, "sstable::set_position_range()");
+    std::exception_ptr ex;
+    try {
+        auto idx_reader = index_reader(shared_from_this(), sem.make_tracking_only_permit(_schema.get(), get_filename(), db::no_timeout), default_priority_class(), tracing::trace_state_ptr(), use_caching::yes);
+
+        _first_key_position_range = co_await idx_reader.clustering_range_for(dht::ring_position_view(get_first_decorated_key()));
+        _last_key_position_range = co_await idx_reader.clustering_range_for(dht::ring_position_view(get_last_decorated_key()));
+    } catch (...) {
+        ex = std::current_exception();
+    }
+    co_await sem.stop();
+
+    if (ex) {
+        std::rethrow_exception(ex);
     }
 
     auto& min_elements = get_stats_metadata().min_column_names.elements;
     auto& max_elements = get_stats_metadata().max_column_names.elements;
 
     if (min_elements.empty() && max_elements.empty()) {
-        return;
+        co_return;
     }
 
     auto pip = [] (const utils::chunked_vector<disk_string<uint16_t>>& column_names, bound_kind kind) {
@@ -1301,8 +1317,9 @@ future<> sstable::update_info_for_opened_data() {
         }
         return make_ready_future<>();
     }).then([this] {
-        this->set_position_range();
         this->set_first_and_last_keys();
+        return this->set_position_range();
+    }).then([this] {
         _run_identifier = _components->scylla_metadata->get_optional_run_identifier().value_or(utils::make_random_uuid());
 
         // Get disk usage for this sstable (includes all components).

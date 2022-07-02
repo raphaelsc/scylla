@@ -467,6 +467,12 @@ public:
         return _position_range.end();
     }
 
+    const position_range& first_key_position_range() const {
+        return _first_key_position_range;
+    }
+    const position_range& last_key_position_range() const {
+        return _last_key_position_range;
+    }
 private:
     size_t sstable_buffer_size;
 
@@ -491,6 +497,8 @@ private:
     uint64_t _bytes_on_disk = 0;
     db_clock::time_point _data_file_write_time;
     position_range _position_range = position_range::all_clustered_rows();
+    position_range _first_key_position_range = position_range::all_clustered_rows();
+    position_range _last_key_position_range = position_range::all_clustered_rows();
     std::vector<unsigned> _shards;
     std::optional<dht::decorated_key> _first;
     std::optional<dht::decorated_key> _last;
@@ -608,10 +616,11 @@ private:
 
     void set_first_and_last_keys();
 
-    // Create a position range based on the min/max_column_names metadata of this sstable.
+    // Create a position range based on the min/max_column_names metadata of this sstable,
+    // and position ranges for first and last partition keys based on promoted index data.
     // It does nothing if schema defines no clustering key, and it's supposed
     // to be called when loading an existing sstable or after writing a new one.
-    void set_position_range();
+    future<> set_position_range();
 
     future<> create_data() noexcept;
 
