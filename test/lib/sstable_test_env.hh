@@ -32,11 +32,13 @@ class test_env {
     std::unique_ptr<cache_tracker> _cache_tracker;
     std::unique_ptr<test_env_sstables_manager> _mgr;
     std::unique_ptr<reader_concurrency_semaphore> _semaphore;
+    const db::config& _db_config;
 public:
     explicit test_env()
         : _cache_tracker(std::make_unique<cache_tracker>())
         , _mgr(std::make_unique<test_env_sstables_manager>(nop_lp_handler, test_db_config, test_feature_service, *_cache_tracker))
-        , _semaphore(std::make_unique<reader_concurrency_semaphore>(reader_concurrency_semaphore::no_limits{}, "sstables::test_env")) { }
+        , _semaphore(std::make_unique<reader_concurrency_semaphore>(reader_concurrency_semaphore::no_limits{}, "sstables::test_env"))
+        , _db_config(test_db_config) {}
 
     future<> stop() {
         return _mgr->close().finally([this] {
@@ -69,6 +71,7 @@ public:
 
     test_env_sstables_manager& manager() { return *_mgr; }
     reader_concurrency_semaphore& semaphore() { return *_semaphore; }
+    const db::config& db_config() const { return _db_config; }
     reader_permit make_reader_permit(const schema* const s, const char* n, db::timeout_clock::time_point timeout) {
         return _semaphore->make_tracking_only_permit(s, n, timeout);
     }
