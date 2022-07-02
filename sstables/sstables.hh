@@ -839,8 +839,8 @@ public:
         return _version >= sstable_version_types::md;
     }
 
-    // Return true if this sstable possibly stores clustering row(s) specified by ranges.
-    bool may_contain_rows(const query::clustering_row_ranges& ranges) const;
+    // Return true if this sstable possibly stores clustering row(s) specified by ranges for a given partition key.
+    bool may_contain_rows(dht::ring_position_view pos, const query::clustering_row_ranges& ranges) const;
 
     // false => there are no partition tombstones, true => we don't know
     bool may_have_partition_tombstones() const {

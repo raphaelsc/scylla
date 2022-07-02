@@ -729,7 +729,7 @@ filter_sstable_for_reader_by_pk(std::vector<shared_sstable>&& sstables, const sc
 // of a range for each clustering component.
 static std::vector<shared_sstable>
 filter_sstable_for_reader_by_ck(std::vector<shared_sstable>&& sstables, replica::column_family& cf, const schema_ptr& schema,
-        const query::partition_slice& slice) {
+        dht::ring_position_view pos, const query::partition_slice& slice) {
     // no clustering filtering is applied if schema defines no clustering key or
     // compaction strategy thinks it will not benefit from such an optimization,
     // or the partition_slice includes static columns.
@@ -750,8 +750,8 @@ filter_sstable_for_reader_by_ck(std::vector<shared_sstable>&& sstables, replica:
         return std::move(sstables);
     }
 
-    auto skipped = std::partition(sstables.begin(), sstables.end(), [&ranges = ck_filtering_all_ranges] (const shared_sstable& sst) {
-        return sst->may_contain_rows(ranges);
+    auto skipped = std::partition(sstables.begin(), sstables.end(), [&pos, &ranges = ck_filtering_all_ranges] (const shared_sstable& sst) {
+        return sst->may_contain_rows(pos, ranges);
     });
     sstables.erase(skipped, sstables.end());
     stats->surviving_sstables_after_clustering_filter += sstables.size();
@@ -784,7 +784,7 @@ sstable_set_impl::create_single_key_sstable_reader(
         return make_empty_flat_reader_v2(schema, permit);
     }
     auto readers = boost::copy_range<std::vector<flat_mutation_reader_v2>>(
-        filter_sstable_for_reader_by_ck(std::move(selected_sstables), *cf, schema, slice)
+        filter_sstable_for_reader_by_ck(std::move(selected_sstables), *cf, schema, pos, slice)
         | boost::adaptors::transformed([&] (const shared_sstable& sstable) {
             tracing::trace(trace_state, "Reading key {} from sstable {}", pos, seastar::value_of([&sstable] { return sstable->get_filename(); }));
             return sstable->make_reader(schema, permit, pr, slice, pc, trace_state, fwd);
@@ -857,7 +857,7 @@ time_series_sstable_set::create_single_key_sstable_reader(
         return sst.make_reader(schema, permit, pr, slice, pc, trace_state, fwd_sm);
     };
 
-    auto ck_filter = [ranges = slice.get_all_ranges()] (const sstable& sst) { return sst.may_contain_rows(ranges); };
+    auto ck_filter = [pos, ranges = slice.get_all_ranges()] (const sstable& sst) { return sst.may_contain_rows(pos, ranges); };
 
     // We're going to pass this filter into sstable_position_reader_queue. The queue guarantees that
     // the filter is going to be called at most once for each sstable and exactly once after

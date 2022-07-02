@@ -1626,7 +1626,7 @@ sstable::write_scylla_metadata(const io_priority_class& pc, shard_id shard, ssta
     write_simple<component_type::Scylla>(*_components->scylla_metadata, pc);
 }
 
-bool sstable::may_contain_rows(const query::clustering_row_ranges& ranges) const {
+bool sstable::may_contain_rows(dht::ring_position_view pos, const query::clustering_row_ranges& ranges) const {
     if (_version < sstables::sstable_version_types::md) {
         return true;
     }
@@ -1642,11 +1642,25 @@ bool sstable::may_contain_rows(const query::clustering_row_ranges& ranges) const
         }
     }
 
-    return std::ranges::any_of(ranges, [this] (const query::clustering_range& range) {
-        return _position_range.overlaps(*_schema,
-            position_in_partition_view::for_range_start(range),
-            position_in_partition_view::for_range_end(range));
-    });
+    dht::ring_position_comparator tri_cmp(*_schema);
+
+    auto overlaps = [this, &ranges] (const position_range& position_range) {
+        return std::ranges::any_of(ranges, [this, position_range] (const query::clustering_range& range) {
+            return position_range.overlaps(*_schema,
+                position_in_partition_view::for_range_start(range),
+                position_in_partition_view::for_range_end(range));
+        });
+    };
+
+    if (tri_cmp(pos, get_first_decorated_key()) == 0) {
+        return overlaps(_first_key_position_range);
+    }
+
+    if (tri_cmp(pos, get_last_decorated_key()) == 0) {
+        return overlaps(_last_key_position_range);
+    }
+
+    return overlaps(_position_range);
 }
 
 future<> sstable::seal_sstable(bool backup)
