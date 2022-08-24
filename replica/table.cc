@@ -1922,7 +1922,7 @@ db::replay_position table::set_low_replay_position_mark() {
 
 template<typename... Args>
 void table::do_apply(db::rp_handle&& h, Args&&... args) {
-    if (_async_gate.is_closed()) {
+    if (_async_gate.is_closed()) [[unlikely]] {
         on_internal_error(tlogger, "Table async_gate is closed");
     }
 
