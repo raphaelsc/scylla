@@ -79,6 +79,9 @@ public:
     virtual bool insert(shared_sstable sst) = 0;
     // Return true iff sst was erased
     virtual bool erase(shared_sstable sst) = 0;
+    // Returns a vector holding the unique sstables that were inserted
+    // Guarantees strong exception safety
+    virtual std::vector<shared_sstable> insert(const std::span<shared_sstable>& sstables);
     virtual size_t size() const noexcept = 0;
     virtual uint64_t bytes_on_disk() const noexcept {
         return _bytes_on_disk;
@@ -145,6 +148,9 @@ public:
     bool insert(shared_sstable sst);
     // Return true iff sst was erase
     bool erase(shared_sstable sst);
+    // Returns a vector holding the unique sstables that were inserted
+    // Guarantees strong exception safety
+    std::vector<shared_sstable> insert(const std::span<shared_sstable>& sstables);
     size_t size() const noexcept;
     uint64_t bytes_on_disk() const noexcept;
 

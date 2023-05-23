@@ -182,6 +182,34 @@ sstable_set::erase(shared_sstable sst) {
     return _impl->erase(sst);
 }
 
+// Default implementation for sstable_set_impl vector insert
+std::vector<shared_sstable>
+sstable_set_impl::insert(const std::span<shared_sstable>& sstables) {
+    std::vector<shared_sstable> inserted;
+    inserted.reserve(sstables.size());
+    try {
+        for (const auto& sst : sstables) {
+            if (insert(sst)) {
+                inserted.emplace_back(sst);
+            }
+        }
+    } catch (...) {
+        for (const auto& sst : inserted) {
+            auto erased = erase(sst);
+            if (!erased) {
+                on_fatal_internal_error(sstlog, fmt::format("sstable {} was not erased after insert failure: {}", sst, std::current_exception()));
+            }
+        }
+        throw;
+    }
+    return inserted;
+}
+
+std::vector<shared_sstable>
+sstable_set::insert(const std::span<shared_sstable>& sstables) {
+    return _impl->insert(sstables);
+}
+
 size_t
 sstable_set::size() const noexcept {
     return _impl->size();
@@ -1125,6 +1153,9 @@ bool compound_sstable_set::insert(shared_sstable sst) {
     throw_with_backtrace<std::bad_function_call>();
 }
 bool compound_sstable_set::erase(shared_sstable sst) {
+    throw_with_backtrace<std::bad_function_call>();
+}
+std::vector<shared_sstable> compound_sstable_set::insert(const std::span<shared_sstable>& ssts) {
     throw_with_backtrace<std::bad_function_call>();
 }
 

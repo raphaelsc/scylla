@@ -137,6 +137,7 @@ public:
     virtual future<stop_iteration> for_each_sstable_gently_until(std::function<future<stop_iteration>(const shared_sstable&)> func) const override;
     virtual bool insert(shared_sstable sst) override;
     virtual bool erase(shared_sstable sst) override;
+    virtual std::vector<shared_sstable> insert(const std::span<shared_sstable>& sstables) override;
     virtual size_t size() const noexcept override;
     virtual uint64_t bytes_on_disk() const noexcept override;
     virtual std::unique_ptr<incremental_selector_impl> make_incremental_selector() const override;
