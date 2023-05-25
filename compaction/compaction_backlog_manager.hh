@@ -63,6 +63,7 @@ public:
         virtual void replace_sstables(const std::vector<sstables::shared_sstable>& old_ssts, const std::vector<sstables::shared_sstable>& new_ssts) = 0;
         virtual double backlog(const ongoing_writes& ow, const ongoing_compactions& oc) const = 0;
         virtual ~impl() { }
+        virtual std::unique_ptr<impl> clone() const = 0;
     };
 
     compaction_backlog_tracker(std::unique_ptr<impl> impl) : _impl(std::move(impl)) {}
@@ -71,6 +72,9 @@ public:
     compaction_backlog_tracker& operator=(compaction_backlog_tracker&&) noexcept;
     compaction_backlog_tracker(const compaction_backlog_tracker&) = delete;
     ~compaction_backlog_tracker();
+
+    // Clone the tracker and return an unregistered, mutable copy of it.
+    compaction_backlog_tracker clone() const;
 
     double backlog() const;
     // FIXME: Should provide strong exception safety guarantees

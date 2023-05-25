@@ -293,6 +293,10 @@ void compaction_manager::deregister_compacting_sstables(const Range& sstables) {
 class user_initiated_backlog_tracker final : public compaction_backlog_tracker::impl {
 public:
     explicit user_initiated_backlog_tracker(float added_backlog, size_t available_memory) : _added_backlog(added_backlog), _available_memory(available_memory) {}
+
+    virtual std::unique_ptr<compaction_backlog_tracker::impl> clone() const override {
+        return std::make_unique<user_initiated_backlog_tracker>(*this);
+    }
 private:
     float _added_backlog;
     size_t _available_memory;
@@ -2136,6 +2140,13 @@ compaction_backlog_tracker::~compaction_backlog_tracker() {
     if (_manager) {
         _manager->remove_backlog_tracker(this);
     }
+}
+
+compaction_backlog_tracker compaction_backlog_tracker::clone() const {
+    auto ret = compaction_backlog_tracker(_impl->clone());
+    ret._ongoing_writes = _ongoing_writes;
+    ret._ongoing_compactions = _ongoing_compactions;
+    return ret;
 }
 
 void compaction_backlog_manager::remove_backlog_tracker(compaction_backlog_tracker* tracker) {

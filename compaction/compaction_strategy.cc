@@ -234,6 +234,10 @@ public:
         , _stcs_options(stcs_options)
     {}
 
+    virtual std::unique_ptr<compaction_backlog_tracker::impl> clone() const override {
+        return std::make_unique<time_window_backlog_tracker>(*this);
+    }
+
     virtual double backlog(const compaction_backlog_tracker::ongoing_writes& ow, const compaction_backlog_tracker::ongoing_compactions& oc) const override {
         std::unordered_map<api::timestamp_type, compaction_backlog_tracker::ongoing_writes> writes_per_window;
         std::unordered_map<api::timestamp_type, compaction_backlog_tracker::ongoing_compactions> compactions_per_window;
@@ -337,6 +341,10 @@ public:
         , _size_per_level(leveled_manifest::MAX_LEVELS, uint64_t(0))
         , _max_sstable_size(max_sstable_size_in_mb * 1024 * 1024)
     {}
+
+    virtual std::unique_ptr<compaction_backlog_tracker::impl> clone() const override {
+        return std::make_unique<leveled_compaction_backlog_tracker>(*this);
+    }
 
     virtual double backlog(const compaction_backlog_tracker::ongoing_writes& ow, const compaction_backlog_tracker::ongoing_compactions& oc) const override {
         std::vector<uint64_t> effective_size_per_level = _size_per_level;
@@ -450,6 +458,9 @@ public:
 };
 
 struct unimplemented_backlog_tracker final : public compaction_backlog_tracker::impl {
+    virtual std::unique_ptr<compaction_backlog_tracker::impl> clone() const override {
+        return std::make_unique<unimplemented_backlog_tracker>(*this);
+    }
     virtual double backlog(const compaction_backlog_tracker::ongoing_writes& ow, const compaction_backlog_tracker::ongoing_compactions& oc) const override {
         return compaction_controller::disable_backlog;
     }
@@ -457,6 +468,9 @@ struct unimplemented_backlog_tracker final : public compaction_backlog_tracker::
 };
 
 struct null_backlog_tracker final : public compaction_backlog_tracker::impl {
+    virtual std::unique_ptr<compaction_backlog_tracker::impl> clone() const override {
+        return std::make_unique<null_backlog_tracker>(*this);
+    }
     virtual double backlog(const compaction_backlog_tracker::ongoing_writes& ow, const compaction_backlog_tracker::ongoing_compactions& oc) const override {
         return 0;
     }
