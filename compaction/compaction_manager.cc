@@ -2115,7 +2115,7 @@ void compaction_backlog_tracker::revert_charges(sstables::shared_sstable sst) {
     _ongoing_compactions.erase(sst);
 }
 
-compaction_backlog_tracker::compaction_backlog_tracker(compaction_backlog_tracker&& other)
+compaction_backlog_tracker::compaction_backlog_tracker(compaction_backlog_tracker&& other) noexcept
         : _impl(std::move(other._impl))
         , _ongoing_writes(std::move(other._ongoing_writes))
         , _ongoing_compactions(std::move(other._ongoing_compactions))
