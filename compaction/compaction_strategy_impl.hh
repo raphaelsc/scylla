@@ -53,7 +53,7 @@ public:
         return true;
     }
     virtual int64_t estimated_pending_compactions(table_state& table_s) const = 0;
-    virtual std::unique_ptr<sstable_set_impl> make_sstable_set(schema_ptr schema) const;
+    virtual sstable_set_impl_ptr make_sstable_set(schema_ptr schema) const;
 
     bool use_clustering_key_filter() const {
         return _use_clustering_key_filter;

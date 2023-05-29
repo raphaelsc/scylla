@@ -1819,9 +1819,6 @@ future<> compaction_manager::try_perform_cleanup(owned_ranges_ptr sorted_owned_r
     auto& cs = get_compaction_state(&t);
     co_await run_with_compaction_disabled(t, [&] () -> future<> {
         auto update_sstables_cleanup_state = [&] (const sstables::sstable_set& set) -> future<> {
-            // Hold on to the sstable set since it may be overwritten
-            // while we yield in this loop.
-            auto set_holder = set.shared_from_this();
             co_await set.for_each_sstable_gently([&] (const sstables::shared_sstable& sst) {
                 update_sstable_cleanup_state(t, sst, *sorted_owned_ranges);
             });

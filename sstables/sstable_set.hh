@@ -49,6 +49,9 @@ public:
     double estimate_droppable_tombstone_ratio(gc_clock::time_point gc_before) const;
 };
 
+class sstable_set_impl;
+using sstable_set_impl_ptr = seastar::shared_ptr<sstable_set_impl>;
+
 class incremental_selector_impl {
 public:
     virtual ~incremental_selector_impl() {}
@@ -69,7 +72,7 @@ public:
     sstable_set_impl() = default;
     sstable_set_impl(const sstable_set_impl&) = default;
     virtual ~sstable_set_impl() {}
-    virtual std::unique_ptr<sstable_set_impl> clone() const = 0;
+    virtual sstable_set_impl_ptr clone() const = 0;
     virtual std::vector<shared_sstable> select(const dht::partition_range& range) const = 0;
     virtual std::vector<sstable_run> select_sstable_runs(const std::vector<shared_sstable>& sstables) const;
     virtual lw_shared_ptr<const sstable_list> all() const = 0;
@@ -108,11 +111,11 @@ public:
 };
 
 class sstable_set : public enable_lw_shared_from_this<sstable_set> {
-    std::unique_ptr<sstable_set_impl> _impl;
+    sstable_set_impl_ptr _impl;
     schema_ptr _schema;
 public:
     ~sstable_set();
-    sstable_set(std::unique_ptr<sstable_set_impl> impl, schema_ptr s);
+    sstable_set(sstable_set_impl_ptr impl, schema_ptr s);
     sstable_set(const sstable_set&);
     sstable_set(sstable_set&&) noexcept;
     sstable_set& operator=(const sstable_set&);
@@ -128,7 +131,8 @@ public:
     requires std::same_as<typename futurize<std::invoke_result_t<Func, shared_sstable>>::type, future<>>
     future<> for_each_sstable_gently(Func&& func) const {
         using futurator = futurize<std::invoke_result_t<Func, shared_sstable>>;
-        co_await _impl->for_each_sstable_gently_until([func = std::forward<Func>(func)] (const shared_sstable& sst) -> future<stop_iteration> {
+        auto impl = _impl;
+        co_await impl->for_each_sstable_gently_until([func = std::forward<Func>(func)] (const shared_sstable& sst) -> future<stop_iteration> {
             co_await futurator::invoke(func, sst);
             co_return stop_iteration::no;
         });
@@ -139,7 +143,8 @@ public:
     template <typename Func>
     requires std::same_as<typename futurize<std::invoke_result_t<Func, shared_sstable>>::type, future<stop_iteration>>
     future<stop_iteration> for_each_sstable_gently_until(Func&& func) const {
-        return _impl->for_each_sstable_gently_until([func = std::forward<Func>(func)] (const shared_sstable& sst) -> future<stop_iteration> {
+        auto impl = _impl;
+        co_return co_await impl->for_each_sstable_gently_until([func = std::forward<Func>(func)] (const shared_sstable& sst) -> future<stop_iteration> {
             using futurator = futurize<std::invoke_result_t<Func, shared_sstable>>;
             return futurator::invoke(func, sst);
         });
