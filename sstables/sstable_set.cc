@@ -244,7 +244,8 @@ sstable_set::incremental_selector::select(const dht::ring_position_view& pos) co
 
 sstable_set::incremental_selector
 sstable_set::make_incremental_selector() const {
-    return incremental_selector(_impl->make_incremental_selector(), *_schema);
+    auto impl = _impl;
+    return incremental_selector(impl->make_incremental_selector(impl), *_schema);
 }
 
 partitioned_sstable_set::interval_type partitioned_sstable_set::make_interval(const schema& s, const dht::partition_range& range) {
@@ -464,9 +465,10 @@ private:
         }
     }
 public:
-    incremental_selector(schema_ptr schema, const std::vector<shared_sstable>& unleveled_sstables, const interval_map_type& leveled_sstables,
+    incremental_selector(sstable_set_impl_ptr set_impl, schema_ptr schema, const std::vector<shared_sstable>& unleveled_sstables, const interval_map_type& leveled_sstables,
                          const uint64_t& leveled_sstables_change_cnt)
-        : _schema(std::move(schema))
+        : incremental_selector_impl(std::move(set_impl))
+        , _schema(std::move(schema))
         , _unleveled_sstables(unleveled_sstables)
         , _leveled_sstables(leveled_sstables)
         , _leveled_sstables_change_cnt(leveled_sstables_change_cnt)
@@ -586,11 +588,11 @@ bool time_series_sstable_set::erase(shared_sstable sst) {
     return found;
 }
 
-std::unique_ptr<incremental_selector_impl> time_series_sstable_set::make_incremental_selector() const {
+std::unique_ptr<incremental_selector_impl> time_series_sstable_set::make_incremental_selector(sstable_set_impl_ptr set_impl) const {
     struct selector : public incremental_selector_impl {
         const time_series_sstable_set& _set;
 
-        selector(const time_series_sstable_set& set) : _set(set) {}
+        selector(sstable_set_impl_ptr set_impl, const time_series_sstable_set& set) : incremental_selector_impl(std::move(set_impl)), _set(set) {}
 
         virtual std::tuple<dht::partition_range, std::vector<shared_sstable>, dht::ring_position_ext>
         select(const dht::ring_position_view&) override {
@@ -598,7 +600,7 @@ std::unique_ptr<incremental_selector_impl> time_series_sstable_set::make_increme
         }
     };
 
-    return std::make_unique<selector>(*this);
+    return std::make_unique<selector>(std::move(set_impl), *this);
 }
 
 // Queue of readers of sstables in a time_series_sstable_set,
@@ -754,8 +756,8 @@ std::unique_ptr<position_reader_queue> time_series_sstable_set::make_position_re
             std::move(pk), std::move(permit), fwd_sm, reversed);
 }
 
-std::unique_ptr<incremental_selector_impl> partitioned_sstable_set::make_incremental_selector() const {
-    return std::make_unique<incremental_selector>(_schema, _unleveled_sstables, _leveled_sstables, _leveled_sstables_change_cnt);
+std::unique_ptr<incremental_selector_impl> partitioned_sstable_set::make_incremental_selector(sstable_set_impl_ptr set_impl) const {
+    return std::make_unique<incremental_selector>(std::move(set_impl), _schema, _unleveled_sstables, _leveled_sstables, _leveled_sstables_change_cnt);
 }
 
 sstable_set_impl_ptr compaction_strategy_impl::make_sstable_set(schema_ptr schema) const {
@@ -791,7 +793,6 @@ static logging::logger irclogger("incremental_reader_selector");
 // range.
 class incremental_reader_selector : public reader_selector {
     const dht::partition_range* _pr;
-    lw_shared_ptr<const sstable_set> _sstables;
     tracing::trace_state_ptr _trace_state;
     std::optional<sstable_set::incremental_selector> _selector;
     std::unordered_set<generation_type> _read_sstable_gens;
@@ -804,21 +805,20 @@ class incremental_reader_selector : public reader_selector {
 
 public:
     explicit incremental_reader_selector(schema_ptr s,
-            lw_shared_ptr<const sstable_set> sstables,
+            const sstable_set& sstables,
             const dht::partition_range& pr,
             tracing::trace_state_ptr trace_state,
             sstable_reader_factory_type fn)
         : reader_selector(s, pr.start() ? pr.start()->value() : dht::ring_position_view::min())
         , _pr(&pr)
-        , _sstables(std::move(sstables))
         , _trace_state(std::move(trace_state))
-        , _selector(_sstables->make_incremental_selector())
+        , _selector(sstables.make_incremental_selector())
         , _fn(std::move(fn)) {
 
         irclogger.trace("{}: created for range: {} with {} sstables",
                 fmt::ptr(this),
                 *_pr,
-                _sstables->size());
+                sstables.size());
     }
 
     incremental_reader_selector(const incremental_reader_selector&) = delete;
@@ -1173,18 +1173,17 @@ compound_sstable_set::bytes_on_disk() const noexcept {
 
 class compound_sstable_set::incremental_selector : public incremental_selector_impl {
     const schema& _schema;
-    const std::vector<lw_shared_ptr<sstable_set>>& _sets;
     std::vector<sstable_set::incremental_selector> _selectors;
 private:
     std::vector<sstable_set::incremental_selector> make_selectors(const std::vector<lw_shared_ptr<sstable_set>>& sets) {
-        return boost::copy_range<std::vector<sstable_set::incremental_selector>>(_sets | boost::adaptors::transformed([] (const auto& set) {
+        return boost::copy_range<std::vector<sstable_set::incremental_selector>>(sets | boost::adaptors::transformed([] (const auto& set) {
             return set->make_incremental_selector();
         }));
     }
 public:
-    incremental_selector(const schema& schema, const std::vector<lw_shared_ptr<sstable_set>>& sets)
-            : _schema(schema)
-            , _sets(sets)
+    incremental_selector(sstable_set_impl_ptr set_impl, const schema& schema, const std::vector<lw_shared_ptr<sstable_set>>& sets)
+            : incremental_selector_impl(std::move(set_impl))
+            , _schema(schema)
             , _selectors(make_selectors(sets)) {
     }
 
@@ -1212,7 +1211,7 @@ public:
     }
 };
 
-std::unique_ptr<incremental_selector_impl> compound_sstable_set::make_incremental_selector() const {
+std::unique_ptr<incremental_selector_impl> compound_sstable_set::make_incremental_selector(sstable_set_impl_ptr set_impl) const {
     if (_sets.empty()) {
         // compound_sstable_set must manage one sstable set at least.
         abort();
@@ -1224,10 +1223,10 @@ std::unique_ptr<incremental_selector_impl> compound_sstable_set::make_incrementa
     // optimize for common case where only primary set contains sstables, so its selector can be built without an interposer.
     // optimization also applies when no set contains sstable, so any set can be picked as selection will be a no-op anyway.
     if (non_empty_set_count <= 1) {
-        const auto& set = sets.front();
-        return set->_impl->make_incremental_selector();
+        auto impl = sets.front()->_impl;
+        return impl->make_incremental_selector(impl);
     }
-    return std::make_unique<incremental_selector>(*_schema, _sets);
+    return std::make_unique<incremental_selector>(std::move(set_impl), *_schema, _sets);
 }
 
 sstable_set make_compound_sstable_set(schema_ptr schema, std::vector<lw_shared_ptr<sstable_set>> sets) {
@@ -1362,7 +1361,7 @@ sstable_set::make_range_sstable_reader(
         return sst->make_reader(s, permit, pr, slice, trace_state, fwd, fwd_mr, monitor_generator(sst));
     };
     return make_combined_reader(s, std::move(permit), std::make_unique<incremental_reader_selector>(s,
-                    shared_from_this(),
+                    *this,
                     pr,
                     std::move(trace_state),
                     std::move(reader_factory_fn)),
@@ -1403,7 +1402,7 @@ sstable_set::make_local_shard_sstable_reader(
         return reader_factory_fn(sst, pr);
     }
     return make_combined_reader(s, std::move(permit), std::make_unique<incremental_reader_selector>(s,
-                    shared_from_this(),
+                    *this,
                     pr,
                     std::move(trace_state),
                     std::move(reader_factory_fn)),

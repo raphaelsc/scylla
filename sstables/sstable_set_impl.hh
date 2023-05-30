@@ -69,7 +69,7 @@ public:
     virtual bool insert(shared_sstable sst) override;
     virtual bool erase(shared_sstable sst) override;
     virtual size_t size() const noexcept override;
-    virtual std::unique_ptr<incremental_selector_impl> make_incremental_selector() const override;
+    virtual std::unique_ptr<incremental_selector_impl> make_incremental_selector(sstable_set_impl_ptr set_impl) const override;
     class incremental_selector;
 };
 
@@ -97,7 +97,7 @@ public:
     virtual bool insert(shared_sstable sst) override;
     virtual bool erase(shared_sstable sst) override;
     virtual size_t size() const noexcept override;
-    virtual std::unique_ptr<incremental_selector_impl> make_incremental_selector() const override;
+    virtual std::unique_ptr<incremental_selector_impl> make_incremental_selector(sstable_set_impl_ptr set_impl) const override;
 
     std::unique_ptr<position_reader_queue> make_position_reader_queue(
         std::function<flat_mutation_reader_v2(sstable&)> create_reader,
@@ -140,7 +140,7 @@ public:
     virtual std::vector<shared_sstable> insert(const std::span<shared_sstable>& sstables) override;
     virtual size_t size() const noexcept override;
     virtual uint64_t bytes_on_disk() const noexcept override;
-    virtual std::unique_ptr<incremental_selector_impl> make_incremental_selector() const override;
+    virtual std::unique_ptr<incremental_selector_impl> make_incremental_selector(sstable_set_impl_ptr set_impl) const override;
 
     virtual flat_mutation_reader_v2 create_single_key_sstable_reader(
             replica::column_family*,

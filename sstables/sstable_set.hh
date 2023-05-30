@@ -53,7 +53,10 @@ class sstable_set_impl;
 using sstable_set_impl_ptr = seastar::shared_ptr<sstable_set_impl>;
 
 class incremental_selector_impl {
+    sstable_set_impl_ptr _set_impl;
 public:
+    incremental_selector_impl() = delete;
+    explicit incremental_selector_impl(sstable_set_impl_ptr set_impl) noexcept : _set_impl(std::move(set_impl)) {}
     virtual ~incremental_selector_impl() {}
     virtual std::tuple<dht::partition_range, std::vector<shared_sstable>, dht::ring_position_ext> select(const dht::ring_position_view&) = 0;
 };
@@ -95,7 +98,7 @@ public:
     uint64_t sub_bytes_on_disk(uint64_t delta) noexcept {
         return _bytes_on_disk -= delta;
     }
-    virtual std::unique_ptr<incremental_selector_impl> make_incremental_selector() const = 0;
+    virtual std::unique_ptr<incremental_selector_impl> make_incremental_selector(sstable_set_impl_ptr set_impl) const = 0;
 
     virtual flat_mutation_reader_v2 create_single_key_sstable_reader(
         replica::column_family*,
