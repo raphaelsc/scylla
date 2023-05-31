@@ -562,10 +562,8 @@ private:
         return _config.enable_cache && _schema->caching_options().enabled();
     }
     void update_stats_for_new_sstable(const sstables::shared_sstable& sst) noexcept;
+    void update_sstables_stats(ssize_t count, int64_t bytes_on_disk) noexcept;
     future<> do_add_sstable_and_update_cache(sstables::shared_sstable sst, sstables::offstrategy offstrategy);
-    // Helpers which add sstable on behalf of a compaction group and refreshes compound set.
-    void add_sstable(compaction_group& cg, sstables::shared_sstable sstable);
-    void add_maintenance_sstable(compaction_group& cg, sstables::shared_sstable sst);
     static void add_sstable_to_backlog_tracker(compaction_backlog_tracker& tracker, sstables::shared_sstable sstable);
     static void remove_sstable_from_backlog_tracker(compaction_backlog_tracker& tracker, sstables::shared_sstable sstable);
     lw_shared_ptr<memtable> new_memtable();
@@ -1172,6 +1170,7 @@ public:
     bool requires_cleanup(const sstables::sstable_set& set) const;
 
     friend class compaction_group;
+    friend class table_sstables_adder;
 };
 
 using user_types_metadata = data_dictionary::user_types_metadata;
