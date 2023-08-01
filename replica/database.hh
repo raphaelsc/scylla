@@ -323,6 +323,7 @@ using column_family_stats = table_stats;
 
 class database_sstable_write_monitor;
 class compaction_group;
+using compaction_group_vector = utils::chunked_vector<std::unique_ptr<compaction_group>>;
 
 using enable_backlog_tracker = bool_class<class enable_backlog_tracker_tag>;
 
@@ -425,7 +426,7 @@ private:
 
     compaction_manager& _compaction_manager;
     sstables::compaction_strategy _compaction_strategy;
-    std::vector<std::unique_ptr<compaction_group>> _compaction_groups;
+    compaction_group_vector _compaction_groups;
     // Compound SSTable set for all the compaction groups, which is useful for operations spanning all of them.
     sstables::sstable_set _sstables;
     // Control background fibers waiting for sstables to be deleted
@@ -544,7 +545,7 @@ public:
 
 private:
     using compaction_group_ptr = std::unique_ptr<compaction_group>;
-    std::vector<std::unique_ptr<compaction_group>> make_compaction_groups();
+    compaction_group_vector make_compaction_groups();
     // Return compaction group if table owns a single one. Otherwise, null is returned.
     compaction_group* single_compaction_group_if_available() const noexcept;
     // Select a compaction group from a given token.
@@ -554,7 +555,7 @@ private:
     // Select a compaction group from a given sstable based on its token range.
     compaction_group& compaction_group_for_sstable(const sstables::shared_sstable& sst) const noexcept;
     // Returns a list of all compaction groups.
-    const std::vector<std::unique_ptr<compaction_group>>& compaction_groups() const noexcept;
+    const compaction_group_vector& compaction_groups() const noexcept;
     // Safely iterate through compaction groups, while performing async operations on them.
     future<> parallel_foreach_compaction_group(std::function<future<>(compaction_group&)> action);
 
