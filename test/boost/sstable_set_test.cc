@@ -40,17 +40,17 @@ SEASTAR_TEST_CASE(test_sstables_sstable_set_read_modify_write) {
         sstable_writer_config cfg = env.manager().configure_writer("");
         auto sst1 = make_sstable_easy(env, std::move(mr), cfg);
 
-        auto ss1 = make_lw_shared<sstables::sstable_set>(make_sstable_set(ss.schema(), make_lw_shared<sstable_list>({sst1})));
-        BOOST_REQUIRE_EQUAL(ss1->all()->size(), 1);
+        auto ss1 = make_sstable_set(ss.schema(), make_lw_shared<sstable_list>({sst1}));
+        BOOST_REQUIRE_EQUAL(ss1.all()->size(), 1);
 
         // Test that a random sstable_origin is stored and retrieved properly.
         mr = make_flat_mutation_reader_from_mutations_v2(s, env.make_reader_permit(), mut);
         auto sst2 = make_sstable_easy(env, std::move(mr), cfg);
 
-        auto ss2 = make_lw_shared<sstables::sstable_set>(*ss1);
-        ss2->insert(sst2);
-        BOOST_REQUIRE_EQUAL(ss2->all()->size(), 2);
-        BOOST_REQUIRE_EQUAL(ss1->all()->size(), 1);
+        auto ss2 = ss1.clone();
+        ss2.insert(sst2);
+        BOOST_REQUIRE_EQUAL(ss2.all()->size(), 2);
+        BOOST_REQUIRE_EQUAL(ss1.all()->size(), 1);
     });
 }
 
@@ -114,23 +114,24 @@ SEASTAR_TEST_CASE(test_time_series_sstable_set_bytes_on_disk) {
         auto sst1 = make_sstable_easy(env, std::move(mr), cfg);
         auto size1 = sst1->bytes_on_disk();
 
-        auto ss1 = make_lw_shared<sstable_set>(seastar::make_shared<time_series_sstable_set>(ss.schema(), true), ss.schema());
-        ss1->insert(sst1);
-        BOOST_REQUIRE_EQUAL(ss1->bytes_on_disk(), size1);
+        auto ss1 = sstable_set(seastar::make_shared<time_series_sstable_set>(ss.schema(), true), ss.schema());
+        ss1.insert(sst1);
+        BOOST_REQUIRE_EQUAL(ss1.bytes_on_disk(), size1);
 
         // Test that a random sstable_origin is stored and retrieved properly.
         mr = make_flat_mutation_reader_from_mutations_v2(s, env.make_reader_permit(), mut);
         auto sst2 = make_sstable_easy(env, std::move(mr), cfg);
         auto size2 = sst2->bytes_on_disk();
 
-        auto ss2 = make_lw_shared<sstable_set>(*ss1);
-        BOOST_REQUIRE_EQUAL(ss2->bytes_on_disk(), ss1->bytes_on_disk());
-        ss2->insert(sst2);
-        BOOST_REQUIRE_EQUAL(ss2->bytes_on_disk(), size1 + size2);
+        auto ss2 = ss1.clone();
+        BOOST_REQUIRE_EQUAL(ss2.bytes_on_disk(), ss1.bytes_on_disk());
+        ss2.insert(sst2);
+        BOOST_REQUIRE_EQUAL(ss2.bytes_on_disk(), size1 + size2);
+        BOOST_REQUIRE_EQUAL(ss1.bytes_on_disk(), size1);
 
-        std::vector<lw_shared_ptr<sstable_set>> sets = {ss1, ss2};
-        auto sst_set = make_lw_shared<sstable_set>(seastar::make_shared<compound_sstable_set>(s, std::move(sets)), ss.schema());
-        BOOST_REQUIRE_EQUAL(sst_set->bytes_on_disk(), ss1->bytes_on_disk() + ss2->bytes_on_disk());
+        std::vector<sstable_set> sets = {ss1, ss2};
+        auto sst_set = sstable_set(seastar::make_shared<compound_sstable_set>(s, std::move(sets)), ss.schema());
+        BOOST_REQUIRE_EQUAL(sst_set.bytes_on_disk(), ss1.bytes_on_disk() + ss2.bytes_on_disk());
     });
 }
 
@@ -148,23 +149,24 @@ SEASTAR_TEST_CASE(test_partitioned_sstable_set_bytes_on_disk) {
         auto sst1 = make_sstable_easy(env, std::move(mr), cfg);
         auto size1 = sst1->bytes_on_disk();
 
-        auto ss1 = make_lw_shared<sstable_set>(seastar::make_shared<partitioned_sstable_set>(ss.schema(), true), ss.schema());
-        ss1->insert(sst1);
-        BOOST_REQUIRE_EQUAL(ss1->bytes_on_disk(), size1);
+        auto ss1 = sstable_set(seastar::make_shared<partitioned_sstable_set>(ss.schema(), true), ss.schema());
+        ss1.insert(sst1);
+        BOOST_REQUIRE_EQUAL(ss1.bytes_on_disk(), size1);
 
         // Test that a random sstable_origin is stored and retrieved properly.
         mr = make_flat_mutation_reader_from_mutations_v2(s, env.make_reader_permit(), mut);
         auto sst2 = make_sstable_easy(env, std::move(mr), cfg);
         auto size2 = sst2->bytes_on_disk();
 
-        auto ss2 = make_lw_shared<sstable_set>(*ss1);
-        BOOST_REQUIRE_EQUAL(ss2->bytes_on_disk(), ss1->bytes_on_disk());
-        ss2->insert(sst2);
-        BOOST_REQUIRE_EQUAL(ss2->bytes_on_disk(), size1 + size2);
+        auto ss2 = ss1.clone();
+        BOOST_REQUIRE_EQUAL(ss2.bytes_on_disk(), ss1.bytes_on_disk());
+        ss2.insert(sst2);
+        BOOST_REQUIRE_EQUAL(ss2.bytes_on_disk(), size1 + size2);
+        BOOST_REQUIRE_EQUAL(ss1.bytes_on_disk(), size1);
 
-        std::vector<lw_shared_ptr<sstable_set>> sets = {ss1, ss2};
-        auto sst_set = make_lw_shared<sstable_set>(seastar::make_shared<compound_sstable_set>(s, std::move(sets)), ss.schema());
-        BOOST_REQUIRE_EQUAL(sst_set->bytes_on_disk(), ss1->bytes_on_disk() + ss2->bytes_on_disk());
+        std::vector<sstable_set> sets = {ss1, ss2};
+        auto sst_set = sstable_set(seastar::make_shared<compound_sstable_set>(s, std::move(sets)), ss.schema());
+        BOOST_REQUIRE_EQUAL(sst_set.bytes_on_disk(), ss1.bytes_on_disk() + ss2.bytes_on_disk());
     });
 }
 
@@ -182,18 +184,54 @@ SEASTAR_TEST_CASE(test_partitioned_sstable_insert_vector) {
         auto sst1 = make_sstable_easy(env, std::move(mr), cfg);
         auto size1 = sst1->bytes_on_disk();
 
-        auto ss1 = make_lw_shared<sstable_set>(seastar::make_shared<partitioned_sstable_set>(ss.schema(), true), ss.schema());
-        ss1->insert(sst1);
-        BOOST_REQUIRE_EQUAL(ss1->bytes_on_disk(), size1);
+        auto ss1 = sstable_set(seastar::make_shared<partitioned_sstable_set>(ss.schema(), true), ss.schema());
+        ss1.insert(sst1);
+        BOOST_REQUIRE_EQUAL(ss1.bytes_on_disk(), size1);
 
         mr = make_flat_mutation_reader_from_mutations_v2(s, env.make_reader_permit(), mut);
         auto sst2 = make_sstable_easy(env, std::move(mr), cfg);
         auto size2 = sst2->bytes_on_disk();
 
         auto ssts = std::vector<sstables::shared_sstable>({sst1, sst2});
-        auto res = ss1->insert(ssts);
+        auto res = ss1.insert(ssts);
         BOOST_REQUIRE_EQUAL(res.size(), 1);
         BOOST_REQUIRE(res[0] == sst2);
-        BOOST_REQUIRE_EQUAL(ss1->bytes_on_disk(), size1 + size2);
+        BOOST_REQUIRE_EQUAL(ss1.bytes_on_disk(), size1 + size2);
+    });
+}
+
+SEASTAR_TEST_CASE(test_partitioned_sstable_set_mutate) {
+    return test_env::do_with_async([] (test_env& env) {
+        simple_schema ss;
+        auto s = ss.schema();
+
+        auto pk = tests::generate_partition_key(s);
+        auto mut = mutation(s, pk);
+        ss.add_row(mut, ss.make_ckey(0), "val");
+        sstable_writer_config cfg = env.manager().configure_writer("");
+
+        auto mr = make_flat_mutation_reader_from_mutations_v2(s, env.make_reader_permit(), mut);
+        auto sst1 = make_sstable_easy(env, std::move(mr), cfg);
+        auto size1 = sst1->bytes_on_disk();
+
+        auto ss1 = sstable_set(seastar::make_shared<partitioned_sstable_set>(ss.schema(), true), ss.schema());
+        ss1.insert(sst1);
+        BOOST_REQUIRE_EQUAL(ss1.bytes_on_disk(), size1);
+
+        mr = make_flat_mutation_reader_from_mutations_v2(s, env.make_reader_permit(), mut);
+        auto sst2 = make_sstable_easy(env, std::move(mr), cfg);
+        auto size2 = sst2->bytes_on_disk();
+
+        auto ss2 = ss1.clone();
+        ss2.insert(sst2);
+        BOOST_REQUIRE_EQUAL(ss2.bytes_on_disk(), size1 + size2);
+        BOOST_REQUIRE_EQUAL(ss1.bytes_on_disk(), size1);
+
+        ss1 = std::move(ss2);
+        BOOST_REQUIRE_EQUAL(ss1.bytes_on_disk(), size1 + size2);
+        BOOST_REQUIRE(!ss2);
+
+        auto all = boost::copy_range<std::unordered_set<sstables::shared_sstable>>(*ss1.all());
+        BOOST_REQUIRE_EQUAL(all, std::unordered_set<sstables::shared_sstable>({sst1, sst2}));
     });
 }

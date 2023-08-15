@@ -2728,39 +2728,39 @@ SEASTAR_TEST_CASE(compound_sstable_set_basic_test) {
             {{"p1", utf8_type}}, {}, {}, {}, utf8_type);
         auto cs = sstables::make_compaction_strategy(sstables::compaction_strategy_type::size_tiered, s->compaction_strategy_options());
 
-        lw_shared_ptr<sstables::sstable_set> set1 = make_lw_shared(cs.make_sstable_set(s));
-        lw_shared_ptr<sstables::sstable_set> set2 = make_lw_shared(cs.make_sstable_set(s));
-        lw_shared_ptr<sstables::sstable_set> compound = make_lw_shared(sstables::make_compound_sstable_set(s, {set1, set2}));
+        auto set1 = cs.make_sstable_set(s);
+        auto set2 = cs.make_sstable_set(s);
+        auto compound = sstables::make_compound_sstable_set(s, {set1, set2});
 
         const auto keys = tests::generate_partition_keys(2, s);
-        set1->insert(sstable_for_overlapping_test(env, s, keys[0].key(), keys[1].key(), 0));
-        set2->insert(sstable_for_overlapping_test(env, s, keys[0].key(), keys[1].key(), 0));
-        set2->insert(sstable_for_overlapping_test(env, s, keys[0].key(), keys[1].key(), 0));
+        set1.insert(sstable_for_overlapping_test(env, s, keys[0].key(), keys[1].key(), 0));
+        set2.insert(sstable_for_overlapping_test(env, s, keys[0].key(), keys[1].key(), 0));
+        set2.insert(sstable_for_overlapping_test(env, s, keys[0].key(), keys[1].key(), 0));
 
-        BOOST_REQUIRE(boost::accumulate(*compound->all() | boost::adaptors::transformed([] (const sstables::shared_sstable& sst) { return sst->generation().as_int(); }), unsigned(0)) == 6);
+        BOOST_REQUIRE(boost::accumulate(*compound.all() | boost::adaptors::transformed([] (const sstables::shared_sstable& sst) { return sst->generation().as_int(); }), unsigned(0)) == 6);
         {
             unsigned found = 0;
-            for (auto sstables = compound->all(); [[maybe_unused]] auto& sst : *sstables) {
+            for (auto sstables = compound.all(); [[maybe_unused]] auto& sst : *sstables) {
                 found++;
             }
-            size_t compound_size = compound->all()->size();
+            size_t compound_size = compound.all()->size();
             BOOST_REQUIRE(compound_size == 3);
             BOOST_REQUIRE(compound_size == found);
         }
 
         {
-            auto cloned_compound = *compound;
+            auto cloned_compound = compound.clone();
             assert_sstable_set_size(cloned_compound, 3);
         }
 
-        set2 = make_lw_shared(cs.make_sstable_set(s));
-        compound = make_lw_shared(sstables::make_compound_sstable_set(s, {set1, set2}));
+        set2 = cs.make_sstable_set(s);
+        compound = sstables::make_compound_sstable_set(s, {set1, set2});
         {
             unsigned found = 0;
-            for (auto sstables = compound->all(); [[maybe_unused]] auto& sst : *sstables) {
+            for (auto sstables = compound.all(); [[maybe_unused]] auto& sst : *sstables) {
                 found++;
             }
-            size_t compound_size = compound->all()->size();
+            size_t compound_size = compound.all()->size();
             BOOST_REQUIRE(compound_size == 1);
             BOOST_REQUIRE(compound_size == found);
         }

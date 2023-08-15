@@ -728,24 +728,25 @@ def scrub_good_sstable(scylla_path, scrub_schema_file):
 @pytest.fixture(scope="module")
 def scrub_bad_sstable(scylla_path, scrub_schema_file):
     """A bad sstable (out-of-order rows) used by the scrub tests."""
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        sst_json_path = os.path.join(tmp_dir, "sst.json")
-        with open(sst_json_path, "w") as f:
-            # rows are out-of-order
-            sst_json = [
-                {
-                    "key": { "raw": "0004000000c8" },
-                    "clustering_elements": [
-                        { "type": "clustering-row", "key": { "raw": "000400000002" }, "columns": { "v": { "is_live": True, "type": "regular", "timestamp": 1686815362417553, "value": "vv" } } },
-                        { "type": "clustering-row", "key": { "raw": "000400000001" }, "columns": { "v": { "is_live": True, "type": "regular", "timestamp": 1686815362417553, "value": "vv" } } }
-                    ]
-                }
-            ]
-            json.dump(sst_json, f)
-        subprocess.check_call([scylla_path, "sstable", "write", "--schema-file", scrub_schema_file, "--output-dir", tmp_dir, "--generation", "1", "--input-file", sst_json_path, "--validation-level", "none"])
-        ssts = glob.glob(os.path.join(tmp_dir, "*-Data.db"))
-        assert len(ssts) == 1
-        yield ssts[0]
+    tmp_dir_obj = tempfile.TemporaryDirectory()
+    tmp_dir = tmp_dir_obj.name
+    sst_json_path = os.path.join(tmp_dir, "sst.json")
+    with open(sst_json_path, "w") as f:
+        # rows are out-of-order
+        sst_json = [
+            {
+                "key": { "raw": "0004000000c8" },
+                "clustering_elements": [
+                    { "type": "clustering-row", "key": { "raw": "000400000002" }, "columns": { "v": { "is_live": True, "type": "regular", "timestamp": 1686815362417553, "value": "vv" } } },
+                    { "type": "clustering-row", "key": { "raw": "000400000001" }, "columns": { "v": { "is_live": True, "type": "regular", "timestamp": 1686815362417553, "value": "vv" } } }
+                ]
+            }
+        ]
+        json.dump(sst_json, f)
+    subprocess.check_call([scylla_path, "sstable", "write", "--schema-file", scrub_schema_file, "--output-dir", tmp_dir, "--generation", "1", "--input-file", sst_json_path, "--validation-level", "none"])
+    ssts = glob.glob(os.path.join(tmp_dir, "*-Data.db"))
+    assert len(ssts) == 1
+    yield ssts[0]
 
 
 def subprocess_check_error(args, pattern):

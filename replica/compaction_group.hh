@@ -40,9 +40,9 @@ class compaction_group {
     // Holds list of memtables for this group
     lw_shared_ptr<memtable_list> _memtables;
     // SSTable set which contains all non-maintenance sstables
-    lw_shared_ptr<sstables::sstable_set> _main_sstables;
+    sstables::sstable_set _main_sstables;
     // Holds SSTables created by maintenance operations, which need reshaping before integration into the main set
-    lw_shared_ptr<sstables::sstable_set> _maintenance_sstables;
+    sstables::sstable_set _maintenance_sstables;
     // sstables that have been compacted (so don't look up in query) but
     // have not been deleted yet, so must not GC any tombstones in other sstables
     // that may delete data in these sstables:
@@ -92,14 +92,14 @@ public:
     // be inserted into the main set.
     future<> update_sstable_lists_on_off_strategy_completion(sstables::compaction_completion_desc desc);
 
-    const lw_shared_ptr<sstables::sstable_set>& main_sstables() const noexcept;
-    void set_main_sstables(lw_shared_ptr<sstables::sstable_set> new_main_sstables);
+    const sstables::sstable_set& main_sstables() const noexcept;
+    void set_main_sstables(sstables::sstable_set&& new_main_sstables);
 
-    const lw_shared_ptr<sstables::sstable_set>& maintenance_sstables() const noexcept;
-    void set_maintenance_sstables(lw_shared_ptr<sstables::sstable_set> new_maintenance_sstables);
+    const sstables::sstable_set& maintenance_sstables() const noexcept;
+    void set_maintenance_sstables(sstables::sstable_set&& new_maintenance_sstables);
 
     // Makes a compound set, which includes main and maintenance sets
-    lw_shared_ptr<sstables::sstable_set> make_compound_sstable_set();
+    sstables::sstable_set make_compound_sstable_set();
 
     const std::vector<sstables::shared_sstable>& compacted_undeleted_sstables() const noexcept;
     // Triggers regular compaction.

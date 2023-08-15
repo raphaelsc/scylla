@@ -4194,14 +4194,14 @@ SEASTAR_TEST_CASE(compound_sstable_set_incremental_selector_test) {
         auto cs = sstables::make_compaction_strategy(sstables::compaction_strategy_type::leveled, s->compaction_strategy_options());
         const auto keys = tests::generate_partition_keys(8, s);
 
-        auto new_sstable = [&] (lw_shared_ptr<sstable_set> set, size_t k0, size_t k1, uint32_t level) {
+        auto new_sstable = [&] (sstable_set& set, size_t k0, size_t k1, uint32_t level) {
             auto key0 = keys[k0];
             auto tok0 = key0.token();
             auto key1 = keys[k1];
             auto tok1 = key1.token();
             testlog.debug("creating sstable with k[{}] token={} k[{}] token={} level={}", k0, tok0, k1, tok1, level);
             auto sst = sstable_for_overlapping_test(env, s, key0.key(), key1.key(), level);
-            set->insert(sst);
+            set.insert(sst);
             return sst;
         };
 
@@ -4218,8 +4218,8 @@ SEASTAR_TEST_CASE(compound_sstable_set_incremental_selector_test) {
         };
 
         {
-            auto set1 = make_lw_shared<sstable_set>(cs.make_sstable_set(s));
-            auto set2 = make_lw_shared<sstable_set>(cs.make_sstable_set(s));
+            auto set1 = sstable_set(cs.make_sstable_set(s));
+            auto set2 = sstable_set(cs.make_sstable_set(s));
             std::vector<shared_sstable> ssts;
             ssts.push_back(new_sstable(set1, 0, 1, 1));
             ssts.push_back(new_sstable(set2, 0, 1, 1));
@@ -4240,8 +4240,8 @@ SEASTAR_TEST_CASE(compound_sstable_set_incremental_selector_test) {
         }
 
         {
-            auto set1 = make_lw_shared<sstable_set>(cs.make_sstable_set(s));
-            auto set2 = make_lw_shared<sstable_set>(cs.make_sstable_set(s));
+            auto set1 = sstable_set(cs.make_sstable_set(s));
+            auto set2 = sstable_set(cs.make_sstable_set(s));
             std::vector<shared_sstable> ssts;
             ssts.push_back(new_sstable(set1, 0, 1, 0));
             ssts.push_back(new_sstable(set2, 0, 1, 1));
@@ -4272,8 +4272,8 @@ SEASTAR_TEST_CASE(compound_sstable_set_incremental_selector_test) {
             };
 
             auto incremental_selection_test = [&] (strategy_param param) {
-                auto set1 = make_lw_shared<sstable_set>(sstables::make_partitioned_sstable_set(s, false));
-                auto set2 = make_lw_shared<sstable_set>(sstables::make_partitioned_sstable_set(s, bool(param)));
+                auto set1 = sstable_set(sstables::make_partitioned_sstable_set(s, false));
+                auto set2 = sstable_set(sstables::make_partitioned_sstable_set(s, bool(param)));
                 new_sstable(set1, 1, 1, 1);
                 new_sstable(set2, 0, 2, 1);
                 new_sstable(set2, 3, 3, 1);
@@ -4334,8 +4334,8 @@ SEASTAR_TEST_CASE(twcs_single_key_reader_through_compound_set_test) {
         auto close_cf = deferred_stop(cf);
         cf->start();
 
-        auto set1 = make_lw_shared<sstable_set>(cs.make_sstable_set(s));
-        auto set2 = make_lw_shared<sstable_set>(cs.make_sstable_set(s));
+        auto set1 = cs.make_sstable_set(s);
+        auto set2 = cs.make_sstable_set(s);
 
         auto sst_gen = env.make_sst_factory(s);
 
@@ -4345,8 +4345,8 @@ SEASTAR_TEST_CASE(twcs_single_key_reader_through_compound_set_test) {
         BOOST_REQUIRE(sst1->get_first_decorated_key().token() == sst2->get_last_decorated_key().token());
         auto dkey = sst1->get_first_decorated_key();
 
-        set1->insert(std::move(sst1));
-        set2->insert(std::move(sst2));
+        set1.insert(std::move(sst1));
+        set2.insert(std::move(sst2));
         sstable_set compound = sstables::make_compound_sstable_set(s, {set1, set2});
 
         reader_permit permit = env.make_reader_permit();

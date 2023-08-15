@@ -113,16 +113,29 @@ public:
         const sstable_predicate&) const;
 };
 
-class sstable_set : public enable_lw_shared_from_this<sstable_set> {
+class sstable_set {
     sstable_set_impl_ptr _impl;
     schema_ptr _schema;
 public:
+    sstable_set() = default;
     ~sstable_set();
     sstable_set(sstable_set_impl_ptr impl, schema_ptr s);
-    sstable_set(const sstable_set&);
-    sstable_set(sstable_set&&) noexcept;
+    // Creates a copy sharing the impl_ptr
+    sstable_set(const sstable_set&) = default;
+    sstable_set(sstable_set&&) noexcept = default;
+    // Creates a copy sharing the impl_ptr
     sstable_set& operator=(const sstable_set&);
     sstable_set& operator=(sstable_set&&) noexcept;
+
+    explicit operator bool() const noexcept {
+        return _impl != nullptr;
+    }
+
+    // Clones a copy of the impl_ptr
+    // Can be used for preparing an updated copy
+    // that can be move assigned to the origin sstable_set for in-place update.
+    // This is useful for updating a sstable_set that is contained in a compound_sstable_set
+    sstable_set clone() const;
     std::vector<shared_sstable> select(const dht::partition_range& range) const;
     // Return all runs which contain any of the input sstables.
     std::vector<sstable_run> select_sstable_runs(const std::vector<shared_sstable>& sstables) const;
@@ -247,7 +260,7 @@ public:
 
 sstable_set make_partitioned_sstable_set(schema_ptr schema, bool use_level_metadata = true);
 
-sstable_set make_compound_sstable_set(schema_ptr schema, std::vector<lw_shared_ptr<sstable_set>> sets);
+sstable_set make_compound_sstable_set(schema_ptr schema, std::vector<sstable_set> sets);
 
 std::ostream& operator<<(std::ostream& os, const sstables::sstable_run& run);
 

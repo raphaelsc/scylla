@@ -427,7 +427,7 @@ private:
     sstables::compaction_strategy _compaction_strategy;
     std::vector<std::unique_ptr<compaction_group>> _compaction_groups;
     // Compound SSTable set for all the compaction groups, which is useful for operations spanning all of them.
-    lw_shared_ptr<sstables::sstable_set> _sstables;
+    sstables::sstable_set _sstables;
     // Control background fibers waiting for sstables to be deleted
     seastar::gate _sstable_deletion_gate;
     // This semaphore ensures that an operation like snapshot won't have its selected
@@ -535,7 +535,7 @@ public:
         sstable_list_builder(const sstable_list_builder&) = delete;
 
         // Builds new sstable set from existing one, with new sstables added to it and old sstables removed from it.
-        future<lw_shared_ptr<sstables::sstable_set>>
+        future<sstables::sstable_set>
         build_new_list(const sstables::sstable_set& current_sstables,
                        sstables::sstable_set new_sstable_list,
                        const std::vector<sstables::shared_sstable>& new_sstables,
@@ -589,7 +589,7 @@ private:
     // Mutations returned by the reader will all have given schema.
     flat_mutation_reader_v2 make_sstable_reader(schema_ptr schema,
                                         reader_permit permit,
-                                        lw_shared_ptr<sstables::sstable_set> sstables,
+                                        const sstables::sstable_set& sstables,
                                         const dht::partition_range& range,
                                         const query::partition_slice& slice,
                                         tracing::trace_state_ptr trace_state,
@@ -597,13 +597,13 @@ private:
                                         mutation_reader::forwarding fwd_mr,
                                         const sstables::sstable_predicate& = sstables::default_sstable_predicate()) const;
 
-    lw_shared_ptr<sstables::sstable_set> make_maintenance_sstable_set() const;
-    lw_shared_ptr<sstables::sstable_set> make_compound_sstable_set();
+    sstables::sstable_set make_maintenance_sstable_set() const;
+    sstables::sstable_set make_compound_sstable_set();
     // Compound sstable set must be refreshed whenever any of its managed sets are changed
     void refresh_compound_sstable_set();
 
     snapshot_source sstables_as_snapshot_source();
-    partition_presence_checker make_partition_presence_checker(lw_shared_ptr<sstables::sstable_set>);
+    partition_presence_checker make_partition_presence_checker(const sstables::sstable_set&);
     std::chrono::steady_clock::time_point _sstable_writes_disabled_at;
 
     dirty_memory_manager_logalloc::region_group& dirty_memory_region_group() const {
@@ -707,7 +707,7 @@ public:
 
     // Stream reader from the given sstables
     flat_mutation_reader_v2 make_streaming_reader(schema_ptr schema, reader_permit permit, const dht::partition_range& range,
-            lw_shared_ptr<sstables::sstable_set> sstables, gc_clock::time_point compaction_time) const;
+            const sstables::sstable_set& sstables, gc_clock::time_point compaction_time) const;
 
     // Make a reader which reads only from the row-cache.
     // The reader doens't populate the cache, it reads only what is in the cache

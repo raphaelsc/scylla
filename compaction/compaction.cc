@@ -433,7 +433,7 @@ protected:
     std::unordered_set<shared_sstable> _new_partial_sstables;
     std::vector<shared_sstable> _new_unused_sstables;
     std::vector<shared_sstable> _all_new_sstables;
-    lw_shared_ptr<sstable_set> _compacting;
+    optimized_optional<sstable_set> _compacting;
     const sstables::compaction_type _type;
     const uint64_t _max_sstable_size;
     const uint32_t _sstable_level;
@@ -449,7 +449,7 @@ protected:
     const compaction_sstable_replacer_fn _replacer;
     const run_id _run_identifier;
     // optional clone of sstable set to be used for expiration purposes, so it will be set if expiration is enabled.
-    std::optional<sstable_set> _sstable_set;
+    optimized_optional<sstable_set> _sstable_set;
     // used to incrementally calculate max purgeable timestamp, as we iterate through decorated keys.
     std::optional<sstable_set::incremental_selector> _selector;
     std::unordered_set<shared_sstable> _compacting_for_max_purgeable_func;
@@ -678,7 +678,7 @@ private:
     }
 
     future<> setup() {
-        auto ssts = make_lw_shared<sstables::sstable_set>(make_sstable_set_for_input());
+        auto ssts = make_sstable_set_for_input();
         formatted_sstables_list formatted_msg;
         formatted_msg.reserve(_sstables.size());
         auto fully_expired = _table_s.fully_expired_sstables(_sstables, gc_clock::now());
@@ -705,7 +705,7 @@ private:
             }
 
             // We also capture the sstable, so we keep it alive while the read isn't done
-            ssts->insert(sst);
+            ssts.insert(sst);
             // FIXME: If the sstables have cardinality estimation bitmaps, use that
             // for a better estimate for the number of partitions in the merged
             // sstable than just adding up the lengths of individual sstables.
@@ -720,9 +720,9 @@ private:
             _rp = std::max(_rp, sst_stats.position);
         }
         log_info("{} {}", report_start_desc(), formatted_msg);
-        if (ssts->size() < _sstables.size()) {
+        if (ssts.size() < _sstables.size()) {
             log_debug("{} out of {} input sstables are fully expired sstables that will not be actually compacted",
-                      _sstables.size() - ssts->size(), _sstables.size());
+                      _sstables.size() - ssts.size(), _sstables.size());
         }
 
         _compacting = std::move(ssts);

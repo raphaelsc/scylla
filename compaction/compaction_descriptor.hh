@@ -136,7 +136,7 @@ struct compaction_descriptor {
     std::vector<sstables::shared_sstable> sstables;
     // This is a snapshot of the table's sstable set, used only for the purpose of expiring tombstones.
     // If this sstable set cannot be provided, expiration will be disabled to prevent data from being resurrected.
-    std::optional<sstables::sstable_set> all_sstables_snapshot;
+    optimized_optional<sstables::sstable_set> all_sstables_snapshot;
     // Level of sstable(s) created by compaction procedure.
     int level;
     // Threshold size for sstable(s) to be created.
