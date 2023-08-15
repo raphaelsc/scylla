@@ -4227,7 +4227,7 @@ SEASTAR_TEST_CASE(compound_sstable_set_incremental_selector_test) {
             ssts.push_back(new_sstable(set2, 4, 4, 1));
             ssts.push_back(new_sstable(set1, 4, 5, 1));
 
-            sstable_set compound = sstables::make_compound_sstable_set(s, { set1, set2 });
+            sstable_set compound = sstables::make_compound_sstable_set(s, { &set1, &set2 });
             sstable_set::incremental_selector sel = compound.make_incremental_selector();
             check(sel, 0, std::unordered_set<shared_sstable>{ssts[0], ssts[1]});
             check(sel, 1, std::unordered_set<shared_sstable>{ssts[0], ssts[1]});
@@ -4250,7 +4250,7 @@ SEASTAR_TEST_CASE(compound_sstable_set_incremental_selector_test) {
             ssts.push_back(new_sstable(set1, 4, 4, 1));
             ssts.push_back(new_sstable(set2, 4, 5, 1));
 
-            sstable_set compound = sstables::make_compound_sstable_set(s, { set1, set2 });
+            sstable_set compound = sstables::make_compound_sstable_set(s, { &set1, &set2 });
             sstable_set::incremental_selector sel = compound.make_incremental_selector();
             check(sel, 0, std::unordered_set<shared_sstable>{ssts[0], ssts[1], ssts[2]});
             check(sel, 1, std::unordered_set<shared_sstable>{ssts[0], ssts[1], ssts[2]});
@@ -4279,7 +4279,7 @@ SEASTAR_TEST_CASE(compound_sstable_set_incremental_selector_test) {
                 new_sstable(set2, 3, 3, 1);
                 new_sstable(set2, 4, 4, 1);
 
-                sstable_set compound = sstables::make_compound_sstable_set(s, { set1, set2 });
+                sstable_set compound = sstables::make_compound_sstable_set(s, { &set1, &set2 });
                 sstable_set::incremental_selector sel = compound.make_incremental_selector();
 
                 dht::ring_position_view pos = dht::ring_position_view::min();
@@ -4347,7 +4347,7 @@ SEASTAR_TEST_CASE(twcs_single_key_reader_through_compound_set_test) {
 
         set1.insert(std::move(sst1));
         set2.insert(std::move(sst2));
-        sstable_set compound = sstables::make_compound_sstable_set(s, {set1, set2});
+        sstable_set compound = sstables::make_compound_sstable_set(s, {&set1, &set2});
 
         reader_permit permit = env.make_reader_permit();
         utils::estimated_histogram eh;

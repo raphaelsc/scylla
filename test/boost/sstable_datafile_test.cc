@@ -2730,7 +2730,7 @@ SEASTAR_TEST_CASE(compound_sstable_set_basic_test) {
 
         auto set1 = cs.make_sstable_set(s);
         auto set2 = cs.make_sstable_set(s);
-        auto compound = sstables::make_compound_sstable_set(s, {set1, set2});
+        auto compound = sstables::make_compound_sstable_set(s, {&set1, &set2});
 
         const auto keys = tests::generate_partition_keys(2, s);
         set1.insert(sstable_for_overlapping_test(env, s, keys[0].key(), keys[1].key(), 0));
@@ -2754,7 +2754,7 @@ SEASTAR_TEST_CASE(compound_sstable_set_basic_test) {
         }
 
         set2 = cs.make_sstable_set(s);
-        compound = sstables::make_compound_sstable_set(s, {set1, set2});
+        compound = sstables::make_compound_sstable_set(s, {&set1, &set2});
         {
             unsigned found = 0;
             for (auto sstables = compound.all(); [[maybe_unused]] auto& sst : *sstables) {

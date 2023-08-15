@@ -129,7 +129,7 @@ SEASTAR_TEST_CASE(test_time_series_sstable_set_bytes_on_disk) {
         BOOST_REQUIRE_EQUAL(ss2.bytes_on_disk(), size1 + size2);
         BOOST_REQUIRE_EQUAL(ss1.bytes_on_disk(), size1);
 
-        std::vector<sstable_set> sets = {ss1, ss2};
+        std::vector<const sstable_set*> sets = {&ss1, &ss2};
         auto sst_set = sstable_set(seastar::make_shared<compound_sstable_set>(s, std::move(sets)), ss.schema());
         BOOST_REQUIRE_EQUAL(sst_set.bytes_on_disk(), ss1.bytes_on_disk() + ss2.bytes_on_disk());
     });
@@ -164,7 +164,7 @@ SEASTAR_TEST_CASE(test_partitioned_sstable_set_bytes_on_disk) {
         BOOST_REQUIRE_EQUAL(ss2.bytes_on_disk(), size1 + size2);
         BOOST_REQUIRE_EQUAL(ss1.bytes_on_disk(), size1);
 
-        std::vector<sstable_set> sets = {ss1, ss2};
+        std::vector<const sstable_set*> sets = {&ss1, &ss2};
         auto sst_set = sstable_set(seastar::make_shared<compound_sstable_set>(s, std::move(sets)), ss.schema());
         BOOST_REQUIRE_EQUAL(sst_set.bytes_on_disk(), ss1.bytes_on_disk() + ss2.bytes_on_disk());
     });
