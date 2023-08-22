@@ -548,6 +548,8 @@ private:
     compaction_group* single_compaction_group_if_available() const noexcept;
     // Select a compaction group from a given token.
     compaction_group& compaction_group_for_token(dht::token token) const noexcept;
+    // Return compaction group ids that own a particular token range.
+    boost::integer_range<size_t> compaction_groups_for_token_range(dht::token_range tr) const noexcept;
     // Select a compaction group from a given key.
     compaction_group& compaction_group_for_key(partition_key_view key, const schema_ptr& s) const noexcept;
     // Select a compaction group from a given sstable based on its token range.
@@ -1166,6 +1168,12 @@ public:
 
     // Returns true if any of the sstables requries cleanup.
     bool requires_cleanup(const sstables::sstable_set& set) const;
+
+    // Takes snapshot of current storage state (includes memtable and sstables) from
+    // all compaction groups that overlap with a given token range. The output is
+    // a SSTable set that contains all the data (even if a subset was previously
+    // held in memtable(s)).
+    future<sstables::sstable_list> take_storage_snapshot(dht::token_range tr);
 
     friend class compaction_group;
     friend class table_sstables_adder;

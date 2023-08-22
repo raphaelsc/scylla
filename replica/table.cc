@@ -589,6 +589,15 @@ compaction_group& table::compaction_group_for_token(dht::token token) const noex
     return ret;
 }
 
+boost::integer_range<size_t> table::compaction_groups_for_token_range(dht::token_range tr) const noexcept {
+    utils::chunked_vector<compaction_group*> cgs;
+
+    size_t start = tr.start() ? compaction_group_for_token(tr.start()->value()).group_id() : size_t(0);
+    size_t end = tr.end() ? compaction_group_for_token(tr.end()->value()).group_id() : (_compaction_groups.size() - 1);
+
+    return boost::irange<size_t>(start, end + 1);
+}
+
 compaction_group& table::compaction_group_for_key(partition_key_view key, const schema_ptr& s) const noexcept {
     // fast path when table owns a single compaction group, to avoid overhead of calculating token.
     if (auto cg = single_compaction_group_if_available()) {
@@ -611,6 +620,30 @@ future<> table::parallel_foreach_compaction_group(std::function<future<>(compact
     co_await coroutine::parallel_for_each(compaction_groups(), [&] (const compaction_group_ptr& cg) {
         return action(*cg);
     });
+}
+
+future<sstables::sstable_list> table::take_storage_snapshot(dht::token_range tr) {
+    sstables::sstable_list ret;
+
+    for (auto cg_id : compaction_groups_for_token_range(tr)) {
+        auto& cg = _compaction_groups[cg_id];
+
+        // We don't care about sstables in snapshot being unlinked, as the file
+        // descriptors remain opened until last reference to them are gone.
+        // Also, we should be careful with taking a deletion lock here as a
+        // deadlock might occur due to memtable flush backpressure waiting on
+        // compaction to reduce the backlog.
+
+        co_await cg->flush();
+
+        auto main_ssts = cg->main_sstables().all();
+        auto maintenance_ssts = cg->maintenance_sstables().all();
+
+        ret.insert(main_ssts->begin(), main_ssts->end());
+        ret.insert(maintenance_ssts->begin(), maintenance_ssts->end());
+    }
+
+    co_return ret;
 }
 
 void table::update_stats_for_new_sstable(const sstables::shared_sstable& sst) noexcept {
