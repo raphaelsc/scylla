@@ -499,4 +499,99 @@ std::ostream& operator<<(std::ostream& os, const chunked_vector<T, max_contiguou
     return utils::format_range(os, v);
 }
 
+// Sparse vector allows for O(1) insertion, removal, and access of allocated elements.
+// Also, it provides an efficient iterator, for iterating through allocated elements only.
+// The cost is, of course, the 8-byte null ptr for every element not allocated, so ideally,
+// the sparse vector shouldn't grow bigger than a few thousands of elements.
+template <typename T, size_t max_contiguous_allocation = 128*1024>
+class sparse_chunked_vector  {
+    using chunked_vector_type = chunked_vector<std::unique_ptr<T>, max_contiguous_allocation>;
+public:
+    struct Iterator {
+        using iterator_category = std::forward_iterator_tag;
+        using difference_type   = std::ptrdiff_t;
+        using value_type        = T;
+        using pointer           = T*;
+        using reference         = T&;
+
+        Iterator(chunked_vector_type& ptr, std::set<size_t>::iterator indexes)
+            : _ptr(ptr)
+            , _indexes(indexes) {
+        }
+
+        T* current_element() const {
+            auto idx = *_indexes;
+            auto& ptr = _ptr[idx];
+            if (!ptr) {
+                throw std::runtime_error("Current element is not allocated");
+            }
+            return ptr.get();
+        }
+
+        reference operator*() const { return *current_element(); }
+        pointer operator->() { return current_element(); }
+        Iterator& operator++() { _indexes++; return *this; }
+        Iterator operator++(int) { Iterator tmp = *this; ++(*this); return tmp; }
+        friend bool operator== (const Iterator& a, const Iterator& b) { return a._indexes == b._indexes; };
+        friend bool operator!= (const Iterator& a, const Iterator& b) { return a._indexes != b._indexes; };
+
+    private:
+        chunked_vector_type& _ptr;
+        std::set<size_t>::iterator _indexes;
+    };
+
+    Iterator begin() { return Iterator(_data, _indexes.begin()); }
+    Iterator end()   { return Iterator(_data, _indexes.end()); }
+
+    T& at(size_t i) {
+        check_availability(i);
+        return *_data[i];
+    }
+    const T& at(size_t i) const {
+        check_availability(i);
+        return *_data[i];
+    }
+
+    sparse_chunked_vector(size_t capacity) {
+        _data.resize(capacity);
+    }
+
+    template <typename... Args>
+    void emplace(size_t i, Args&&... args) {
+        check_bounds(i);
+        auto new_cg = std::make_unique<T>(std::forward<Args>(args)...);
+        _indexes.insert(i);
+        _data[i] = std::move(new_cg);
+    }
+
+    void erase(size_t i) {
+        check_bounds(i);
+        _indexes.erase(i);
+        _data[i] = nullptr;
+    }
+
+    size_t size() const {
+        return _indexes.size();
+    }
+
+    size_t capacity() const {
+        return _data.size();
+    }
+private:
+    void check_bounds(size_t i) const {
+        if (size_t(i) >= _data.size()) [[unlikely]] {
+            throw std::out_of_range("index out of range: " + std::to_string(i));
+        }
+    }
+    void check_availability(size_t i) const {
+        check_bounds(i);
+        if (!_data[i]) [[unlikely]] {
+            throw std::out_of_range("index is not allocated: " + std::to_string(i));
+        }
+    }
+private:
+    chunked_vector_type _data;
+    std::set<size_t> _indexes;
+};
+
 }

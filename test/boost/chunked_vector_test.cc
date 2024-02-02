@@ -241,3 +241,41 @@ BOOST_AUTO_TEST_CASE(test_amoritzed_reserve) {
     amortized_reserve(v, 1);
     BOOST_REQUIRE_EQUAL(v.capacity(), 8);
 }
+
+BOOST_AUTO_TEST_CASE(test_sparse_chunked_vector) {
+    utils::sparse_chunked_vector<int> vector(10);
+
+    for (auto i = 0; i < 10; i += 2) {
+        vector.emplace(i, i);
+    }
+
+    auto check = [&vector] (size_t capacity_expected, std::set<int> expected) {
+        BOOST_REQUIRE_EQUAL(expected.size(), vector.size());
+        BOOST_REQUIRE_EQUAL(capacity_expected, vector.capacity());
+        auto it = expected.begin();
+        for (auto e : vector) {
+            BOOST_REQUIRE_EQUAL(e, (*it++));
+        }
+        for (auto e : expected) {
+            BOOST_REQUIRE_EQUAL(vector.at(e), e);
+        }
+    };
+
+    check(10, { 0, 2, 4, 6, 8 });
+
+    vector.erase(2);
+    check(10, { 0, 4, 6, 8 });
+
+    vector.erase(8);
+    check(10, { 0, 4, 6 });
+
+    vector.emplace(9, 9);
+    check(10, { 0, 4, 6, 9 });
+
+    // out of range
+    BOOST_CHECK_THROW(vector.emplace(10, 10), std::out_of_range);
+    BOOST_CHECK_THROW(vector.erase(10), std::out_of_range);
+    // not allocated
+    BOOST_CHECK_THROW(vector.at(5), std::out_of_range);
+    BOOST_CHECK_THROW(vector.erase(5), std::out_of_range);
+}
