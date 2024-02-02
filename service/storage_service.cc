@@ -4539,14 +4539,14 @@ future<> storage_service::load_tablet_metadata() {
 future<> storage_service::process_tablet_split_candidate(table_id table) {
     auto all_compaction_groups_split = [&] () mutable {
         return _db.map_reduce0([table_ = table] (replica::database& db) {
-            auto all_split = db.find_column_family(table_).all_storage_groups_split();
+            auto all_split = db.find_column_family(table_).all_compaction_groups_split();
             return make_ready_future<bool>(all_split);
         }, bool{true}, std::logical_and<bool>());
     };
 
     auto split_all_compaction_groups = [&] () -> future<> {
         return _db.invoke_on_all([table] (replica::database& db) -> future<> {
-            return db.find_column_family(table).split_all_storage_groups();
+            return db.find_column_family(table).split_all_compaction_groups();
         });
     };
 

@@ -159,17 +159,17 @@ public:
 
     compaction_manager& get_compaction_manager() noexcept;
 
-    friend class storage_group;
+    friend class compaction_group_list;
 };
 
 using compaction_group_ptr = std::unique_ptr<compaction_group>;
 
-// Storage group is responsible for storage that belongs to a single tablet.
-// A storage group can manage 1 or more compaction groups, each of which can be compacted independently.
-// If a tablet needs splitting, the storage group can be put in splitting mode, allowing the storage
+// Compaction group list is responsible for storage that belongs to a single tablet.
+// A list can manage 1 or more compaction groups, each of which can be compacted independently.
+// If a tablet needs splitting, the group list can be put in splitting mode, allowing the storage
 // in main compaction groups to be split into two new compaction groups, all of which will be managed
-// by the same storage group.
-class storage_group {
+// by the same list.
+class compaction_group_list {
     compaction_group_ptr _main_cg;
     std::vector<compaction_group_ptr> _split_ready_groups;
 private:
@@ -178,7 +178,7 @@ private:
     }
     size_t to_idx(locator::tablet_range_side) const;
 public:
-    storage_group(compaction_group_ptr cg);
+    compaction_group_list(compaction_group_ptr cg);
 
     const dht::token_range& token_range() const noexcept;
 
@@ -192,7 +192,7 @@ public:
 
     utils::small_vector<compaction_group*, 3> compaction_groups() noexcept;
 
-    // Puts the storage group in split mode, in which it internally segregates data
+    // Puts the group list in split mode, in which it internally segregates data
     // into two sstable sets and two memtable sets corresponding to the two adjacent
     // tablets post-split.
     // Preexisting sstables and memtables are not split yet.
@@ -207,14 +207,14 @@ public:
     future<> split(sstables::compaction_type_options::split opt);
 };
 
-using storage_group_vector = utils::chunked_vector<std::unique_ptr<storage_group>>;
+using compaction_group_lists = utils::chunked_vector<std::unique_ptr<compaction_group_list>>;
 
-class storage_group_manager {
+class compaction_group_manager {
 public:
-    virtual ~storage_group_manager() {}
-    virtual storage_group_vector make_storage_groups() const = 0;
-    virtual std::pair<size_t, locator::tablet_range_side> storage_group_of(dht::token) const = 0;
-    virtual size_t log2_storage_groups() const = 0;
+    virtual ~compaction_group_manager() {}
+    virtual compaction_group_lists make_compaction_group_lists() const = 0;
+    virtual std::pair<size_t, locator::tablet_range_side> compaction_group_list_of(dht::token) const = 0;
+    virtual size_t log2_compaction_group_lists() const = 0;
 };
 
 }

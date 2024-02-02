@@ -1610,13 +1610,13 @@ SEASTAR_THREAD_TEST_CASE(basic_tablet_storage_splitting_test) {
         e.db().invoke_on_all([] (replica::database& db) {
             auto& table = db.find_column_family("ks", "cf");
             testlog.info("sstable count: {}", table.sstables_count());
-            return table.split_all_storage_groups();
+            return table.split_all_compaction_groups();
         }).get();
 
         testlog.info("Verifying sstables are split...");
         BOOST_REQUIRE_EQUAL(e.db().map_reduce0([] (replica::database& db) {
             auto& table = db.find_column_family("ks", "cf");
-            return make_ready_future<bool>(table.all_storage_groups_split());
+            return make_ready_future<bool>(table.all_compaction_groups_split());
         }, bool(false), std::logical_or<bool>()).get0(), true);
     }, std::move(cfg)).get();
 }

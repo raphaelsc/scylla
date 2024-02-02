@@ -448,8 +448,9 @@ private:
 
     compaction_manager& _compaction_manager;
     sstables::compaction_strategy _compaction_strategy;
-    std::unique_ptr<storage_group_manager> _sg_manager;
-    storage_group_vector _storage_groups;
+    std::unique_ptr<compaction_group_manager> _cg_manager;
+    // Each compaction group list spans a single tablet.
+    compaction_group_lists _compaction_group_lists;
     // Compound SSTable set for all the compaction groups, which is useful for operations spanning all of them.
     lw_shared_ptr<sstables::sstable_set> _sstables;
     // Control background fibers waiting for sstables to be deleted
@@ -577,8 +578,8 @@ public:
 
     // Precondition: table needs tablet splitting.
     // Returns true if all storage of table is ready for splitting.
-    bool all_storage_groups_split();
-    future<> split_all_storage_groups();
+    bool all_compaction_groups_split();
+    future<> split_all_compaction_groups();
 
     // Splits compaction group of a single tablet, if and only if the underlying table has
     // split request emitted by coordinator (found in tablet metadata).
@@ -594,11 +595,11 @@ private:
     sstables::compaction_type_options::split split_compaction_options() const noexcept;
 
     // Select a compaction group from a given token.
-    std::pair<size_t, locator::tablet_range_side> storage_group_of(dht::token token) const noexcept;
-    size_t storage_group_id_for_token(dht::token token) const noexcept;
-    storage_group* storage_group_for_token(dht::token token) const noexcept;
+    std::pair<size_t, locator::tablet_range_side> compaction_group_list_of(dht::token token) const noexcept;
+    size_t compaction_group_list_id_for_token(dht::token token) const noexcept;
+    compaction_group_list* compaction_group_list_for_token(dht::token token) const noexcept;
 
-    std::unique_ptr<storage_group_manager> make_storage_group_manager();
+    std::unique_ptr<compaction_group_manager> make_compaction_group_manager();
     // Return compaction group if table owns a single one. Otherwise, null is returned.
     compaction_group* single_compaction_group_if_available() const noexcept;
     compaction_group* get_compaction_group(size_t id) const noexcept;

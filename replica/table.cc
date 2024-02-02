@@ -196,9 +196,9 @@ table::add_memtables_to_reader_list(std::vector<flat_mutation_reader_v2>& reader
     // point queries can be optimized as they span a single compaction group.
     if (range.is_singular() && range.start()->value().has_key()) {
         const dht::ring_position& pos = range.start()->value();
-        auto sg = storage_group_for_token(pos.token());
-        reserve_fn(sg->memtable_count());
-        for (auto& cg : sg->compaction_groups()) {
+        auto cg_list = compaction_group_list_for_token(pos.token());
+        reserve_fn(cg_list->memtable_count());
+        for (auto& cg : cg_list->compaction_groups()) {
             add_memtables_from_cg(*cg);
         }
         return;
@@ -544,26 +544,26 @@ void table::enable_off_strategy_trigger() {
     do_update_off_strategy_trigger();
 }
 
-class single_storage_group_manager final : public storage_group_manager {
+class single_compaction_group_manager final : public compaction_group_manager {
     replica::table& _t;
 public:
-    single_storage_group_manager(replica::table& t) : _t(t) {}
+    single_compaction_group_manager(replica::table& t) : _t(t) {}
 
-    storage_group_vector make_storage_groups() const override {
-        storage_group_vector r;
+    compaction_group_lists make_compaction_group_lists() const override {
+        compaction_group_lists r;
         auto cg = std::make_unique<compaction_group>(_t, size_t(0), dht::token_range::make_open_ended_both_sides());
-        r.push_back(std::make_unique<storage_group>(std::move(cg)));
+        r.push_back(std::make_unique<compaction_group_list>(std::move(cg)));
         return r;
     }
-    std::pair<size_t, locator::tablet_range_side> storage_group_of(dht::token) const override {
+    std::pair<size_t, locator::tablet_range_side> compaction_group_list_of(dht::token) const override {
         return {0, locator::tablet_range_side{}};
     }
-    size_t log2_storage_groups() const override {
+    size_t log2_compaction_group_lists() const override {
         return 0;
     }
 };
 
-class tablet_storage_group_manager final : public storage_group_manager {
+class tablet_compaction_group_manager final : public compaction_group_manager {
     replica::table& _t;
 private:
     const locator::effective_replication_map_ptr& erm() const {
@@ -580,10 +580,10 @@ private:
         return tm.tablets().get_tablet_map(schema()->id());
     }
 public:
-    tablet_storage_group_manager(replica::table& t) : _t(t) {}
+    tablet_compaction_group_manager(replica::table& t) : _t(t) {}
 
-    storage_group_vector make_storage_groups() const override {
-        storage_group_vector ret;
+    compaction_group_lists make_compaction_group_lists() const override {
+        compaction_group_lists ret;
 
         auto& tmap = tablet_map();
         auto& tm = erm()->get_token_metadata();
@@ -598,15 +598,15 @@ public:
             }
             // FIXME: don't allocate compaction groups for tablets that aren't present in this shard.
             auto cg = std::make_unique<compaction_group>(_t, tid.value(), std::move(range));
-            ret.emplace_back(std::make_unique<storage_group>(std::move(cg)));
+            ret.emplace_back(std::make_unique<compaction_group_list>(std::move(cg)));
         }
         return ret;
     }
-    std::pair<size_t, locator::tablet_range_side> storage_group_of(dht::token t) const override {
+    std::pair<size_t, locator::tablet_range_side> compaction_group_list_of(dht::token t) const override {
         auto [id, side] = tablet_map().get_tablet_id_and_range_side(t);
         return { id.value(), side };
     }
-    size_t log2_storage_groups() const override {
+    size_t log2_compaction_group_lists() const override {
         return log2ceil(tablet_map().tablet_count());
     }
 };
@@ -615,34 +615,34 @@ bool table::uses_tablets() const {
     return _erm && _erm->get_replication_strategy().uses_tablets();
 }
 
-storage_group::storage_group(compaction_group_ptr cg)
+compaction_group_list::compaction_group_list(compaction_group_ptr cg)
         : _main_cg(std::move(cg)) {
 }
 
-const dht::token_range& storage_group::token_range() const noexcept {
+const dht::token_range& compaction_group_list::token_range() const noexcept {
     return _main_cg->token_range();
 }
 
-compaction_group_ptr& storage_group::main_compaction_group() noexcept {
+compaction_group_ptr& compaction_group_list::main_compaction_group() noexcept {
     return _main_cg;
 }
 
-std::vector<compaction_group_ptr> storage_group::split_ready_compaction_groups() && {
+std::vector<compaction_group_ptr> compaction_group_list::split_ready_compaction_groups() && {
     return std::exchange(_split_ready_groups, {});
 }
 
-size_t storage_group::to_idx(locator::tablet_range_side side) const {
+size_t compaction_group_list::to_idx(locator::tablet_range_side side) const {
     return size_t(side);
 }
 
-compaction_group_ptr& storage_group::select_compaction_group(locator::tablet_range_side side) noexcept {
+compaction_group_ptr& compaction_group_list::select_compaction_group(locator::tablet_range_side side) noexcept {
     if (splitting_mode()) {
         return _split_ready_groups[to_idx(side)];
     }
     return _main_cg;
 }
 
-utils::small_vector<compaction_group*, 3> storage_group::compaction_groups() noexcept {
+utils::small_vector<compaction_group*, 3> compaction_group_list::compaction_groups() noexcept {
     utils::small_vector<compaction_group*, 3> cgs = {_main_cg.get()};
     for (auto& cg : _split_ready_groups) {
         cgs.push_back(cg.get());
@@ -650,7 +650,7 @@ utils::small_vector<compaction_group*, 3> storage_group::compaction_groups() noe
     return cgs;
 }
 
-bool storage_group::set_split_mode() {
+bool compaction_group_list::set_split_mode() {
     if (!splitting_mode()) {
         auto create_cg = [this] () -> compaction_group_ptr {
             // TODO: use the actual sub-ranges instead, to help incremental selection on the read path.
@@ -663,11 +663,11 @@ bool storage_group::set_split_mode() {
         _split_ready_groups = std::move(split_ready_groups);
     }
 
-    // The storage group is considered "split ready" if its main compaction group is empty.
+    // The list is considered "split ready" if its main compaction group is empty.
     return _main_cg->empty();
 }
 
-future<> storage_group::split(sstables::compaction_type_options::split opt) {
+future<> compaction_group_list::split(sstables::compaction_type_options::split opt) {
     if (set_split_mode()) {
         co_return;
     }
@@ -676,14 +676,14 @@ future<> storage_group::split(sstables::compaction_type_options::split opt) {
     co_await _main_cg->get_compaction_manager().perform_split_compaction(_main_cg->as_table_state(), std::move(opt));
 }
 
-bool table::all_storage_groups_split() {
+bool table::all_compaction_groups_split() {
     auto id = _schema->id();
     auto& tmap = _erm->get_token_metadata().tablets().get_tablet_map(id);
     if (_split_ready_seq_number == tmap.resize_decision().sequence_number) {
         return true;
     }
 
-    auto split_ready = std::ranges::all_of(_storage_groups, std::mem_fn(&storage_group::set_split_mode));
+    auto split_ready = std::ranges::all_of(_compaction_group_lists, std::mem_fn(&compaction_group_list::set_split_mode));
 
     // The table replica will say to coordinator that its split status is ready by
     // mirroring the sequence number from tablet metadata into its local state,
@@ -699,18 +699,18 @@ bool table::all_storage_groups_split() {
 sstables::compaction_type_options::split table::split_compaction_options() const noexcept {
     return {[this](dht::token t) {
         // Classifies the input stream into either left or right side.
-        auto [_, side] = storage_group_of(t);
+        auto [_, side] = compaction_group_list_of(t);
         return mutation_writer::token_group_id(side);
     }};
 }
 
-future<> table::split_all_storage_groups() {
+future<> table::split_all_compaction_groups() {
     sstables::compaction_type_options::split opt = split_compaction_options();
 
     auto holder = async_gate().hold();
 
-    for (auto& storage_group : _storage_groups) {
-        co_await storage_group->split(opt);
+    for (auto& compaction_group_list : _compaction_group_lists) {
+        co_await compaction_group_list->split(opt);
     }
 }
 
@@ -722,20 +722,20 @@ future<> table::maybe_split_compaction_group_of(locator::tablet_id tablet_id) {
 
     auto holder = async_gate().hold();
 
-    auto& sg = _storage_groups[tablet_id.value()];
-    if (!sg) {
+    auto& cg_list = _compaction_group_lists[tablet_id.value()];
+    if (!cg_list) {
         on_internal_error(tlogger, format("Tablet {} of table {}.{} is not allocated in this shard",
                                           tablet_id, _schema->ks_name(), _schema->cf_name()));
     }
 
-    return sg->split(split_compaction_options());
+    return cg_list->split(split_compaction_options());
 }
 
-std::unique_ptr<storage_group_manager> table::make_storage_group_manager() {
+std::unique_ptr<compaction_group_manager> table::make_compaction_group_manager() {
     if (uses_tablets()) {
-        return std::make_unique<tablet_storage_group_manager>(*this);
+        return std::make_unique<tablet_compaction_group_manager>(*this);
     }
-    return std::make_unique<single_storage_group_manager>(*this);
+    return std::make_unique<single_compaction_group_manager>(*this);
 }
 
 compaction_group* table::single_compaction_group_if_available() const noexcept {
@@ -743,51 +743,51 @@ compaction_group* table::single_compaction_group_if_available() const noexcept {
 }
 
 compaction_group* table::get_compaction_group(size_t id) const noexcept {
-    return _storage_groups[id]->main_compaction_group().get();
+    return _compaction_group_lists[id]->main_compaction_group().get();
 }
 
 std::pair<size_t, locator::tablet_range_side>
-table::storage_group_of(dht::token token) const noexcept {
-    auto [idx, side] = _sg_manager->storage_group_of(token);
-    if (idx >= _storage_groups.size()) {
-        on_fatal_internal_error(tlogger, format("storage_group_for_token: index out of range: idx={} size_log2={} size={} token={}",
-                                                idx, _sg_manager->log2_storage_groups(), _storage_groups.size(), token));
+table::compaction_group_list_of(dht::token token) const noexcept {
+    auto [idx, side] = _cg_manager->compaction_group_list_of(token);
+    if (idx >= _compaction_group_lists.size()) {
+        on_fatal_internal_error(tlogger, format("compaction_group_list_for_token: index out of range: idx={} size_log2={} size={} token={}",
+                                                idx, _cg_manager->log2_compaction_group_lists(), _compaction_group_lists.size(), token));
     }
-    auto& sg = *_storage_groups[idx];
-    if (!token.is_minimum() && !token.is_maximum() && !sg.token_range().contains(token, dht::token_comparator())) {
-        on_fatal_internal_error(tlogger, format("storage_group_for_token: storage_group idx={} range={} does not contain token={}",
-                 idx, sg.token_range(), token));
+    auto& cg_list = *_compaction_group_lists[idx];
+    if (!token.is_minimum() && !token.is_maximum() && !cg_list.token_range().contains(token, dht::token_comparator())) {
+        on_fatal_internal_error(tlogger, format("compaction_group_list_for_token: compaction_group_list idx={} range={} does not contain token={}",
+                 idx, cg_list.token_range(), token));
     }
     return {idx, side};
 }
 
-size_t table::storage_group_id_for_token(dht::token token) const noexcept {
-    return storage_group_of(token).first;
+size_t table::compaction_group_list_id_for_token(dht::token token) const noexcept {
+    return compaction_group_list_of(token).first;
 }
 
-storage_group* table::storage_group_for_token(dht::token token) const noexcept {
-    return _storage_groups[storage_group_of(token).first].get();
+compaction_group_list* table::compaction_group_list_for_token(dht::token token) const noexcept {
+    return _compaction_group_lists[compaction_group_list_of(token).first].get();
 }
 
 compaction_group& table::compaction_group_for_token(dht::token token) const noexcept {
-    auto [idx, range_side] = storage_group_of(token);
-    auto& sg = *_storage_groups[idx];
-    return *sg.select_compaction_group(range_side);
+    auto [idx, range_side] = compaction_group_list_of(token);
+    auto& cg_list = *_compaction_group_lists[idx];
+    return *cg_list.select_compaction_group(range_side);
 }
 
 utils::chunked_vector<compaction_group*> table::compaction_groups_for_token_range(dht::token_range tr) const {
     utils::chunked_vector<compaction_group*> ret;
     auto cmp = dht::token_comparator();
 
-    size_t candidate_start = tr.start() ? storage_group_id_for_token(tr.start()->value()) : size_t(0);
-    size_t candidate_end = tr.end() ? storage_group_id_for_token(tr.end()->value()) : (_storage_groups.size() - 1);
+    size_t candidate_start = tr.start() ? compaction_group_list_id_for_token(tr.start()->value()) : size_t(0);
+    size_t candidate_end = tr.end() ? compaction_group_list_id_for_token(tr.end()->value()) : (_compaction_group_lists.size() - 1);
 
     while (candidate_start <= candidate_end) {
-        auto& sg = _storage_groups[candidate_start++];
-        if (!sg) {
+        auto& cg_list = _compaction_group_lists[candidate_start++];
+        if (!cg_list) {
             continue;
         }
-        for (auto& cg : sg->compaction_groups()) {
+        for (auto& cg : cg_list->compaction_groups()) {
             if (cg && tr.overlaps(cg->token_range(), cmp)) {
                 ret.push_back(cg);
             }
@@ -806,21 +806,21 @@ compaction_group& table::compaction_group_for_key(partition_key_view key, const 
 }
 
 compaction_group& table::compaction_group_for_sstable(const sstables::shared_sstable& sst) const noexcept {
-    auto [first_id, first_range_side] = storage_group_of(sst->get_first_decorated_key().token());
-    auto [last_id, last_range_side] = storage_group_of(sst->get_last_decorated_key().token());
+    auto [first_id, first_range_side] = compaction_group_list_of(sst->get_first_decorated_key().token());
+    auto [last_id, last_range_side] = compaction_group_list_of(sst->get_last_decorated_key().token());
 
     if (first_id != last_id) {
         on_internal_error(tlogger, format("Unable to load SSTable {} that belongs to tablets {} and {}",
                                           sst->get_filename(), first_id, last_id));
     }
 
-    auto& sg = _storage_groups[first_id];
+    auto& cg_list = _compaction_group_lists[first_id];
 
     if (first_range_side != last_range_side) {
-        return *sg->main_compaction_group();
+        return *cg_list->main_compaction_group();
     }
 
-    return *sg->select_compaction_group(first_range_side);
+    return *cg_list->select_compaction_group(first_range_side);
 }
 
 utils::chunked_vector<std::reference_wrapper<compaction_group>> table::compaction_groups() const {
@@ -832,11 +832,11 @@ utils::chunked_vector<std::reference_wrapper<compaction_group>> table::compactio
 }
 
 void table::foreach_compaction_group(std::function<void(compaction_group&)> action) const {
-    for (auto& sg : _storage_groups) {
-        if (!sg) {
+    for (auto& cg_list : _compaction_group_lists) {
+        if (!cg_list) {
             continue;
         }
-        for (auto& cg : sg->compaction_groups()) {
+        for (auto& cg : cg_list->compaction_groups()) {
             action(*cg);
         }
     }
@@ -844,11 +844,11 @@ void table::foreach_compaction_group(std::function<void(compaction_group&)> acti
 
 future<> table::parallel_foreach_compaction_group(std::function<future<>(compaction_group&)> action) {
     // TODO: place a barrier here when we allow dynamic groups.
-    co_await coroutine::parallel_for_each(_storage_groups, [&] (auto& sg) -> future<> {
-        if (!sg) {
+    co_await coroutine::parallel_for_each(_compaction_group_lists, [&] (auto& cg_list) -> future<> {
+        if (!cg_list) {
             co_return;
         }
-        for (auto& cg : sg->compaction_groups()) {
+        for (auto& cg : cg_list->compaction_groups()) {
             co_await action(*cg);
         }
     });
@@ -1363,8 +1363,8 @@ uint64_t compaction_group::live_disk_space_used() const noexcept {
     return _main_sstables->bytes_on_disk() + _maintenance_sstables->bytes_on_disk();
 }
 
-uint64_t storage_group::live_disk_space_used() const noexcept {
-    auto cgs = const_cast<storage_group&>(*this).compaction_groups();
+uint64_t compaction_group_list::live_disk_space_used() const noexcept {
+    auto cgs = const_cast<compaction_group_list&>(*this).compaction_groups();
     return boost::accumulate(cgs | boost::adaptors::transformed(std::mem_fn(&compaction_group::live_disk_space_used)), uint64_t(0));
 }
 
@@ -1891,8 +1891,8 @@ table::table(schema_ptr schema, config config, lw_shared_ptr<const storage_optio
                         )
     , _compaction_manager(compaction_manager)
     , _compaction_strategy(make_compaction_strategy(_schema->compaction_strategy(), _schema->compaction_strategy_options()))
-    , _sg_manager(make_storage_group_manager())
-    , _storage_groups(_sg_manager->make_storage_groups())
+    , _cg_manager(make_compaction_group_manager())
+    , _compaction_group_lists(_cg_manager->make_compaction_group_lists())
     , _sstables(make_compound_sstable_set())
     , _cache(_schema, sstables_as_snapshot_source(), row_cache_tracker, is_continuous::yes)
     , _commitlog(nullptr)
@@ -1914,24 +1914,24 @@ locator::table_load_stats table::table_load_stats(std::function<bool(locator::gl
     locator::table_load_stats stats;
     stats.split_ready_seq_number = _split_ready_seq_number;
 
-    for (unsigned id = 0; id < _storage_groups.size(); id++) {
-        auto& sg = _storage_groups[id];
-        if (!sg) {
+    for (unsigned id = 0; id < _compaction_group_lists.size(); id++) {
+        auto& cg_list = _compaction_group_lists[id];
+        if (!cg_list) {
             continue;
         }
         locator::global_tablet_id gid { _schema->id(), locator::tablet_id(id) };
         if (!tablet_filter(gid)) {
             continue;
         }
-        stats.size_in_bytes += sg->live_disk_space_used();
+        stats.size_in_bytes += cg_list->live_disk_space_used();
     }
     return stats;
 }
 
 void table::handle_tablet_split_completion(size_t old_tablet_count, const locator::tablet_map& new_tmap) {
     auto table_id = _schema->id();
-    storage_group_vector new_storage_groups;
-    new_storage_groups.resize(new_tmap.tablet_count());
+    compaction_group_lists new_compaction_group_lists;
+    new_compaction_group_lists.resize(new_tmap.tablet_count());
 
     if (!old_tablet_count) {
         on_internal_error(tlogger, format("Table {} had zero tablets, it should never happen when splitting.", table_id));
@@ -1949,37 +1949,37 @@ void table::handle_tablet_split_completion(size_t old_tablet_count, const locato
             table_id, new_tmap.tablet_count(), old_tablet_count*split_size));
     }
 
-    for (auto id = 0; id < _storage_groups.size(); id++) {
-        auto& sg = _storage_groups[id];
-        if (!sg) {
+    for (auto id = 0; id < _compaction_group_lists.size(); id++) {
+        auto& cg_list = _compaction_group_lists[id];
+        if (!cg_list) {
             continue;
         }
-        if (!sg->main_compaction_group()->empty()) {
+        if (!cg_list->main_compaction_group()->empty()) {
             on_internal_error(tlogger, format("Found that storage of group {} for table {} wasn't split correctly, " \
                                               "therefore groups cannot be remapped with the new tablet count.",
                                               id, table_id));
         }
         unsigned first_new_id = id << growth_factor;
-        auto split_ready_groups = std::move(*sg).split_ready_compaction_groups();
+        auto split_ready_groups = std::move(*cg_list).split_ready_compaction_groups();
         if (split_ready_groups.size() != split_size) {
             on_internal_error(tlogger, format("Found {} split ready compaction groups, but expected {} instead.", split_ready_groups.size(), split_size));
         }
         for (auto i = 0; i < split_size; i++) {
             auto group_id = first_new_id + i;
             split_ready_groups[i]->update_id_and_range(group_id, new_tmap.get_token_range(locator::tablet_id(group_id)));
-            new_storage_groups[group_id] = std::make_unique<storage_group>(std::move(split_ready_groups[i]));
+            new_compaction_group_lists[group_id] = std::make_unique<compaction_group_list>(std::move(split_ready_groups[i]));
         }
 
         tlogger.debug("Remapping tablet {} of table {} into new tablets [{}].",
                       id, table_id, fmt::join(boost::irange(first_new_id, first_new_id+split_size), ", "));
     }
 
-    auto old_groups = std::exchange(_storage_groups, std::move(new_storage_groups));
+    auto old_lists = std::exchange(_compaction_group_lists, std::move(new_compaction_group_lists));
 
-    // Remove old main groups in background, they're unused, but they need to be deregistered properly
-    (void) do_with(std::move(old_groups), _async_gate.hold(), [] (storage_group_vector& groups, gate::holder&) {
-        return do_for_each(groups, [] (std::unique_ptr<storage_group>& sg) {
-            return sg->main_compaction_group()->stop();
+    // Remove old compaction groups in background, they're unused, but they need to be deregistered properly
+    (void) do_with(std::move(old_lists), _async_gate.hold(), [] (compaction_group_lists& lists, gate::holder&) {
+        return do_for_each(lists, [] (std::unique_ptr<compaction_group_list>& list) {
+            return list->main_compaction_group()->stop();
         });
     });
 }
@@ -2276,7 +2276,7 @@ size_t compaction_group::memtable_count() const noexcept {
     return _memtables->size();
 }
 
-size_t storage_group::memtable_count() const noexcept {
+size_t compaction_group_list::memtable_count() const noexcept {
     auto memtable_count = [] (const compaction_group_ptr& cg) { return cg ? cg->memtable_count() : 0; };
     return memtable_count(_main_cg) +
             boost::accumulate(_split_ready_groups | boost::adaptors::transformed(std::mem_fn(&compaction_group::memtable_count)), size_t(0));
@@ -3181,10 +3181,10 @@ table::as_mutation_source_excluding_staging() const {
 }
 
 std::vector<mutation_source> table::select_memtables_as_mutation_sources(dht::token token) const {
-    auto sg = storage_group_for_token(token);
+    auto cg_list = compaction_group_list_for_token(token);
     std::vector<mutation_source> mss;
-    mss.reserve(sg->memtable_count());
-    for (auto& cg : sg->compaction_groups()) {
+    mss.reserve(cg_list->memtable_count());
+    for (auto& cg : cg_list->compaction_groups()) {
         for (auto& mt : *cg->memtables()) {
             mss.emplace_back(mt->as_data_source());
         }
@@ -3271,7 +3271,7 @@ public:
         return _t._compaction_manager.get_backlog_tracker(*this);
     }
     const std::string get_group_id() const noexcept override {
-        return fmt::format("{}/{}", _cg.group_id(), _t._storage_groups.size());
+        return fmt::format("{}/{}", _cg.group_id(), _t._compaction_group_lists.size());
     }
 
     seastar::condition_variable& get_staging_done_condition() noexcept override {
@@ -3374,9 +3374,9 @@ future<> compaction_group::cleanup() {
 future<> table::cleanup_tablet(database& db, db::system_keyspace& sys_ks, locator::tablet_id tid) {
     auto holder = async_gate().hold();
 
-    auto& sg = _storage_groups[tid.value()];
+    auto& cg_list = _compaction_group_lists[tid.value()];
 
-    for (auto& cg_ptr : sg->compaction_groups()) {
+    for (auto& cg_ptr : cg_list->compaction_groups()) {
         if (!cg_ptr) {
             throw std::runtime_error(format("Cannot cleanup tablet {} of table {}.{} because it is not allocated in this shard",
                                             tid, _schema->ks_name(), _schema->cf_name()));
@@ -3394,7 +3394,7 @@ future<> table::cleanup_tablet(database& db, db::system_keyspace& sys_ks, locato
         // in the first place, but it would be better to extract the exact replay_position from
         // the actually flushed/deleted sstables, like discard_sstable() does, so that the mutations
         // cleaned from sstables are exactly the same as the ones cleaned from commitlog.
-        co_await sys_ks.save_commitlog_cleanup_record(schema()->id(), sg->token_range(), _highest_rp);
+        co_await sys_ks.save_commitlog_cleanup_record(schema()->id(), cg_list->token_range(), _highest_rp);
         // This is the only place (outside of reboot) where we delete unneeded commitlog cleanup
         // records. This isn't ideal -- it would be more natural if the unneeded records
         // were deleted as soon as they become unneeded -- but this gets the job done with a
