@@ -611,9 +611,8 @@ private:
     compaction_group& compaction_group_for_key(partition_key_view key, const schema_ptr& s) const noexcept;
     // Select a compaction group from a given sstable based on its token range.
     compaction_group& compaction_group_for_sstable(const sstables::shared_sstable& sst) const noexcept;
-    // Returns a list of all compaction groups.
-    // FIXME: will be removed soon.
-    utils::chunked_vector<std::reference_wrapper<compaction_group>> compaction_groups() const;
+    // Returns all compaction group lists.
+    const compaction_group_lists& compaction_groups() const;
     void foreach_compaction_group(std::function<void(compaction_group&)> action) const;
     // Safely iterate through compaction groups, while performing async operations on them.
     future<> parallel_foreach_compaction_group(std::function<future<>(compaction_group&)> action);

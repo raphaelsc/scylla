@@ -183,12 +183,15 @@ public:
     const dht::token_range& token_range() const noexcept;
 
     size_t memtable_count() const noexcept;
+    api::timestamp_type min_memtable_timestamp() const;
 
     compaction_group_ptr& main_compaction_group() noexcept;
     std::vector<compaction_group_ptr> split_ready_compaction_groups() &&;
     compaction_group_ptr& select_compaction_group(locator::tablet_range_side) noexcept;
+    lw_shared_ptr<sstables::sstable_set> make_compound_sstable_set();
 
     uint64_t live_disk_space_used() const noexcept;
+    bool no_compacted_undeleted_sstables() const;
 
     utils::small_vector<compaction_group*, 3> compaction_groups() noexcept;
 
@@ -207,7 +210,8 @@ public:
     future<> split(sstables::compaction_type_options::split opt);
 };
 
-using compaction_group_lists = utils::chunked_vector<std::unique_ptr<compaction_group_list>>;
+using compaction_group_list_ptr = std::unique_ptr<compaction_group_list>;
+using compaction_group_lists = utils::chunked_vector<compaction_group_list_ptr>;
 
 class compaction_group_manager {
 public:

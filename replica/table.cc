@@ -128,8 +128,10 @@ lw_shared_ptr<sstables::sstable_set> table::make_compound_sstable_set() {
     }
     // TODO: switch to a specialized set for groups which assumes disjointness across compound sets and incrementally read from them.
     // FIXME: avoid recreation of compound_set for groups which had no change. usually, only one group will be changed at a time.
-    auto sstable_sets = boost::copy_range<std::vector<lw_shared_ptr<sstables::sstable_set>>>(compaction_groups()
-        | boost::adaptors::transformed(std::mem_fn(&compaction_group::make_compound_sstable_set)));
+    std::vector<lw_shared_ptr<sstables::sstable_set>> sstable_sets;
+    foreach_compaction_group([&sstable_sets] (compaction_group& cg) mutable {
+        sstable_sets.push_back(cg.make_compound_sstable_set());
+    });
     return make_lw_shared(sstables::make_compound_sstable_set(schema(), std::move(sstable_sets)));
 }
 
@@ -203,7 +205,7 @@ table::add_memtables_to_reader_list(std::vector<flat_mutation_reader_v2>& reader
         }
         return;
     }
-    reserve_fn(boost::accumulate(compaction_groups() | boost::adaptors::transformed(std::mem_fn(&compaction_group::memtable_count)), uint64_t(0)));
+    reserve_fn(boost::accumulate(_compaction_group_lists | boost::adaptors::transformed(std::mem_fn(&compaction_group_list::memtable_count)), uint64_t(0)));
     // TODO: implement a incremental reader selector for memtable, using existing reader_selector interface for combined_reader.
     foreach_compaction_group([&] (compaction_group& cg) {
         add_memtables_from_cg(cg);
@@ -372,9 +374,11 @@ future<std::vector<locked_cell>> table::lock_counter_cells(const mutation& m, db
 }
 
 std::vector<memtable*> table::active_memtables() {
-    return boost::copy_range<std::vector<memtable*>>(compaction_groups() | boost::adaptors::transformed([] (compaction_group& cg) {
-        return &cg.memtables()->active_memtable();
-    }));
+    std::vector<memtable*> active;
+    foreach_compaction_group([&active] (compaction_group& cg) mutable {
+        active.push_back(&cg.memtables()->active_memtable());
+    });
+    return active;
 }
 
 api::timestamp_type compaction_group::min_memtable_timestamp() const {
@@ -390,8 +394,13 @@ api::timestamp_type compaction_group::min_memtable_timestamp() const {
     );
 }
 
+api::timestamp_type compaction_group_list::min_memtable_timestamp() const {
+    auto cgs = const_cast<compaction_group_list&>(*this).compaction_groups();
+    return *boost::range::min_element(cgs | boost::adaptors::transformed(std::mem_fn(&compaction_group::min_memtable_timestamp)));
+}
+
 api::timestamp_type table::min_memtable_timestamp() const {
-    return *boost::range::min_element(compaction_groups() | boost::adaptors::transformed(std::mem_fn(&compaction_group::min_memtable_timestamp)));
+    return *boost::range::min_element(compaction_groups() | boost::adaptors::transformed(std::mem_fn(&compaction_group_list::min_memtable_timestamp)));
 }
 
 // Not performance critical. Currently used for testing only.
@@ -823,12 +832,8 @@ compaction_group& table::compaction_group_for_sstable(const sstables::shared_sst
     return *cg_list->select_compaction_group(first_range_side);
 }
 
-utils::chunked_vector<std::reference_wrapper<compaction_group>> table::compaction_groups() const {
-    utils::chunked_vector<std::reference_wrapper<compaction_group>> ret;
-    foreach_compaction_group([&ret] (compaction_group& cg) mutable {
-       ret.push_back(cg);
-    });
-    return ret;
+const compaction_group_lists& table::compaction_groups() const {
+    return _compaction_group_lists;
 }
 
 void table::foreach_compaction_group(std::function<void(compaction_group&)> action) const {
@@ -1684,8 +1689,12 @@ future<> table::perform_cleanup_compaction(compaction::owned_ranges_ptr sorted_o
 }
 
 unsigned table::estimate_pending_compactions() const {
-    return boost::accumulate(compaction_groups() | boost::adaptors::transformed([this] (const compaction_group& cg) {
-        return _compaction_strategy.estimated_pending_compactions(cg.as_table_state());
+    return boost::accumulate(_compaction_group_lists | boost::adaptors::transformed([this] (const compaction_group_list_ptr& list) {
+        size_t estimated = 0;
+        for (auto& cg : list->compaction_groups()) {
+            estimated += _compaction_strategy.estimated_pending_compactions(cg->as_table_state());
+        }
+        return estimated;
     }), unsigned(0));
 }
 
@@ -1799,6 +1808,13 @@ std::vector<sstables::shared_sstable> table::select_sstables(const dht::partitio
     return _sstables->select(range);
 }
 
+bool compaction_group_list::no_compacted_undeleted_sstables() const {
+    auto cgs = const_cast<compaction_group_list&>(*this).compaction_groups();
+    return std::ranges::all_of(cgs, [] (compaction_group* cg) {
+        return cg->compacted_undeleted_sstables().empty();
+    });
+}
+
 // Gets the list of all sstables in the column family, including ones that are
 // not used for active queries because they have already been compacted, but are
 // waiting for delete_atomically() to return.
@@ -1807,9 +1823,7 @@ std::vector<sstables::shared_sstable> table::select_sstables(const dht::partitio
 // garbage-collect a tombstone that covers data in an sstable that may not be
 // successfully deleted.
 lw_shared_ptr<const sstable_list> table::get_sstables_including_compacted_undeleted() const {
-    bool no_compacted_undeleted_sstable = std::ranges::all_of(compaction_groups(), [] (const compaction_group& cg) {
-        return cg.compacted_undeleted_sstables().empty();
-    });
+    bool no_compacted_undeleted_sstable = std::ranges::all_of(_compaction_group_lists, std::mem_fn(&compaction_group_list::no_compacted_undeleted_sstables));
     if (no_compacted_undeleted_sstable) {
         return get_sstables();
     }
@@ -2292,8 +2306,15 @@ future<> table::flush(std::optional<db::replay_position> pos) {
     _flush_rp = std::max(_flush_rp, fp);
 }
 
+size_t compaction_group_list::memtable_count() const {
+
+}
+
 bool table::can_flush() const {
-    return std::ranges::any_of(compaction_groups(), std::mem_fn(&compaction_group::can_flush));
+    auto can_flush = [] (const compaction_group_list_ptr& list) {
+        return std::ranges::any_of(list->compaction_groups(), std::mem_fn(&compaction_group::can_flush));
+    };
+    return std::ranges::any_of(compaction_groups(), can_flush);
 }
 
 future<> compaction_group::clear_memtables() {
@@ -2319,9 +2340,9 @@ future<> table::clear() {
 // NOTE: does not need to be futurized, but might eventually, depending on
 // if we implement notifications, whatnot.
 future<db::replay_position> table::discard_sstables(db_clock::time_point truncated_at) {
-    assert(std::ranges::all_of(compaction_groups(), [this] (const compaction_group& cg) {
-        return _compaction_manager.compaction_disabled(cg.as_table_state());
-    }));
+    foreach_compaction_group([this] (const compaction_group& cg) {
+        assert(_compaction_manager.compaction_disabled(cg.as_table_state()));
+    });
 
     db::replay_position rp;
     struct removed_sstable {
