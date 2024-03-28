@@ -3441,4 +3441,18 @@ future<> table::cleanup_tablet(database& db, db::system_keyspace& sys_ks, locato
     // FIXME: Deallocate compaction group in this shard
 }
 
+shard_id table::shard_of(const mutation& m) const {
+    return shard_of(m.token());
+}
+
+shard_id table::shard_for_reads(dht::token t) const {
+    return _erm ? _erm->shard_for_reads(*_schema, t)
+                : dht::static_shard_of(*_schema, t); // for tests.
+}
+
+dht::shard_replica_set table::shard_for_writes(dht::token t) const {
+    return _erm ? _erm->shard_for_writes(*_schema, t)
+                : dht::shard_replica_set{dht::static_shard_of(*_schema, t)}; // for tests.
+}
+
 } // namespace replica
