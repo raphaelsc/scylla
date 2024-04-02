@@ -3022,11 +3022,20 @@ storage_proxy::mutate_locally(std::vector<mutation> mutation, tracing::trace_sta
 future<>
 storage_proxy::mutate_hint(const schema_ptr& s, const frozen_mutation& m, tracing::trace_state_ptr tr_state, clock_type::time_point timeout) {
     auto erm = _db.local().find_column_family(s).get_effective_replication_map();
-    auto shard = erm->get_sharder(*s).shard_of(m.token(*s));
-    get_stats().replica_cross_shard_ops += shard != this_shard_id();
-    return _db.invoke_on(shard, {_hints_write_smp_service_group, timeout}, [&m, gs = global_schema_ptr(s), tr_state = std::move(tr_state), timeout] (replica::database& db) mutable -> future<> {
-        return db.apply_hint(gs, m, std::move(tr_state), timeout);
-    });
+    auto shards = erm->get_sharder(*s).shard_for_writes(m.token(*s));
+    if (shards.empty()) {
+        throw std::runtime_error(format("No local shards for token {} of {}.{}", m.token(*s), s->ks_name(), s->cf_name()));
+    }
+    auto apply = [&] (unsigned shard) {
+        get_stats().replica_cross_shard_ops += shard != this_shard_id();
+        return _db.invoke_on(shard, {_hints_write_smp_service_group, timeout}, [&m, gs = global_schema_ptr(s), tr_state, timeout] (replica::database& db) mutable -> future<> {
+            return db.apply_hint(gs, m, tr_state, timeout);
+        });
+    };
+    if (shards.size() == 1) [[likely]] {
+        return apply(shards[0]);
+    }
+    return seastar::parallel_for_each(shards, std::move(apply));
 }
 
 std::optional<replica::stale_topology_exception>
