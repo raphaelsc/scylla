@@ -2727,6 +2727,22 @@
          ]
       },
       {
+         "path":"/storage_service/quiesce_topology",
+         "operations":[
+            {
+               "nickname":"quiesce_topology",
+               "method":"POST",
+               "summary":"Waits until there are no ongoing topology operations",
+               "type":"void",
+               "produces":[
+                  "application/json"
+               ],
+               "parameters":[
+               ]
+            }
+         ]
+      },
+      {
          "path":"/storage_service/metrics/total_hints",
          "operations":[
             {
