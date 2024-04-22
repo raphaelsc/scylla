@@ -948,6 +948,10 @@ public:
     // Returns a read-only file for all existing components of the sstable
     future<std::unordered_map<component_type, file>> readable_file_for_all_components() const;
 
+    // Clones this sstable with a new generation, under the same location as the original one.
+    // Implementation is underlying storage specific.
+    future<entry_descriptor> clone(generation_type new_generation) const;
+
     // Allow the test cases from sstable_test.cc to test private methods. We use
     // a placeholder to avoid cluttering this class too much. The sstable_test class
     // will then re-export as public every method it needs.
