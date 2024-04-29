@@ -194,8 +194,15 @@ std::unique_ptr<prepared_statement> create_table_statement::raw_statement::prepa
         ::shared_ptr<column_identifier> id = entry.first;
         cql3_type pt = entry.second->prepare(db, keyspace());
 
-        if (has_default_ttl && pt.is_counter()) {
-            throw exceptions::invalid_request_exception("Cannot set default_time_to_live on a table with counters");
+        if (pt.is_counter()) {
+            if (has_default_ttl) {
+                throw exceptions::invalid_request_exception("Cannot set default_time_to_live on a table with counters");
+            }
+            if (db.find_keyspace(keyspace()).get_replication_strategy().uses_tablets()) {
+                throw exceptions::invalid_request_exception("Counters are not supported with tablet-based replication (issue #18180). "
+                                                            "You can create them in a keyspace which has tablets disabled, "
+                                                            "by adding AND TABLETS = {'enabled': false} to the CREATE KEYSPACE statement. ");
+            }
         }
 
         if (pt.get_type()->is_multi_cell()) {

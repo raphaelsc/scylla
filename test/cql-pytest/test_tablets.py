@@ -55,6 +55,14 @@ def test_alter_cannot_change_vnodes_to_tablets(cql, skip_without_tablets):
             cql.execute(f"ALTER KEYSPACE {keyspace} WITH replication = {{'class': 'NetworkTopologyStrategy', 'replication_factor': 1}} AND tablets = {{'initial': 1}};")
 
 
+# Counters are not supported with tablets
+def test_counters_are_not_supported(cql, skip_without_tablets):
+    ksdef = "WITH REPLICATION = { 'class' : 'NetworkTopologyStrategy', 'replication_factor' : '1' } AND TABLETS = { 'enabled' : true }"
+    with new_test_keyspace(cql, ksdef) as keyspace:
+        with pytest.raises(InvalidRequest, match="Counters are not supported"):
+            cql.execute(f"CREATE TABLE {keyspace}.test (p int PRIMARY KEY, c counter)")
+
+
 # Converting vnodes-based keyspace to tablets-based in not implemented yet
 def test_alter_doesnt_enable_tablets(cql, skip_without_tablets):
     ksdef = "WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1};"

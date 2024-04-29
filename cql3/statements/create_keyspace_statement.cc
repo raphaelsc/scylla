@@ -117,9 +117,10 @@ future<std::tuple<::shared_ptr<cql_transport::event::schema_change>, std::vector
         if (rs->uses_tablets()) {
             warnings.push_back(
                 "Tables in this keyspace will be replicated using tablets, "
-                "and will not support the CDC feature (issue #16317) and LWT "
-                "may suffer from issue #5251 more often. If you want to use "
-                "CDC or LWT, please drop this keyspace and re-create it "
+                "and will not support the CDC feature (issue #16317), "
+                "counters (issue #18180) "
+                "and LWT may suffer from issue #5251 more often. If you want to use "
+                "CDC, counters or LWT, please drop this keyspace and re-create it "
                 "without tablets, by adding AND TABLETS = {'enabled': false} "
                 "to the CREATE KEYSPACE statement.");
         }
