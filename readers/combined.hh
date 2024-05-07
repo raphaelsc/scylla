@@ -27,7 +27,7 @@ public:
     virtual std::vector<flat_mutation_reader_v2> fast_forward_to(const dht::partition_range& pr) = 0;
 
     // Can be false-positive but never false-negative!
-    bool has_new_readers(const std::optional<dht::ring_position_view>& pos) const noexcept {
+    virtual bool has_new_readers(const std::optional<dht::ring_position_view>& pos) const noexcept {
         dht::ring_position_comparator cmp(*_s);
         return !_selector_position.is_max() && (!pos || cmp(*pos, _selector_position) >= 0);
     }

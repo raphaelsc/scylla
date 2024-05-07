@@ -789,6 +789,11 @@ class incremental_reader_selector : public reader_selector {
         return _fn(sst, *_pr);
     }
 
+    // End of stream is reached when selector position is past the end of the range for the read.
+    bool end_of_stream() const {
+        auto pr_end = dht::ring_position_view::for_range_end(*_pr);
+        return _selector_position.is_max() || dht::ring_position_tri_compare(*_s, _selector_position, pr_end) > 0;
+    }
 public:
     explicit incremental_reader_selector(schema_ptr s,
             lw_shared_ptr<const sstable_set> sstables,
@@ -829,7 +834,7 @@ public:
             readers = boost::copy_range<std::vector<flat_mutation_reader_v2>>(selection.sstables
                     | boost::adaptors::filtered([this] (auto& sst) { return _read_sstable_gens.emplace(sst->generation()).second; })
                     | boost::adaptors::transformed([this] (auto& sst) { return this->create_reader(sst); }));
-        } while (!_selector_position.is_max() && readers.empty() && (!pos || dht::ring_position_tri_compare(*_s, *pos, _selector_position) >= 0));
+        } while (readers.empty() && has_new_readers(pos));
 
         irclogger.trace("{}: created {} new readers", fmt::ptr(this), readers.size());
 
@@ -851,6 +856,14 @@ public:
         }
 
         return {};
+    }
+
+    // Can be false-positive but never false-negative!
+    virtual bool has_new_readers(const std::optional<dht::ring_position_view>& pos) const noexcept override {
+#ifndef SCYLLA_BUILD_MODE_RELEASE
+        assert(!pos || dht::ring_position_tri_compare(*_s, *pos, dht::ring_position_view::for_range_end(*_pr)) <= 0);
+#endif
+        return !end_of_stream() && (!pos || dht::ring_position_tri_compare(*_s, *pos, _selector_position) >= 0);
     }
 };
 
