@@ -825,6 +825,8 @@ public:
         auto readers = std::vector<flat_mutation_reader_v2>();
 
         do {
+            if (_s->ks_name() == "ks")
+                irclogger.trace("{}: {}({}), _selector_position={}", fmt::ptr(this), __FUNCTION__, seastar::lazy_deref(pos), _selector_position);
             auto selection = _selector->select(_selector_position);
             _selector_position = selection.next_position;
 
@@ -860,9 +862,10 @@ public:
 
     // Can be false-positive but never false-negative!
     virtual bool has_new_readers(const std::optional<dht::ring_position_view>& pos) const noexcept override {
-#ifndef SCYLLA_BUILD_MODE_RELEASE
         assert(!pos || dht::ring_position_tri_compare(*_s, *pos, dht::ring_position_view::for_range_end(*_pr)) <= 0);
-#endif
+        if (_s->ks_name() == "ks")
+            irclogger.trace("{}: {}({}), _selector_position={}, pr_end={}, eos={}",
+                            fmt::ptr(this), __FUNCTION__, seastar::lazy_deref(pos), _selector_position, dht::ring_position_view::for_range_end(*_pr), end_of_stream());
         return !end_of_stream() && (!pos || dht::ring_position_tri_compare(*_s, *pos, _selector_position) >= 0);
     }
 };
