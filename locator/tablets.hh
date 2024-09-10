@@ -61,7 +61,7 @@ struct tablet_replica {
     host_id host;
     shard_id shard;
 
-    bool operator==(const tablet_replica&) const = default;
+    auto operator<=>(const tablet_replica&) const = default;
 };
 
 using tablet_replica_set = utils::small_vector<tablet_replica, 3>;
