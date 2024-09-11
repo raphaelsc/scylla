@@ -18,6 +18,7 @@
 #include "utils/overloaded_functor.hh"
 #include "db/config.hh"
 #include "locator/load_sketch.hh"
+#include <iterator>
 #include <utility>
 #include <fmt/ranges.h>
 #include <absl/container/flat_hash_map.h>
@@ -686,13 +687,15 @@ public:
         const locator::topology& topo = _tm->get_topology();
         migration_plan plan;
 
+        // Prepare table-wide resize plans first, since DC plan might have something to merge into the resize plan.
+        plan.set_resize_plan(co_await make_resize_plan());
+
         // Prepare plans for each DC separately and combine them to be executed in parallel.
         for (auto&& dc : topo.get_datacenters()) {
             auto dc_plan = co_await make_plan(dc);
             lblogger.info("Prepared {} migrations in DC {}", dc_plan.size(), dc);
             plan.merge(std::move(dc_plan));
         }
-        plan.set_resize_plan(co_await make_resize_plan());
 
         lblogger.info("Prepared {} migration plans, out of which there were {} tablet migration(s) and {} resize decision(s)",
                       plan.size(), plan.tablet_migration_count(), plan.resize_decision_count());
@@ -709,6 +712,136 @@ public:
         }
         auto it = _table_load_stats->tables.find(id);
         return (it != _table_load_stats->tables.end()) ? &it->second : nullptr;
+    }
+
+    future<migration_plan> make_merge_colocation_plan(node_load_map& nodes) {
+        migration_plan plan;
+        table_resize_plan resize_plan;
+
+        for (auto&& [table, tmap_] : _tm->tablets().all_tables()) {
+            auto& tmap = *tmap_;
+            if (!tmap.needs_merge()) {
+                continue;
+            }
+
+            // Also filter out replicas that don't belong to the DC being worked on.
+            auto sorted_new_replicas = [this, &nodes] (const tablet_desc& t) {
+                auto ret = sorted_replicas_for_tablet_load(*t.info, t.transition);
+                const auto [first, last] = std::ranges::remove_if(ret, [&] (tablet_replica r) { return !nodes.contains(r.host); });
+                ret.erase(first, last);
+                return ret;
+            };
+
+            auto migrating = [] (const tablet_desc& t) {
+                return bool(t.transition);
+            };
+
+            auto first_non_matching_replicas = [] (tablet_replica_set r1, tablet_replica_set r2) -> std::optional<std::pair<tablet_replica, tablet_replica>> {
+                assert(r1.size() == r2.size());
+
+                // Subtract intersecting (co-located) elements from the replicas set of sibling tablets.
+                // Think for example that tablet 0 and 1 have replicas [n2, n4] and [n1, n2] respectively.
+                // After subtraction, replica of tablet 1 in n1 will be a candidate for co-location with
+                // replica of tablet 0 in n4.
+                std::unordered_set<tablet_replica> intersection;
+                std::ranges::set_intersection(r1, r2, std::inserter(intersection, intersection.begin()));
+                const auto [r1_first, r1_last] = std::ranges::remove_if(r1, [&] (tablet_replica r) { return intersection.contains(r); });
+                r1.erase(r1_first, r1_last);
+                const auto [r2_first, r2_last] = std::ranges::remove_if(r2, [&] (tablet_replica r) { return intersection.contains(r); });
+                r2.erase(r2_first, r2_last);
+
+                // Favor replicas of different tablets that belong to same node. For example:
+                // tablet 0 replicas: [n2:s1, n3:s0]
+                // tablet 1 replicas: [n1:s0, n2:s0]
+                // Replica in n1:s0 cannot follow sibling replica in n2:s1. Otherwise, RF invariant is broken.
+                // Instead, tablet 1 in n2:s0 will be co-located with tablet 0 in n2:s1.
+                std::unordered_map<host_id, tablet_replica> r1_map;
+                std::ranges::transform(r1, std::inserter(r1_map, r1_map.begin()), [] (tablet_replica r) {
+                    return std::make_pair(r.host, r);
+                });
+                for (unsigned i = 0; i < r2.size(); i++) {
+                    auto r1_it = r1_map.find(r2[i].host);
+                    if (r1_it != r1_map.end()) {
+                        return std::make_pair(r1_it->second, r2[i]);
+                    }
+                }
+
+                // Since sets had intersection subtracted, the remaining replicas are certainly not co-located.
+                if (r1.size() > 0) {
+                    return std::make_pair(r1[0], r2[0]);
+                }
+                return std::nullopt;
+            };
+
+            auto create_migration_info = [] (global_tablet_id gid, tablet_replica src, tablet_replica dst) {
+                auto kind = (src.host != dst.host) ? tablet_transition_kind::migration : tablet_transition_kind::intranode_migration;
+                return tablet_migration_info{kind, gid, src, dst};
+            };
+
+            bool all_colocated = true;
+            co_await tmap.for_each_sibling_tablets([&] (tablet_desc t1, std::optional<tablet_desc> t2_opt) -> future<> {
+                // Be optimistic about migrating tablets, as if they succeeded.
+                // Merge finalization will have to recheck that all sibling tablets are co-located.
+                // Not maintaining replica order, since with RF=N, we cannot swap replicas
+
+                if (!t2_opt) {
+                    on_internal_error(lblogger, format("Unable to find sibling tablet during co-location, with tablet count {}, for table {}",
+                                                       tmap.tablet_count(), table));
+                }
+                auto t2 = *t2_opt;
+
+                auto r1 = sorted_new_replicas(t1);
+                auto r2 = sorted_new_replicas(t2);
+                if (r1 == r2) {
+                    return make_ready_future<>();
+                }
+                all_colocated = false;
+
+                if (tmap.has_transitions()) {
+                    return make_ready_future<>();
+                }
+                if (migrating(t1) || migrating(t2)) {
+                    return make_ready_future<>();
+                }
+                // During RF change, tablets may have incrementally replicas allocated / deallocated to them.
+                // Let's temporarily delay their co-location until their replica sets have the same size.
+                if (r1.size() != r2.size()) {
+                    lblogger.warn("Replica sets of tablets to be co-located differ in size: ({}: {}), ({}, {})",
+                                  t1.tid, r1, t2.tid, r2);
+                    return make_ready_future<>();
+                }
+
+                auto ret = first_non_matching_replicas(r1, r2);
+                if (!ret) {
+                    return make_ready_future<>();
+                }
+                auto [r1_r, r2_r] = *ret;
+
+                // Emits migration for replica of t2 to co-habit same shard as replica of t1.
+                auto global_tid = global_tablet_id { table, t2.tid };
+                auto mig = create_migration_info(global_tid, r2_r, r1_r);
+
+                auto mig_streaming_info = get_migration_streaming_info(_tm->get_topology(), *t2.info, mig);
+                if (!can_accept_load(nodes, mig_streaming_info)) {
+                    lblogger.debug("Load limit reached, unable to do co-location now");
+                    return make_ready_future<>();
+                }
+                apply_load(nodes, mig_streaming_info);
+
+                lblogger.debug("Replica sets of tablets being co-located: ({}: {}), ({}, {})", t1.tid, r1, t2.tid, r2);
+                lblogger.info("Created migration for replica ({}, {}) to co-habit same shard as ({}, {})", t2.tid, r2_r, t1.tid, r1_r);
+                plan.add(std::move(mig));
+                return make_ready_future<>();
+            });
+
+            if (all_colocated && !bypass_merge_completion()) {
+                resize_plan.finalize_resize.insert(table);
+                lblogger.info("All sibling tablets are co-located for table {}", table);
+            }
+        }
+        plan.set_resize_plan(std::move(resize_plan));
+
+        co_return std::move(plan);
     }
 
     future<table_resize_plan> make_resize_plan() {
@@ -873,6 +1006,10 @@ public:
 
     bool in_shuffle_mode() const {
         return utils::get_local_injector().enter("tablet_allocator_shuffle");
+    }
+
+    bool bypass_merge_completion() const {
+        return utils::get_local_injector().enter("tablet_merge_completion_bypass");
     }
 
     size_t rand_int() const {
@@ -2198,6 +2335,12 @@ public:
 
         if (_tm->tablets().balancing_enabled()) {
             plan.merge(co_await make_intranode_plan(nodes, nodes_to_drain));
+        }
+
+        if (_tm->tablets().balancing_enabled() && plan.empty()) {
+            auto dc_merge_plan = co_await make_merge_colocation_plan(nodes);
+            lblogger.info("Prepared {} migrations for co-locating sibling tablets in DC {}", dc_merge_plan.tablet_migration_count(), dc);
+            plan.merge(std::move(dc_merge_plan));
         }
 
         co_await utils::clear_gently(nodes);
