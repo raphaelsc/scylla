@@ -33,6 +33,7 @@
 #include "utils/error_injection.hh"
 #include "utils/to_string.hh"
 #include "service/topology_coordinator.hh"
+#include "service/topology_state_machine.hh"
 
 using namespace locator;
 using namespace replica;
@@ -3233,4 +3234,11 @@ SEASTAR_TEST_CASE(test_cleanup_of_deallocated_tablet) {
         }).get();
         assert(all_tablets);
     }, cfg);
+}
+
+SEASTAR_TEST_CASE(test_recognition_of_deprecated_name_for_resize_transition) {
+    using transition_state = service::topology::transition_state;
+    BOOST_REQUIRE_EQUAL(service::transition_state_from_string("tablet split finalization"), transition_state::tablet_resize_finalization);
+    BOOST_REQUIRE_EQUAL(service::transition_state_from_string("tablet resize finalization"), transition_state::tablet_resize_finalization);
+    return make_ready_future<>();
 }
