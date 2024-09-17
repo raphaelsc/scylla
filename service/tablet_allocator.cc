@@ -994,9 +994,11 @@ public:
                     dst = rand_shard(node_load.shard_count);
                 } while (src == dst); // There are at least two shards here so this converges.
             } else {
+                auto src_shards_cpy = src_shards;
                 std::pop_heap(src_shards.begin(), src_shards.end(), node_load.shards_by_load_cmp());
                 src = src_shards.back();
                 dst = sketch.get_least_loaded_shard(host);
+                lblogger.info("src_shards for {}: before_pop_heap={}, after_pop_heap={}, src={}, dst={}", host, src_shards_cpy, src_shards, src, dst);
             }
 
             auto push_back = seastar::defer([&] {
@@ -1013,12 +1015,22 @@ public:
 
             // When in shuffle mode, exit condition is guaranteed by running out of candidates or by load limit.
             if (!shuffle && (src == dst || src_info.tablet_count <= dst_info.tablet_count + 1)) {
-                lblogger.debug("Node {} is balanced", host);
+                sstring desc;
+                unsigned shard_id = 0;
+                for (auto& shard : node_load.shards) {
+                    desc += format("[{}: {}], ", shard_id++, shard.tablet_count);
+                }
+                lblogger.info("Node {} is balanced: shuffle={}, src={}, dst={}, desc={}", host, shuffle, src, dst, desc);
                 break;
             }
 
             if (!src_info.has_candidates()) {
-                lblogger.debug("No more candidates on shard {} of {}", src, host);
+                lblogger.info("No more candidates on shard {} of {}", src, host);
+                {
+                    auto& node_load_info = nodes[host];
+                    shard_load& shard_load_info = node_load_info.shards[src];
+                    lblogger.info("shard_load_info candidates={}", shard_load_info.candidate_count());
+                }
                 max_load = std::max(max_load, src_info.tablet_count);
                 src_shards.pop_back();
                 push_back.cancel();
@@ -1038,12 +1050,12 @@ public:
 
             if (!can_accept_load(nodes, mig_streaming_info)) {
                 _stats.for_dc(node_load.dc()).migrations_skipped++;
-                lblogger.debug("Unable to balance {}: load limit reached", host);
+                lblogger.info("Unable to balance {}: load limit reached", host);
                 break;
             }
 
             apply_load(nodes, mig_streaming_info);
-            lblogger.debug("Adding migration: {}", mig);
+            lblogger.info("Adding migration: {}", mig);
             _stats.for_dc(node_load.dc()).migrations_produced++;
             _stats.for_dc(node_load.dc()).intranode_migrations_produced++;
             plan.add(std::move(mig));
@@ -1142,7 +1154,7 @@ public:
             auto targets = get_viable_targets();
             if (!targets.contains(dst_info.id)) {
                 auto new_rack_load = rack_load[dst_info.rack()] + 1;
-                lblogger.debug("candidate tablet {} skipped because it would increase load on rack {} to {}, max={}",
+                lblogger.info("candidate tablet {} skipped because it would increase load on rack {} to {}, max={}",
                                tablet, dst_info.rack(), new_rack_load, max_rack_load);
                 _stats.for_dc(src_info.dc()).tablets_skipped_rack++;
                 return skip_info{std::move(targets)};
@@ -1152,7 +1164,7 @@ public:
         for (auto&& r : tmap.get_tablet_info(tablet.tablet).replicas) {
             if (r.host == dst_info.id) {
                 _stats.for_dc(src_info.dc()).tablets_skipped_node++;
-                lblogger.debug("candidate tablet {} skipped because it has a replica on target node", tablet);
+                lblogger.info("candidate tablet {} skipped because it has a replica on target node", tablet);
                 if (need_viable_targets) {
                     return skip_info{get_viable_targets()};
                 }
@@ -1342,6 +1354,7 @@ public:
         if (drain_skipped) {
             src_node_info.skipped_candidates.pop_back();
         } else {
+            lblogger.info("erasing candidate {} from {}", min_candidate.tablet, min_candidate.src);
             erase_candidate(src_node_info.shards[min_candidate.src.shard], min_candidate.tablet);
         }
 
@@ -1468,8 +1481,7 @@ public:
             auto src_host = nodes_by_load.back();
             auto& src_node_info = nodes[src_host];
 
-            bool drain_skipped = src_node_info.shards_by_load.empty() && src_node_info.drained
-                    && !src_node_info.skipped_candidates.empty();
+            bool drain_skipped = src_node_info.shards_by_load.empty() && !src_node_info.skipped_candidates.empty();
 
             lblogger.debug("source node: {}, avg_load={:.2f}, skipped={}, drain_skipped={}", src_host,
                            src_node_info.avg_load, src_node_info.skipped_candidates.size(), drain_skipped);
@@ -1604,6 +1616,7 @@ public:
                         throw std::runtime_error(fmt::format("Unable to find new replica for tablet {} on {} when draining {} (nodes {}, replicas {})",
                                                         source_tablet, src, nodes_to_drain, nodes_by_load_dst, replicas));
                     }
+                    lblogger.warn("Skipped candidate, src={}, source_tablet={}", src, source_tablet);
                     src_node_info.skipped_candidates.emplace_back(src, source_tablet, std::move(skip->viable_targets));
                     continue;
                 }
@@ -1632,6 +1645,7 @@ public:
                 _stats.for_dc(dc).migrations_produced++;
                 plan.add(std::move(mig));
             } else {
+                lblogger.info("Skipped migration: {}", mig);
                 // Shards are overloaded with streaming. Do not include the migration in the plan, but
                 // continue as if it was in the hope that we will find a migration which can be executed without
                 // violating the load. Next make_plan() invocation will notice that the migration was not executed.
@@ -1896,6 +1910,9 @@ public:
                     total_load++;
                     if (!trinfo) { // migrating tablets are not candidates
                         add_candidate(shard_load_info, global_tablet_id {table, tid});
+                        lblogger.info("adding tablet {} to {}", global_tablet_id {table, tid}, replica);
+                    } else {
+                        lblogger.info("found migrating candidate in host {} and shard {}", replica.host, replica.shard);
                     }
                 }
 
