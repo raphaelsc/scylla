@@ -1373,6 +1373,7 @@ void apply_plan(token_metadata& tm, const migration_plan& plan) {
     for (auto&& mig : plan.migrations()) {
         tm.tablets().mutate_tablet_map(mig.tablet.table, [&] (tablet_map& tmap) {
             auto tinfo = tmap.get_tablet_info(mig.tablet.tablet);
+            testlog.trace("Replacing tablet {} replica from {} to {}", mig.tablet.tablet, mig.src, mig.dst);
             tinfo.replicas = replace_replica(tinfo.replicas, mig.src, mig.dst);
             tmap.set_tablet(mig.tablet.tablet, tinfo);
         });
@@ -1405,6 +1406,9 @@ size_t get_tablet_count(const tablet_metadata& tm) {
 }
 
 static
+void check_tablet_invariants(const tablet_metadata& tmeta);
+
+static
 void rebalance_tablets(tablet_allocator& talloc, shared_token_metadata& stm, locator::load_stats_ptr load_stats = {}, std::unordered_set<host_id> skiplist = {}) {
     // Sanity limit to avoid infinite loops.
     // The x10 factor is arbitrary, it's there to account for more complex schedules than direct migration.
@@ -1420,6 +1424,7 @@ void rebalance_tablets(tablet_allocator& talloc, shared_token_metadata& stm, loc
             return make_ready_future<>();
         }).get();
         handle_resize_finalize(talloc, stm, plan).get();
+        check_tablet_invariants(stm.get()->tablets());
     }
     throw std::runtime_error("rebalance_tablets(): convergence not reached within limit");
 }
@@ -2414,11 +2419,35 @@ void check_tablet_invariants(const tablet_metadata& tmeta) {
             std::unordered_set<host_id> hosts;
             // Uniqueness of hosts
             for (const auto& replica: tinfo.replicas) {
-                BOOST_REQUIRE(hosts.insert(replica.host).second);
+                auto ret = hosts.insert(replica.host).second;
+                if (!ret) {
+                    testlog.error("Failed tablet invariant check for tablet {}: {}", tid, tinfo.replicas);
+                }
+                BOOST_REQUIRE(ret);
             }
             return make_ready_future<>();
         }).get();
     }
+}
+
+static
+std::vector<host_id>
+allocate_replicas_in_racks(const std::vector<endpoint_dc_rack>& racks, int rf,
+                           const std::unordered_map<sstring, std::vector<host_id>>& hosts_by_rack) {
+    // Choose replicas randomly while loading racks evenly.
+    std::vector<host_id> replica_hosts;
+    for (int i = 0; i < rf; ++i) {
+        auto rack = racks[i % racks.size()];
+        auto& rack_hosts = hosts_by_rack.at(rack.rack);
+        while (true) {
+            auto candidate_host = rack_hosts[tests::random::get_int<shard_id>(0, rack_hosts.size() - 1)];
+            if (std::find(replica_hosts.begin(), replica_hosts.end(), candidate_host) == replica_hosts.end()) {
+                replica_hosts.push_back(candidate_host);
+                break;
+            }
+        }
+    }
+    return replica_hosts;
 }
 
 SEASTAR_THREAD_TEST_CASE(test_load_balancing_with_random_load) {
@@ -2474,18 +2503,7 @@ SEASTAR_THREAD_TEST_CASE(test_load_balancing_with_random_load) {
                 tablet_map tmap(1 << log2_tablets);
                 for (auto tid : tmap.tablet_ids()) {
                     // Choose replicas randomly while loading racks evenly.
-                    std::vector<host_id> replica_hosts;
-                    for (int i = 0; i < rf; ++i) {
-                        auto rack = racks[i % racks.size()];
-                        auto& rack_hosts = hosts_by_rack[rack.rack];
-                        while (true) {
-                            auto candidate_host = rack_hosts[tests::random::get_int<shard_id>(0, rack_hosts.size() - 1)];
-                            if (std::find(replica_hosts.begin(), replica_hosts.end(), candidate_host) == replica_hosts.end()) {
-                                replica_hosts.push_back(candidate_host);
-                                break;
-                            }
-                        }
-                    }
+                    std::vector<host_id> replica_hosts = allocate_replicas_in_racks(racks, rf, hosts_by_rack);
                     tablet_replica_set replicas;
                     for (auto h : replica_hosts) {
                         auto shard_count = tm.get_topology().find_node(h)->get_shard_count();
@@ -2598,6 +2616,112 @@ SEASTAR_THREAD_TEST_CASE(basic_tablet_storage_splitting_test) {
             return make_ready_future<bool>(table.all_storage_groups_split());
         }, bool(false), std::logical_or<bool>()).get(), true);
     }, std::move(cfg)).get();
+}
+
+// runs in seastar thread.
+static void do_test_load_balancing_merge_colocation(cql_test_env& e) {
+    std::vector<endpoint_dc_rack> racks = {
+        endpoint_dc_rack{ "dc1", "rack-1" },
+        endpoint_dc_rack{ "dc1", "rack-2" },
+    };
+
+    const int rf = tests::random::get_int<int>(2, 4);
+    const int n_hosts = tests::random::get_int<unsigned>(racks.size() * rf, racks.size() * rf * 2);
+    const unsigned shard_count = tests::random::get_int<unsigned>(2, 12);
+    const unsigned total_shard_count = n_hosts * shard_count;
+    const unsigned initial_tablets = std::bit_ceil<unsigned>(tests::random::get_int<unsigned>(total_shard_count, total_shard_count * 10));
+
+    testlog.info("test_load_balancing_merge_colocation - hosts={}, rf={}, shard_count={}, initial_tablets={}", n_hosts, rf, shard_count, initial_tablets);
+
+    std::vector<host_id> hosts;
+    for (int i = 0; i < n_hosts; ++i) {
+        hosts.push_back(host_id(next_uuid()));
+    }
+
+    auto table1 = table_id(next_uuid());
+
+    std::unordered_map<sstring, std::vector<host_id>> hosts_by_rack;
+    semaphore sem(1);
+    shared_token_metadata stm([&sem] () noexcept { return get_units(sem, 1); }, locator::token_metadata::config{
+        locator::topology::config{
+            .this_endpoint = inet_address("192.168.0.1"),
+            .this_host_id = hosts[0],
+            .local_dc_rack = racks[1]
+        }
+    });
+
+    stm.mutate_token_metadata([&] (token_metadata& tm) -> future<> {
+        tablet_metadata tmeta;
+
+        int i = 0;
+        for (auto h : hosts) {
+            auto ip = inet_address(format("192.168.0.{}", ++i));
+            tm.update_host_id(h, ip);
+            auto rack = racks[i % racks.size()];
+            hosts_by_rack[rack.rack].push_back(h);
+            tm.update_topology(h, rack, node::state::normal, shard_count);
+            co_await tm.update_normal_tokens(std::unordered_set{token(tests::d2t(float(i) / hosts.size()))}, h);
+            testlog.debug("adding host {}, ip {}, rack {}, token {}", h, ip, rack.rack, token(tests::d2t(1. / hosts.size())));
+        }
+
+        tablet_map tmap(initial_tablets);
+        locator::resize_decision decision;
+        // leaves growing mode, allowing for merge decision.
+        decision.sequence_number = decision.next_sequence_number();
+        tmap.set_resize_decision(std::move(decision));
+        for (auto tid : tmap.tablet_ids()) {
+            testlog.debug("allocating replica in racks with rf {}", rf);
+            std::vector<host_id> replica_hosts = allocate_replicas_in_racks(racks, rf, hosts_by_rack);
+            tablet_replica_set replicas;
+            replicas.reserve(replica_hosts.size());
+            for (auto h : replica_hosts) {
+                replicas.push_back(tablet_replica {h, tests::random::get_int<shard_id>(0, shard_count - 1)});
+            }
+            testlog.debug("allocating replicas for tablet {}: {}", tid, replicas);
+            tmap.set_tablet(tid, tablet_info {std::move(replicas)});
+        }
+        tmeta.set_tablet_map(table1, std::move(tmap));
+        tm.set_tablets(std::move(tmeta));
+    }).get();
+
+    auto tablet_count = [&] {
+        return stm.get()->tablets().get_tablet_map(table1).tablet_count();
+    };
+    auto do_rebalance_tablets = [&] (locator::load_stats load_stats) {
+        rebalance_tablets(e.get_tablet_allocator().local(), stm, make_lw_shared(std::move(load_stats)));
+    };
+
+    const uint64_t target_tablet_size = service::default_target_tablet_size;
+    auto size_to_trigger_merge = [&] () -> uint64_t {
+        return (target_tablet_size * 0.4f) * tablet_count();
+    };
+
+    while (tablet_count() > 1) {
+        locator::load_stats load_stats = {
+            .tables = {
+                { table1, table_load_stats{ .size_in_bytes = size_to_trigger_merge() }},
+            }
+        };
+
+        auto old_tablet_count = tablet_count();
+        check_tablet_invariants(stm.get()->tablets());
+        do_rebalance_tablets(std::move(load_stats));
+        check_tablet_invariants(stm.get()->tablets());
+        BOOST_REQUIRE_LT(tablet_count(), old_tablet_count);
+    }
+}
+
+SEASTAR_THREAD_TEST_CASE(test_load_balancing_merge_colocation) {
+    do_with_cql_env_thread([] (auto& e) {
+        auto seed = tests::random::get_int<int32_t>();
+        std::mt19937 random_engine{seed};
+
+        testlog.info("test_load_balancing_merge_colocation - seed {}", seed);
+
+        for (auto i = 0; i < 10; i++) {
+            do_test_load_balancing_merge_colocation(e);
+        }
+    }).get();
 }
 
 SEASTAR_THREAD_TEST_CASE(test_load_balancing_resize_requests) {
