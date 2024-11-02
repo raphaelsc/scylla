@@ -1191,15 +1191,18 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
                         }
                     }
 
-                    if (advance_in_background(gid, tablet_state.streaming, "streaming", [&] {
-                        if (!trinfo.pending_replica) {
+                    if (advance_in_background(gid, tablet_state.streaming, "streaming", [&] () -> future<> {
+                        if (!trinfo.pending_replicas) {
                             rtlogger.info("Skipped tablet streaming ({}) of {} as no pending replica found", trinfo.transition, gid);
-                            return make_ready_future<>();
+                            co_return;
                         }
-                        rtlogger.info("Initiating tablet streaming ({}) of {} to {}", trinfo.transition, gid, *trinfo.pending_replica);
-                        auto dst = trinfo.pending_replica->host;
-                        return ser::storage_service_rpc_verbs::send_tablet_stream_data(&_messaging,
+                      // FIXME: indentation.
+                      for (auto& pending_replica: *trinfo.pending_replicas) {
+                        rtlogger.info("Initiating tablet streaming ({}) of {} to {}", trinfo.transition, gid, pending_replica);
+                        auto dst = pending_replica.host;
+                        co_await ser::storage_service_rpc_verbs::send_tablet_stream_data(&_messaging,
                                    netw::msg_addr(id2ip(dst)), _as, raft::server_id(dst.uuid()), gid);
+                      }
                     })) {
                         rtlogger.debug("Will set tablet {} stage to {}", gid, locator::tablet_transition_stage::write_both_read_new);
                         updates.emplace_back(get_mutation_builder()
@@ -1246,38 +1249,42 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
                     transition_to_with_barrier(locator::tablet_transition_stage::cleanup);
                     break;
                 case locator::tablet_transition_stage::cleanup:
-                    if (advance_in_background(gid, tablet_state.cleanup, "cleanup", [&] {
-                        auto maybe_dst = locator::get_leaving_replica(tmap.get_tablet_info(gid.tablet), trinfo);
-                        if (!maybe_dst) {
+                    if (advance_in_background(gid, tablet_state.cleanup, "cleanup", [&] () -> future<> {
+                        auto leaving = locator::get_leaving_replicas(tmap.get_tablet_info(gid.tablet), trinfo);
+                        if (!leaving) {
                             rtlogger.info("Tablet cleanup of {} skipped because no replicas leaving", gid);
-                            return make_ready_future<>();
+                            co_return;
                         }
-                        locator::tablet_replica& dst = *maybe_dst;
+                      // FIXME: indentation.
+                      for (locator::tablet_replica& dst : *leaving) {
                         if (is_excluded(raft::server_id(dst.host.uuid()))) {
                             rtlogger.info("Tablet cleanup of {} on {} skipped because node is excluded", gid, dst);
-                            return make_ready_future<>();
+                            continue;
                         }
                         rtlogger.info("Initiating tablet cleanup of {} on {}", gid, dst);
-                        return ser::storage_service_rpc_verbs::send_tablet_cleanup(&_messaging,
+                        co_await ser::storage_service_rpc_verbs::send_tablet_cleanup(&_messaging,
                                                                                    netw::msg_addr(id2ip(dst.host)), _as, raft::server_id(dst.host.uuid()), gid);
+                       }
                     })) {
                         transition_to(locator::tablet_transition_stage::end_migration);
                     }
                     break;
                 case locator::tablet_transition_stage::cleanup_target:
-                    if (advance_in_background(gid, tablet_state.cleanup, "cleanup_target", [&] {
-                        if (!trinfo.pending_replica) {
+                    if (advance_in_background(gid, tablet_state.cleanup, "cleanup_target", [&] () -> future<> {
+                        if (!trinfo.pending_replicas) {
                             rtlogger.info("Tablet cleanup of {} skipped because no replicas pending", gid);
-                            return make_ready_future<>();
+                            co_return;
                         }
-                        locator::tablet_replica dst = *trinfo.pending_replica;
+                      // FIXME: indentation.
+                      for (locator::tablet_replica dst : *trinfo.pending_replicas) {
                         if (is_excluded(raft::server_id(dst.host.uuid()))) {
                             rtlogger.info("Tablet cleanup of {} on {} skipped because node is excluded and doesn't need to revert migration", gid, dst);
-                            return make_ready_future<>();
+                            continue;
                         }
                         rtlogger.info("Initiating tablet cleanup of {} on {} to revert migration", gid, dst);
-                        return ser::storage_service_rpc_verbs::send_tablet_cleanup(&_messaging,
+                        co_await ser::storage_service_rpc_verbs::send_tablet_cleanup(&_messaging,
                                                                                    netw::msg_addr(id2ip(dst.host)), _as, raft::server_id(dst.host.uuid()), gid);
+                      }
                     })) {
                         transition_to(locator::tablet_transition_stage::revert_migration);
                     }

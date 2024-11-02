@@ -205,7 +205,7 @@ struct tablet_transition_info {
     tablet_transition_stage stage;
     tablet_transition_kind transition;
     tablet_replica_set next;
-    std::optional<tablet_replica> pending_replica; // Optimization (next - tablet_info::replicas)
+    std::optional<tablet_replica_set> pending_replicas; // Optimization (next - tablet_info::replicas)
     service::session_id session_id;
     write_replica_set_selector writes;
     read_replica_set_selector reads;
@@ -213,14 +213,22 @@ struct tablet_transition_info {
     tablet_transition_info(tablet_transition_stage stage,
                            tablet_transition_kind kind,
                            tablet_replica_set next,
-                           std::optional<tablet_replica> pending_replica,
+                           std::optional<tablet_replica_set> pending_replicas,
                            service::session_id session_id = {});
 
     bool operator==(const tablet_transition_info&) const = default;
 };
 
-// Returns the leaving replica for a given transition.
-std::optional<tablet_replica> get_leaving_replica(const tablet_info&, const tablet_transition_info&);
+// Returns all the leaving replicas for a given tablet.
+std::optional<tablet_replica_set> get_leaving_replicas(const tablet_info&, const tablet_transition_info&);
+// Returns the leaving replica for a given transition, from the matching pending replica.
+// precondition: pending replica was extracted from tablet_transition_info::pending_replicas.
+std::optional<tablet_replica> get_leaving_replica(const tablet_info&, const tablet_transition_info&, tablet_replica pending);
+// Returns the leaving replica for a given transition on a given node.
+std::optional<tablet_replica> get_leaving_replica(const tablet_info&, const tablet_transition_info&, host_id);
+
+// Returns the pending replica for a given transition on a given node.
+std::optional<tablet_replica> get_pending_replica(const tablet_transition_info* trinfo, host_id);
 
 /// Represents intention to move a single tablet replica from src to dst.
 struct tablet_migration_info {

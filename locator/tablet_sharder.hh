@@ -40,6 +40,10 @@ private:
         return std::nullopt;
     };
 
+    bool intranode_migration(const tablet_transition_info& trinfo) const {
+        return trinfo.transition == tablet_transition_kind::intranode_migration;
+    }
+
     dht::shard_replica_set shard_for_writes(tablet_id tid, host_id host, std::optional<write_replica_set_selector> sel = std::nullopt) const {
         auto* trinfo = _tmap->get_tablet_transition_info(tid);
         auto& tinfo = _tmap->get_tablet_info(tid);
@@ -55,21 +59,21 @@ private:
 
         // See "Shard assignment stability" from doc/dev/topology-over-raft.md for explanation of logic.
 
-        if (trinfo && trinfo->pending_replica && trinfo->pending_replica->host == host) {
-            if (trinfo->transition == tablet_transition_kind::intranode_migration) {
+        if (auto pending_replica = get_pending_replica(trinfo, host)) {
+            if (intranode_migration(*trinfo) || contains(tinfo.replicas, host)) {
                 switch (sel.value_or(trinfo->writes)) {
                     case write_replica_set_selector::both:
-                        shards.push_back(trinfo->pending_replica->shard);
+                        shards.push_back(pending_replica->shard);
                         [[fallthrough]];
                     case write_replica_set_selector::previous:
                         push_from(tinfo.replicas);
                         break;
                     case write_replica_set_selector::next:
-                        shards.push_back(trinfo->pending_replica->shard);
+                        shards.push_back(pending_replica->shard);
                         break;
                 }
             } else {
-                shards.push_back(trinfo->pending_replica->shard);
+                shards.push_back(pending_replica->shard);
             }
         } else {
             push_from(tinfo.replicas);
@@ -89,11 +93,11 @@ private:
 
         // See "Shard assignment stability" from doc/dev/topology-over-raft.md for explanation of logic.
 
-        if (trinfo->pending_replica && trinfo->pending_replica->host == host) {
-            if (trinfo->transition == tablet_transition_kind::intranode_migration && trinfo->reads == read_replica_set_selector::previous) {
+        if (auto pending_replica = get_pending_replica(trinfo, host)) {
+            if ((intranode_migration(*trinfo) || contains(tinfo.replicas, host)) && trinfo->reads == read_replica_set_selector::previous) {
                 return get_shard(tinfo.replicas, host);
             }
-            return trinfo->pending_replica->shard;
+            return pending_replica->shard;
         }
 
         return get_shard(tinfo.replicas, host);

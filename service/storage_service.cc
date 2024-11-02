@@ -6000,7 +6000,7 @@ future<> storage_service::stream_tablet(locator::global_tablet_id tablet) {
         if (!trinfo->session_id) {
             throw std::runtime_error(fmt::format("Tablet {} session is not set", tablet));
         }
-        auto pending_replica = trinfo->pending_replica;
+        auto pending_replica = locator::get_pending_replica(trinfo, tm->get_my_id());
         if (!pending_replica) {
             throw std::runtime_error(fmt::format("Tablet {} has no pending replica", tablet));
         }
@@ -6010,7 +6010,7 @@ future<> storage_service::stream_tablet(locator::global_tablet_id tablet) {
 
         auto& tinfo = tmap.get_tablet_info(tablet.tablet);
         auto range = tmap.get_token_range(tablet.tablet);
-        std::optional<locator::tablet_replica> leaving_replica = locator::get_leaving_replica(tinfo, *trinfo);
+        std::optional<locator::tablet_replica> leaving_replica = locator::get_leaving_replica(tinfo, *trinfo, *pending_replica);
         locator::tablet_migration_streaming_info streaming_info = get_migration_streaming_info(tm->get_topology(), tinfo, *trinfo);
 
         streaming::stream_reason reason = std::invoke([&] {
@@ -6044,7 +6044,7 @@ future<> storage_service::stream_tablet(locator::global_tablet_id tablet) {
         } else {
             if (leaving_replica && leaving_replica->host == tm->get_my_id()) {
                 throw std::runtime_error(fmt::format("Cannot stream within the same node using regular migration, tablet: {}, shard {} -> {}",
-                                                     tablet, leaving_replica->shard, trinfo->pending_replica->shard));
+                                                     tablet, leaving_replica->shard, pending_replica->shard));
             }
             auto& table = _db.local().find_column_family(tablet.table);
             std::vector<sstring> tables = {table.schema()->cf_name()};
@@ -6110,7 +6110,7 @@ future<> storage_service::cleanup_tablet(locator::global_tablet_id tablet) {
 
             if (trinfo->stage == locator::tablet_transition_stage::cleanup) {
                 auto& tinfo = tmap.get_tablet_info(tablet.tablet);
-                std::optional<locator::tablet_replica> leaving_replica = locator::get_leaving_replica(tinfo, *trinfo);
+                std::optional<locator::tablet_replica> leaving_replica = locator::get_leaving_replica(tinfo, *trinfo, tm->get_my_id());
                 if (!leaving_replica) {
                     throw std::runtime_error(fmt::format("Tablet {} has no leaving replica", tablet));
                 }
@@ -6119,13 +6119,14 @@ future<> storage_service::cleanup_tablet(locator::global_tablet_id tablet) {
                 }
                 shard = leaving_replica->shard;
             } else if (trinfo->stage == locator::tablet_transition_stage::cleanup_target) {
-                if (!trinfo->pending_replica) {
+                if (!trinfo->pending_replicas) {
                     throw std::runtime_error(fmt::format("Tablet {} has no pending replica", tablet));
                 }
-                if (trinfo->pending_replica->host != tm->get_my_id()) {
+                auto pending_replica = locator::get_pending_replica(trinfo, tm->get_my_id());
+                if (!pending_replica) {
                     throw std::runtime_error(fmt::format("Tablet {} has pending replica different than this one", tablet));
                 }
-                shard = trinfo->pending_replica->shard;
+                shard = pending_replica->shard;
             } else {
                 throw std::runtime_error(fmt::format("Tablet {} stage is not at cleanup/cleanup_target", tablet));
             }
@@ -6357,8 +6358,9 @@ future<locator::load_stats> storage_service::load_stats_for_tablet_based_tables(
                     return true;
                 }
 
-                bool is_pending = transition->pending_replica == me;
-                bool is_leaving = locator::get_leaving_replica(info, *transition) == me;
+                auto leaving_replicas = locator::get_leaving_replicas(info, *transition);
+                bool is_pending = locator::contains(*transition->pending_replicas, me);
+                bool is_leaving = leaving_replicas && locator::contains(*leaving_replicas, me);
                 auto s = transition->reads; // read selector
 
                 return (!is_pending && !is_leaving)

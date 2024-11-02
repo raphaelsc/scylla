@@ -348,20 +348,20 @@ tablet_id process_one_row(table_id table, tablet_map& map, tablet_id tid, const 
         auto transition = tablet_transition_kind_from_string(row.get_as<sstring>("transition"));
 
         std::unordered_set<tablet_replica> pending = substract_sets(new_tablet_replicas, tablet_replicas);
-        if (pending.size() > 1) {
+        if (pending.size() > 2) {
             throw std::runtime_error(fmt::format("Too many pending replicas for table {} tablet {}: {}",
                                             table, tid, pending));
         }
-        std::optional<tablet_replica> pending_replica;
+        std::optional<tablet_replica_set> pending_replicas;
         if (pending.size() != 0) {
-            pending_replica = *pending.begin();
+            pending_replicas = tablet_replica_set(pending.begin(), pending.end());
         }
         service::session_id session_id;
         if (row.has("session")) {
             session_id = service::session_id(row.get_as<utils::UUID>("session"));
         }
         map.set_tablet_transition_info(tid, tablet_transition_info{stage, transition,
-                std::move(new_tablet_replicas), pending_replica, session_id});
+                std::move(new_tablet_replicas), std::move(pending_replicas), session_id});
     }
 
     map.set_tablet(tid, tablet_info{std::move(tablet_replicas)});

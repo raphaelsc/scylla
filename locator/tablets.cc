@@ -82,12 +82,12 @@ read_replica_set_selector get_selector_for_reads(tablet_transition_stage stage) 
 tablet_transition_info::tablet_transition_info(tablet_transition_stage stage,
                                                tablet_transition_kind transition,
                                                tablet_replica_set next,
-                                               std::optional<tablet_replica> pending_replica,
+                                               std::optional<tablet_replica_set> pending_replicas,
                                                service::session_id session_id)
     : stage(stage)
     , transition(transition)
     , next(std::move(next))
-    , pending_replica(std::move(pending_replica))
+    , pending_replicas(std::move(pending_replicas))
     , session_id(session_id)
     , writes(get_selector_for_writes(stage))
     , reads(get_selector_for_reads(stage))
@@ -107,13 +107,15 @@ tablet_migration_streaming_info get_migration_streaming_info(const locator::topo
             result.written_to = substract_sets(trinfo.next, tinfo.replicas);
             return result;
         case tablet_transition_kind::rebuild:
-            if (!trinfo.pending_replica.has_value()) {
+            if (!trinfo.pending_replicas.has_value()) {
                 return result; // No nodes to stream to -> no nodes to stream from
             }
 
-            result.written_to.insert(*trinfo.pending_replica);
+            result.written_to.insert(trinfo.pending_replicas->begin(), trinfo.pending_replicas->end());
             result.read_from = std::unordered_set<tablet_replica>(trinfo.next.begin(), trinfo.next.end());
-            result.read_from.erase(*trinfo.pending_replica);
+            for (auto& pending_replica : *trinfo.pending_replicas) {
+                result.read_from.erase(pending_replica);
+            }
 
             erase_if(result.read_from, [&] (const tablet_replica& r) {
                 auto* n = topo.find_node(r.host);
@@ -125,15 +127,48 @@ tablet_migration_streaming_info get_migration_streaming_info(const locator::topo
     on_internal_error(tablet_logger, format("Invalid tablet transition kind: {}", static_cast<int>(trinfo.transition)));
 }
 
-std::optional<tablet_replica> get_leaving_replica(const tablet_info& tinfo, const tablet_transition_info& trinfo) {
+std::optional<tablet_replica_set> get_leaving_replicas(const tablet_info& tinfo, const tablet_transition_info& trinfo) {
     auto leaving = substract_sets(tinfo.replicas, trinfo.next);
     if (leaving.empty()) {
         return {};
     }
-    if (leaving.size() > 1) {
-        throw std::runtime_error(format("More than one leaving replica"));
+    if (leaving.size() > 2) {
+        throw std::runtime_error(format("More than two leaving replicas"));
     }
-    return *leaving.begin();
+    return tablet_replica_set(leaving.begin(), leaving.end());
+}
+
+std::optional<tablet_replica> get_leaving_replica(const tablet_info& tinfo, const tablet_transition_info& trinfo, tablet_replica pending) {
+    auto leaving_replicas = get_leaving_replicas(tinfo, trinfo);
+    if (!leaving_replicas) {
+        return {};
+    }
+    auto pending_it = std::ranges::find(*trinfo.pending_replicas, pending);
+    if (pending_it == trinfo.pending_replicas->end()) {
+        return {};
+    }
+    return leaving_replicas.value()[pending_it - trinfo.pending_replicas->begin()];
+}
+
+std::optional<tablet_replica> get_leaving_replica(const tablet_info& tinfo, const tablet_transition_info& trinfo, host_id host) {
+    auto leaving_replicas = get_leaving_replicas(tinfo, trinfo);
+    if (!leaving_replicas) {
+        return {};
+    }
+    auto it = std::ranges::find_if(*leaving_replicas, [&host] (tablet_replica r) {
+        return r.host == host;
+    });
+    return it != leaving_replicas->end() ? std::make_optional(*it) : std::nullopt;
+}
+
+std::optional<tablet_replica> get_pending_replica(const tablet_transition_info* trinfo, host_id host) {
+    if (!trinfo || !trinfo->pending_replicas) {
+        return {};
+    }
+    auto it = std::ranges::find_if(*trinfo->pending_replicas, [&host] (tablet_replica r) {
+        return r.host == host;
+    });
+    return it != trinfo->pending_replicas->end() ? std::make_optional(*it) : std::nullopt;
 }
 
 tablet_replica_set get_new_replicas(const tablet_info& tinfo, const tablet_migration_info& mig) {
@@ -167,7 +202,7 @@ tablet_transition_info migration_to_transition_info(const tablet_info& ti, const
             tablet_transition_stage::allow_write_both_read_old,
             mig.kind,
             get_new_replicas(ti, mig),
-            mig.dst
+            tablet_replica_set{mig.dst}
     };
 }
 
@@ -589,7 +624,7 @@ bool tablet_metadata::has_replica_on(host_id host) const {
                 }
             }
             auto* trinfo = map->get_tablet_transition_info(tablet);
-            if (trinfo && trinfo->pending_replica && trinfo->pending_replica->host == host) {
+            if (trinfo && trinfo->pending_replicas && contains(*trinfo->pending_replicas, host)) {
                 return true;
             }
         }
@@ -725,12 +760,12 @@ public:
             case write_replica_set_selector::previous:
                 return {};
             case write_replica_set_selector::both:
-                if (!info->pending_replica) {
+                if (!info->pending_replicas) {
                     return {};
                 }
-                tablet_logger.trace("get_pending_endpoints({}): table={}, tablet={}, replica={}",
-                                    search_token, _table, tablet, *info->pending_replica);
-                return {_tmptr->get_endpoint_for_host_id(info->pending_replica->host)};
+                tablet_logger.trace("get_pending_endpoints({}): table={}, tablet={}, replicas={}",
+                                    search_token, _table, tablet, *info->pending_replicas);
+                return boost::copy_range<inet_address_vector_topology_change>(to_replica_set(*info->pending_replicas));
             case write_replica_set_selector::next:
                 return {};
         }
@@ -789,7 +824,8 @@ public:
         }
 
         auto tinfo = tablets.get_tablet_transition_info(tid);
-        if (tinfo && tinfo->pending_replica && tinfo->pending_replica->host == host && tinfo->pending_replica->shard == shard) {
+        auto this_replica = tablet_replica{ host, shard };
+        if (tinfo && tinfo->pending_replicas && locator::contains(*tinfo->pending_replicas, this_replica)) {
             return std::nullopt; // routed correctly
         }
 
@@ -798,7 +834,7 @@ public:
 
     virtual bool has_pending_ranges(locator::host_id host_id) const override {
         for (const auto& [id, transition_info]: get_tablet_map().transitions()) {
-            if (transition_info.pending_replica && transition_info.pending_replica->host == host_id) {
+            if (transition_info.pending_replicas && locator::contains(*transition_info.pending_replicas, host_id)) {
                 return true;
             }
         }
@@ -925,7 +961,7 @@ auto fmt::formatter<locator::tablet_map>::format(const locator::tablet_map& r, f
         }
         out = fmt::format_to(out, "\n    [{}]: last_token={}, replicas={}", tid, r.get_last_token(tid), tablet.replicas);
         if (auto tr = r.get_tablet_transition_info(tid)) {
-            out = fmt::format_to(out, ", stage={}, new_replicas={}, pending={}", tr->stage, tr->next, tr->pending_replica);
+            out = fmt::format_to(out, ", stage={}, new_replicas={}, pending={}", tr->stage, tr->next, tr->pending_replicas);
             if (tr->session_id) {
                 out = fmt::format_to(out, ", session={}", tr->session_id);
             }

@@ -2463,7 +2463,8 @@ future<> tablet_storage_group_manager::update_effective_replication_map(const lo
         .shard = this_shard_id()
     };
     auto tablet_migrates_in = [this_replica] (locator::tablet_transition_info& transition_info) {
-        return transition_info.stage == locator::tablet_transition_stage::allow_write_both_read_old && transition_info.pending_replica == this_replica;
+        return transition_info.stage == locator::tablet_transition_stage::allow_write_both_read_old &&
+            transition_info.pending_replicas && locator::contains(*transition_info.pending_replicas, this_replica);
     };
     bool tablet_migrating_in = false;
     for (auto& transition : new_tablet_map->transitions()) {
