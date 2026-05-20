@@ -2474,3 +2474,93 @@ async def test_rf_extend_abort_with_down_node(request: pytest.FixtureRequest, ma
         for t in replicas:
             assert len(t.replicas) == 1
             assert t.replicas[0][0] == dc1_host_id
+
+@pytest.mark.asyncio
+@pytest.mark.skip_mode(mode='release', reason='error injections are not supported in release mode')
+async def test_split_completion_with_data_in_main_cg(manager: ManagerClient):
+    """Reproducer for the crash "wasn't split correctly, therefore groups cannot be remapped".
+
+    The production scenario (regression from #20626):
+    - A new table is created (or replayed from Raft log) while _shared_token_metadata does not yet
+      have the resize decision for that table.  allocate_storage_group() sees needs_split()=false
+      and does NOT call set_split_mode(), so all writes land in _main_cg.
+    - The split monitor later sees an empty table and trivially ACKs (all_storage_groups_split()
+      returns true immediately because _main_cg is empty).  The coordinator finalises the split.
+    - Meanwhile (on restart) the view builder starts writing to the table, and because set_split_mode()
+      was never called the writes land in _main_cg rather than in the split-ready compaction groups.
+    - When update_effective_replication_map() processes the new tablet count it calls
+      handle_tablet_split_completion() which fires on_internal_error because _main_cg is not empty.
+
+    The code gap is in update_effective_replication_map(): when a resize decision is added to the
+    tablet map without changing the tablet count ("split initiated" entry), the else branch does
+    nothing.  Existing storage groups that were allocated before the resize decision appeared do not
+    get set_split_mode() called on them, so they keep routing writes to _main_cg.
+
+    The fix calls set_split_mode() on all existing storage groups in that else branch so that, once
+    the resize decision appears, subsequent writes land in the correct split-ready compaction groups
+    even if the storage groups were allocated earlier.
+
+    We reproduce the bug using two injections:
+    - simulate_trivial_split_ack    : makes all_storage_groups_split() report split_ready_seq_number
+                                      without calling set_split_mode(), simulating the pre-crash
+                                      trivial ACK from an empty table that misleads the coordinator.
+    - tablet_resize_finalization_postpone: prevents the coordinator from committing the new tablet
+                                      count immediately, giving us a window to write data.
+
+    The test writes data AFTER the trivial ACK fires (simulating the view builder that writes after
+    the resize decision appears) but BEFORE the coordinator commits the new tablet count.
+    Without the fix, that data lands in _main_cg and handle_tablet_split_completion() crashes.
+    With the fix, set_split_mode() was called when the resize decision appeared, so the data is
+    routed to _split_ready_groups and the split completes cleanly.
+    """
+    logger.info("Bootstrapping cluster")
+    config = {'tablet_load_stats_refresh_interval_in_seconds': 1}
+    cmdline = ['--smp', '2']
+    server = await manager.server_add(config=config, cmdline=cmdline)
+
+    cql = manager.get_cql()
+    await wait_for_cql_and_get_hosts(cql, [server], time.time() + 60)
+
+    await manager.disable_tablet_balancing()
+
+    async with new_test_keyspace(manager, "WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 1}") as ks:
+        # Start with an empty table — the split monitor will trivially ACK without moving any data.
+        await cql.run_async(f"CREATE TABLE {ks}.test (pk int PRIMARY KEY, c int) WITH tablets = {{'min_tablet_count': 1}};")
+
+        log = await manager.server_open_log(server.server_id)
+        mark = await log.mark()
+
+        # Simulate the pre-crash trivial ACK: all_storage_groups_split() reports split-ready
+        # without calling set_split_mode(), leaving _split_ready_groups uninitialised.
+        await manager.api.enable_injection(server.ip_addr, 'simulate_trivial_split_ack', one_shot=False)
+
+        # Prevent the coordinator from committing the new tablet count immediately so that we have
+        # a deterministic window to write data after the ACK is recorded.
+        await manager.api.enable_injection(server.ip_addr, 'tablet_resize_finalization_postpone', one_shot=False)
+
+        # Trigger a split.
+        await manager.enable_tablet_balancing()
+        await cql.run_async(f"ALTER TABLE {ks}.test WITH tablets = {{'min_tablet_count': 2}};")
+
+        # Wait until the coordinator has seen the trivial ACK and attempted to finalise.
+        # "Finalizing resize decision" is logged even when tablet_resize_finalization_postpone
+        # blocks the actual commit, confirming that entry B has been applied and the ACK is in.
+        await log.wait_for('Finalizing resize decision for table', from_mark=mark, timeout=60)
+
+        # Insert data now — this simulates the view builder writing after the resize decision
+        # appeared.  Without the fix, set_split_mode() was never called so these writes land in
+        # _main_cg.  With the fix, set_split_mode() was called at entry B time and the writes are
+        # routed to _split_ready_groups.
+        keys = range(256)
+        await asyncio.gather(*[cql.run_async(f"INSERT INTO {ks}.test (pk, c) VALUES ({k}, {k});") for k in keys])
+        await manager.api.flush_keyspace(server.ip_addr, ks)
+
+        # Allow the coordinator to commit the new tablet count.  This triggers
+        # handle_tablet_split_completion() with the data we just wrote.
+        await manager.api.disable_injection(server.ip_addr, 'tablet_resize_finalization_postpone')
+
+        await log.wait_for('Split tablets for table', from_mark=mark, timeout=60)
+
+        # The bug manifests as on_internal_error logged at ERR level.
+        errors = await log.grep("wasn't split correctly", from_mark=mark)
+        assert not errors, f"Crash reproduced — storage group wasn't split correctly: {errors}"
