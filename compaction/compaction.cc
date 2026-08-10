@@ -1362,6 +1362,12 @@ private:
             // to SSTable set. GC SSTables should be added before compaction completes because
             // a failure could result in data resurrection if data is not made available.
             auto unused_gc_sstables = consume_unused_garbage_collected_sstables();
+            if (!unused_gc_sstables.empty()) {
+                clogger.info("[gc-routing] GC sstable ADD: table={}.{} gc_ssts=[{}] compaction_uuid={}",
+                        _schema->ks_name(), _schema->cf_name(),
+                        fmt::join(unused_gc_sstables | std::views::transform([] (auto& sst) { return sst->get_filename(); }), ", "),
+                        _cdata.compaction_uuid);
+            }
             _new_unused_sstables.insert(_new_unused_sstables.end(), unused_gc_sstables.begin(), unused_gc_sstables.end());
 
             auto exhausted_ssts = std::vector<sstables::shared_sstable>(exhausted, _sstables.end());
@@ -1395,6 +1401,10 @@ private:
         exhausted = std::partition(_used_garbage_collected_sstables.begin(), _used_garbage_collected_sstables.end(), gc_not_exhausted);
         if (exhausted != _used_garbage_collected_sstables.end()) {
             auto exhausted_gc_ssts = std::vector<sstables::shared_sstable>(exhausted, _used_garbage_collected_sstables.end());
+            clogger.info("[gc-routing] GC sstable RELEASE: table={}.{} gc_ssts=[{}] compaction_uuid={}",
+                    _schema->ks_name(), _schema->cf_name(),
+                    fmt::join(exhausted_gc_ssts | std::views::transform([] (auto& sst) { return sst->get_filename(); }), ", "),
+                    _cdata.compaction_uuid);
             log_debug("Releasing {} exhausted GC sstable(s) earlier: [{}]",
                 exhausted_gc_ssts.size(),
                 fmt::join(exhausted_gc_ssts | std::views::transform([] (auto sst) { return to_string(sst, true); }), ","));

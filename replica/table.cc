@@ -2595,10 +2595,23 @@ compaction_group::update_sstable_sets_on_compaction_completion(compaction::compa
                             sst->get_filename(), sst->get_origin(), *sst->unlinked_at()));
                 }
                 auto& cg = _t.compaction_group_for_sstable(sst);
+                if (&cg != &_cg) {
+                    tlogger.info("[gc-routing] cross_group_routing in prepare: table={}.{} source_cg@{}(id={}) target_cg@{}(id={}) sst={} origin={}",
+                            _t.schema()->ks_name(), _t.schema()->cf_name(),
+                            fmt::ptr(&_cg), _cg.group_id(), fmt::ptr(&cg), cg.group_id(),
+                            sst->get_filename(), sst->get_origin());
+                }
                 _cg_desc[&cg].desc.new_sstables.push_back(sst);
             }
             // The group that triggered compaction is the only one to have sstables removed from it.
             _cg_desc[&_cg].desc.old_sstables = _desc.old_sstables;
+            if (!_desc.old_sstables.empty()) {
+                tlogger.info("[gc-routing] old_sstables pinned to _cg@{}(id={}) table={}.{} old=[{}]",
+                        fmt::ptr(&_cg), _cg.group_id(), _t.schema()->ks_name(), _t.schema()->cf_name(),
+                        fmt::join(_desc.old_sstables | std::views::transform([] (auto& sst) {
+                            return fmt::format("{}(origin={})", sst->get_filename(), sst->get_origin());
+                        }), ", "));
+            }
             for (auto& [cg, d] : _cg_desc) {
                 size_t removed_sstables = 0;
                 d.main_sstable_set_builder_result = co_await _builder.build_new_list(*cg->main_sstables(), cg->make_main_sstable_set(),
