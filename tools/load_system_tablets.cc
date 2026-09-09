@@ -60,11 +60,59 @@ tools::tablets_t do_load_system_tablets(const db::config& dbcfg,
         auto last_token = row.get_nonnull<int64_t>("last_token");
         auto replica_set = row.get_data_value("replicas");
         if (replica_set) {
-            tablets.emplace(last_token,
-                            replica::tablet_replica_set_from_cell(*replica_set));
+            tools::tablet tablet{.replicas = replica::tablet_replica_set_from_cell(*replica_set)};
+            // absent until the tablet is repaired for the first time
+            if (auto repair_time = row.get<db_clock::time_point>("repair_time")) {
+                tablet.repair_time = *repair_time;
+            }
+            tablets.emplace(last_token, std::move(tablet));
         }
     }
     return tablets;
+}
+
+tools::repaired_ranges_t do_load_system_repair_history(const db::config& dbcfg,
+                                        std::filesystem::path scylla_data_path,
+                                        table_id table,
+                                        reader_permit permit) {
+    sharded<sstable_manager_service> sst_man;
+    auto scf = make_sstable_compressor_factory_for_tests_in_thread();
+    sst_man.start(std::ref(dbcfg), std::ref(*scf)).get();
+    auto stop_sst_man_service = deferred_stop(sst_man);
+
+    auto table_directory = get_table_directory(scylla_data_path,
+                                               db::system_keyspace::NAME,
+                                               db::system_keyspace::REPAIR_HISTORY).get();
+    auto mut = read_mutation_from_table_offline(sst_man,
+                                                permit,
+                                                table_directory,
+                                                db::system_keyspace::NAME,
+                                                db::system_keyspace::repair_history,
+                                                data_value(table.uuid()),
+                                                {});
+    if (!mut) {
+        return {};
+    }
+    tools::repaired_ranges_t repaired_ranges;
+    query::result_set result_set{*mut};
+    for (auto& row : result_set.rows()) {
+        auto repair_time = row.get<db_clock::time_point>("repair_time");
+        auto range_start = row.get<int64_t>("range_start");
+        auto range_end = row.get<int64_t>("range_end");
+        if (!repair_time || !range_start || !range_end) {
+            continue;
+        }
+        // the recorded range is (range_start, range_end], with the minimum
+        // int64 standing for the end of the ring on either side
+        auto start = *range_start == std::numeric_limits<int64_t>::min()
+                ? dht::minimum_token() : dht::token::from_int64(*range_start);
+        auto end = *range_end == std::numeric_limits<int64_t>::min()
+                ? dht::maximum_token() : dht::token::from_int64(*range_end);
+        repaired_ranges.emplace_back(
+                dht::token_range(dht::token_range::bound(start, false), dht::token_range::bound(end, true)),
+                to_gc_clock(*repair_time));
+    }
+    return repaired_ranges;
 }
 
 std::optional<data_dictionary::storage_options> do_load_keyspace_storage_options(const db::config& dbcfg,
@@ -272,6 +320,15 @@ future<tablets_t> load_system_tablets(const db::config &dbcfg,
                                       std::optional<std::filesystem::path> tablets_directory) {
     return async([=, &dbcfg] {
         return do_load_system_tablets(dbcfg, scylla_data_path, table, permit, tablets_directory);
+    });
+}
+
+future<repaired_ranges_t> load_system_repair_history(const db::config& dbcfg,
+                                      std::filesystem::path scylla_data_path,
+                                      table_id table,
+                                      reader_permit permit) {
+    return async([=, &dbcfg] {
+        return do_load_system_repair_history(dbcfg, scylla_data_path, table, permit);
     });
 }
 
