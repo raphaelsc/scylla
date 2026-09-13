@@ -12,12 +12,14 @@
 #include <seastar/util/closeable.hh>
 
 #include "utils/log.hh"
+#include "db/schema_tables.hh"
 #include "db/system_keyspace.hh"
 #include "mutation/mutation.hh"
 #include "readers/combined.hh"
 #include "replica/tablets.hh"
 #include "tools/read_mutation.hh"
 #include "types/list.hh"
+#include "types/map.hh"
 #include "types/tuple.hh"
 
 namespace {
@@ -62,6 +64,47 @@ tools::tablets_t do_load_system_tablets(const db::config& dbcfg,
         }
     }
     return tablets;
+}
+
+std::optional<data_dictionary::storage_options> do_load_keyspace_storage_options(const db::config& dbcfg,
+                                        std::filesystem::path scylla_data_path,
+                                        std::string_view keyspace,
+                                        reader_permit permit) {
+    sharded<sstable_manager_service> sst_man;
+    auto scf = make_sstable_compressor_factory_for_tests_in_thread();
+    sst_man.start(std::ref(dbcfg), std::ref(*scf)).get();
+    auto stop_sst_man_service = deferred_stop(sst_man);
+
+    auto table_directory = get_table_directory(scylla_data_path,
+                                               db::schema_tables::NAME,
+                                               db::schema_tables::SCYLLA_KEYSPACES).get();
+    auto mut = read_mutation_from_table_offline(sst_man,
+                                                permit,
+                                                table_directory,
+                                                db::schema_tables::NAME,
+                                                db::schema_tables::scylla_keyspaces,
+                                                data_value(sstring(keyspace)),
+                                                {});
+    if (!mut) {
+        return std::nullopt;
+    }
+    query::result_set result_set{*mut};
+    if (result_set.empty()) {
+        return std::nullopt;
+    }
+    const auto& row = result_set.row(0);
+    auto storage_type = row.get<sstring>("storage_type");
+    auto storage_options = row.get<map_type_impl::native_type>("storage_options");
+    if (!storage_type || !storage_options) {
+        return std::nullopt;
+    }
+    std::map<sstring, sstring> values;
+    for (const auto& [key, value] : *storage_options) {
+        values.emplace(value_cast<sstring>(key), value_cast<sstring>(value));
+    }
+    data_dictionary::storage_options options;
+    options.value = data_dictionary::storage_options::from_map(*storage_type, values);
+    return options;
 }
 
 std::optional<tools::local_node_info> do_load_local_node_info(const db::config& dbcfg,
@@ -138,6 +181,15 @@ future<tablets_t> load_system_tablets(const db::config &dbcfg,
                                       std::optional<std::filesystem::path> tablets_directory) {
     return async([=, &dbcfg] {
         return do_load_system_tablets(dbcfg, scylla_data_path, table, permit, tablets_directory);
+    });
+}
+
+future<std::optional<data_dictionary::storage_options>> load_keyspace_storage_options(const db::config& dbcfg,
+                                      std::filesystem::path scylla_data_path,
+                                      std::string_view keyspace,
+                                      reader_permit permit) {
+    return async([=, &dbcfg] {
+        return do_load_keyspace_storage_options(dbcfg, scylla_data_path, keyspace, permit);
     });
 }
 
