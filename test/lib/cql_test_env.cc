@@ -726,6 +726,7 @@ private:
                     .available_memory = dbcfg.available_memory,
                     .static_shares = cfg->compaction_static_shares,
                     .max_shares = cfg->compaction_max_shares,
+                    .normalization_factor = cfg->compaction_normalization_factor(),
                     .throughput_mb_per_sec = cfg->compaction_throughput_mb_per_sec,
                     .flush_all_tables_before_major = cfg->compaction_flush_all_tables_before_major_seconds() * 1s,
                     .controller_v2 = {

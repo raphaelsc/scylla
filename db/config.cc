@@ -1899,6 +1899,8 @@ db::config::config(std::shared_ptr<db::extensions> exts)
     , compaction_controller_v2_min_busy_fraction_to_raise(this, "compaction_controller_v2_min_busy_fraction_to_raise", value_status::Used, 0.5,
         "compaction_controller v2 only raises the shares of regular compaction if it was busy for at least this fraction of the time since its last update. "
         "Must be in [0, 1]. Do not set this unless you know what you are doing.")
+    , compaction_normalization_factor(this, "compaction_normalization_factor", value_status::Used, 30,
+        "The normalized backlog (backlog divided by the shard's memory) at which the compaction controller reaches the maximum shares. Lower values make compaction more aggressive, favoring reads over writes. Must be greater than 1.5. Do not set this unless you know what you are doing. This option will be retired when the controller reaches more maturity.")
     , compaction_enforce_min_threshold(this, "compaction_enforce_min_threshold", liveness::LiveUpdate, value_status::Used, false,
         "If set to true, enforce the min_threshold option for compactions strictly. If false (default), Scylla may decide to compact even if below min_threshold.")
     , compaction_flush_all_tables_before_major_seconds(this, "compaction_flush_all_tables_before_major_seconds", value_status::Used, 86400,

@@ -940,8 +940,8 @@ auto fmt::formatter<compaction::compaction_task_executor>::format(const compacti
 
 namespace compaction {
 
-inline std::unique_ptr<compaction_controller> make_compaction_controller(const compaction_manager::scheduling_group& csg, uint64_t static_shares, std::optional<float> max_shares, std::function<double()> fn) {
-    return std::make_unique<compaction_controller_v1>(csg, static_shares, max_shares, 250ms, std::move(fn));
+inline std::unique_ptr<compaction_controller> make_compaction_controller(const compaction_manager::scheduling_group& csg, uint64_t static_shares, std::optional<float> max_shares, float normalization_factor, std::function<double()> fn) {
+    return std::make_unique<compaction_controller_v1>(csg, static_shares, max_shares, normalization_factor, 250ms, std::move(fn));
 }
 
 std::unique_ptr<compaction_controller_v2> compaction_manager::make_compaction_controller_v2(compaction_controller_v2::dry_run dry_run) {
@@ -1214,7 +1214,7 @@ compaction_manager::compaction_manager(config cfg, abort_source& as, tasks::task
     , _sys_ks("compaction_manager::system_keyspace")
     , _cfg(std::move(cfg))
     , _compaction_submission_timer(compaction_sg(), compaction_submission_callback())
-    , _compaction_controller(make_compaction_controller(compaction_sg(), static_shares(), _cfg.max_shares.get(), [this] () -> float {
+    , _compaction_controller(make_compaction_controller(compaction_sg(), static_shares(), _cfg.max_shares.get(), _cfg.normalization_factor, [this] () -> float {
         _last_backlog = backlog();
         auto b = _last_backlog / available_memory();
         // This means we are using an unimplemented strategy
@@ -1222,7 +1222,7 @@ compaction_manager::compaction_manager(config cfg, abort_source& as, tasks::task
             // returning the normalization factor means that we'll return the maximum
             // output in the _control_points. We can get rid of this when we implement
             // all strategies.
-            return compaction_controller_v1::normalization_factor;
+            return _cfg.normalization_factor;
         }
         return b;
     }))
@@ -1250,7 +1250,7 @@ compaction_manager::compaction_manager(tasks::task_manager& tm)
     , _sys_ks("compaction_manager::system_keyspace")
     , _cfg(config{ .available_memory = 1 })
     , _compaction_submission_timer(compaction_sg(), compaction_submission_callback())
-    , _compaction_controller(make_compaction_controller(compaction_sg(), 1, std::nullopt, [] () -> float { return 1.0; }))
+    , _compaction_controller(make_compaction_controller(compaction_sg(), 1, std::nullopt, compaction_controller_v1::normalization_factor, [] () -> float { return 1.0; }))
     , _update_compaction_static_shares_action([] { return make_ready_future<>(); })
     , _compaction_static_shares_observer(_cfg.static_shares.observe(_update_compaction_static_shares_action.make_observer()))
     , _compaction_max_shares_observer(_cfg.max_shares.observe([] (const float& max_shares) {}))
