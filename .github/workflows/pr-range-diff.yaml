@@ -51,25 +51,54 @@ jobs:
         run: |
           old_base=$(git merge-base "$BASE_SHA" "$OLD_HEAD")
           new_base=$(git merge-base "$BASE_SHA" "$NEW_HEAD")
-          # A higher creation factor pairs a reworked commit with its previous
-          # version (showing the edit) instead of reporting it as dropped and
-          # re-added, which the default does when most of a small patch changes.
-          git range-diff --no-color --creation-factor=100 "$old_base..$OLD_HEAD" "$new_base..$NEW_HEAD" > ../range-diff.txt
-          {
-            echo "### Changes since previous version"
-            echo
-            echo "\`${OLD_HEAD:0:12}\` → \`${NEW_HEAD:0:12}\`"
-            echo
-            echo "<details><summary>git range-diff</summary>"
-            echo
-            echo '```diff'
-            # GitHub comments are capped at 65536 characters.
-            head -c 60000 ../range-diff.txt
-            echo '```'
-            echo "</details>"
-            echo
-            echo "Reproduce locally: \`git fetch origin $OLD_HEAD $NEW_HEAD && git range-diff --creation-factor=100 $old_base..$OLD_HEAD $new_base..$NEW_HEAD\`"
-          } > ../comment.md
+          git range-diff --no-color "$old_base..$OLD_HEAD" "$new_base..$NEW_HEAD" | tee ../range-diff.txt
+
+      - name: Format comment
+        if: steps.forced.outputs.forced == 'true'
+        env:
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+          OLD_HEAD: ${{ github.event.before }}
+          NEW_HEAD: ${{ github.event.after }}
+        shell: python
+        run: |
+          import html, os, re
+
+          # Commit pair lines look like "1:  abc1234 ! 1:  def5678 title";
+          # everything else is the indented diff of the pair above.
+          pair = re.compile(r"^\s*(-|\d+):\s+(-+|[0-9a-f]+) ([<>=!])\s+(-|\d+):\s+(-+|[0-9a-f]+) (.*)$")
+          commits = []
+          for line in open("range-diff.txt").read().splitlines():
+              m = pair.match(line)
+              if m:
+                  dropped = m[3] == "<"
+                  commits.append({"pos": m[1] if dropped else m[4], "sha": m[2] if dropped else m[5],
+                                  "status": m[3], "title": m[6], "diff": []})
+              elif commits:
+                  # Dropping the indent puts the outer +/- in the first column,
+                  # where GitHub's diff highlighting looks for it.
+                  commits[-1]["diff"].append(line[4:])
+
+          label = {"=": "unchanged", "!": "**modified**", ">": "**new**", "<": "**dropped**"}
+          total = sum(c["status"] != "<" for c in commits)
+          repo, old, new = os.environ["REPO_URL"], os.environ["OLD_HEAD"], os.environ["NEW_HEAD"]
+          out = [f"### Changes since previous version ([`{old[:10]}`]({repo}/commit/{old}) → [`{new[:10]}`]({repo}/commit/{new}))", ""]
+          for c in commits:
+              pos = f"{c['pos']}/{total}" if c["status"] != "<" else "–"
+              out.append(f"- `{pos}` {label[c['status']]}: [{c['title']}]({repo}/commit/{c['sha']})")
+          out.append("")
+
+          # GitHub comments are capped at 65536 characters.
+          limit = 60000
+          for c in commits:
+              if c["status"] != "!":
+                  continue
+              section = [f"<details open><summary><b>{c['pos']}/{total} {html.escape(c['title'])}</b></summary>", "",
+                         "````diff", *c["diff"], "````", "</details>", ""]
+              if sum(len(l) + 1 for l in out + section) > limit:
+                  out.append("_Truncated; the full range-diff is in the workflow log._")
+                  break
+              out += section
+          open("comment.md", "w").write("\n".join(out) + "\n")
 
       - name: Post comment
         if: steps.forced.outputs.forced == 'true'
