@@ -1047,7 +1047,7 @@ protected:
     }
 private:
     void on_interrupt(std::exception_ptr ex) {
-        log_info("{} of {} sstables interrupted due to: {}, at {}", report_start_desc(), _input_sstable_generations.size(), ex, current_backtrace());
+        log_info("{} of {} sstables interrupted, cause: {}, at {}", report_start_desc(), _input_sstable_generations.size(), ex, current_backtrace());
         delete_sstables_for_interrupted_compaction();
     }
 
