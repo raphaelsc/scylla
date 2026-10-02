@@ -1047,7 +1047,7 @@ protected:
     }
 private:
     void on_interrupt(std::exception_ptr ex) {
-        log_info("{} of {} sstables interrupted due to: {}, at {}", report_start_desc(), _input_sstable_generations.size(), ex, current_backtrace());
+        log_info("{} of {} sstables interrupted, cause: {}, at {}", report_start_desc(), _input_sstable_generations.size(), ex, current_backtrace());
         delete_sstables_for_interrupted_compaction();
     }
 
@@ -2217,7 +2217,7 @@ static future<compaction_result> scrub_sstables_validate_mode(compaction_descrip
     cdata.compaction_size = std::ranges::fold_left(descriptor.sstables | std::views::transform([] (auto& sst) { return sst->data_size(); }), int64_t(0), std::plus{});
 
     for (const auto& sst : descriptor.sstables) {
-        clogger.info("Scrubbing in validate mode {}", sst->get_filename());
+        clogger.info("Validating sstable {}", sst->get_filename());
 
         validation_errors += co_await sst->validate(permit, cdata.abort, [&schema] (sstring what) {
             scrub_compaction::report_validation_error(compaction_type::Scrub, *schema, what);
@@ -2228,7 +2228,7 @@ static future<compaction_result> scrub_sstables_validate_mode(compaction_descrip
             throw compaction_stopped_exception(schema->ks_name(), schema->cf_name(), cdata.stop_requested);
         }
 
-        clogger.info("Finished scrubbing in validate mode {} - sstable is {}", sst->get_filename(), validation_errors == 0 ? "valid" : "invalid");
+        clogger.info("Finished validating sstable {}: {}", sst->get_filename(), validation_errors == 0 ? "valid" : "invalid");
     }
 
     using scrub = compaction_type_options::scrub;
