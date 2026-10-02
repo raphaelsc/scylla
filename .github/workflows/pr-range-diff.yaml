@@ -11,20 +11,21 @@ permissions:
 jobs:
   range-diff:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       # No checkout of the PR's code: only git objects are fetched and compared,
       # nothing from the PR is executed, so pull_request_target is safe here.
       - name: Fetch old and new heads
         env:
           REPO_URL: ${{ github.server_url }}/${{ github.repository }}
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           OLD_HEAD: ${{ github.event.before }}
           NEW_HEAD: ${{ github.event.after }}
         run: |
           git init -q repo && cd repo
           git remote add origin "$REPO_URL"
           # Blobless fetch keeps it cheap; range-diff fetches the blobs it needs lazily.
-          git fetch -q --filter=blob:none origin "$BASE_REF" "$OLD_HEAD" "$NEW_HEAD"
+          git fetch -q --filter=blob:none origin "$BASE_SHA" "$OLD_HEAD" "$NEW_HEAD"
 
       - name: Detect force-push
         id: forced
@@ -44,13 +45,16 @@ jobs:
         if: steps.forced.outputs.forced == 'true'
         working-directory: repo
         env:
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           OLD_HEAD: ${{ github.event.before }}
           NEW_HEAD: ${{ github.event.after }}
         run: |
-          old_base=$(git merge-base "origin/$BASE_REF" "$OLD_HEAD")
-          new_base=$(git merge-base "origin/$BASE_REF" "$NEW_HEAD")
-          git range-diff --no-color "$old_base..$OLD_HEAD" "$new_base..$NEW_HEAD" > ../range-diff.txt
+          old_base=$(git merge-base "$BASE_SHA" "$OLD_HEAD")
+          new_base=$(git merge-base "$BASE_SHA" "$NEW_HEAD")
+          # A higher creation factor pairs a reworked commit with its previous
+          # version (showing the edit) instead of reporting it as dropped and
+          # re-added, which the default does when most of a small patch changes.
+          git range-diff --no-color --creation-factor=100 "$old_base..$OLD_HEAD" "$new_base..$NEW_HEAD" > ../range-diff.txt
           {
             echo "### Changes since previous version"
             echo
@@ -64,7 +68,7 @@ jobs:
             echo '```'
             echo "</details>"
             echo
-            echo "Reproduce locally: \`git fetch origin $OLD_HEAD $NEW_HEAD && git range-diff $old_base..$OLD_HEAD $new_base..$NEW_HEAD\`"
+            echo "Reproduce locally: \`git fetch origin $OLD_HEAD $NEW_HEAD && git range-diff --creation-factor=100 $old_base..$OLD_HEAD $new_base..$NEW_HEAD\`"
           } > ../comment.md
 
       - name: Post comment
