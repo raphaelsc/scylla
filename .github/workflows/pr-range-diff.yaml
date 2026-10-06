@@ -78,13 +78,22 @@ jobs:
                   # where GitHub's diff highlighting looks for it.
                   commits[-1]["diff"].append(line[4:])
 
+          # Commit titles come from the PR author: escape Markdown so they can't
+          # inject links or images, and break @ so they can't mention anyone.
+          def md(s):
+              return re.sub(r"([\\`*_\[\]()<>#!|~])", r"\\\1", s).replace("@", "@\u200b")
+
+          # A fence longer than any backtick run in the diff can't be closed by it.
+          def fence(lines):
+              return "`" * max([3] + [len(r) + 1 for l in lines for r in re.findall(r"`+", l)])
+
           label = {"=": "unchanged", "!": "**modified**", ">": "**new**", "<": "**dropped**"}
           total = sum(c["status"] != "<" for c in commits)
           repo, old, new = os.environ["REPO_URL"], os.environ["OLD_HEAD"], os.environ["NEW_HEAD"]
           out = [f"### Changes since previous version ([`{old[:10]}`]({repo}/commit/{old}) → [`{new[:10]}`]({repo}/commit/{new}))", ""]
           for c in commits:
               pos = f"{c['pos']}/{total}" if c["status"] != "<" else "–"
-              out.append(f"- `{pos}` {label[c['status']]}: [{c['title']}]({repo}/commit/{c['sha']})")
+              out.append(f"- `{pos}` {label[c['status']]}: [{md(c['title'])}]({repo}/commit/{c['sha']})")
           out.append("")
 
           # GitHub comments are capped at 65536 characters.
@@ -92,8 +101,14 @@ jobs:
           for c in commits:
               if c["status"] != "!":
                   continue
-              section = [f"<details open><summary><b>{c['pos']}/{total} {html.escape(c['title'])}</b></summary>", "",
-                         "````diff", *c["diff"], "````", "</details>", ""]
+              # Lines added or removed between the two versions of the commit.
+              changed = sum(l[:1] in ("+", "-") for l in c["diff"])
+              # Keep a section open only if it fits on about one screen.
+              opened = " open" if len(c["diff"]) <= 40 else ""
+              title = html.escape(c["title"]).replace("@", "@\u200b").replace("#", "#\u200b")
+              f = fence(c["diff"])
+              section = [f"<details{opened}><summary><b>{c['pos']}/{total} {title}</b> ({changed} lines changed)</summary>", "",
+                         f + "diff", *c["diff"], f, "</details>", ""]
               if sum(len(l) + 1 for l in out + section) > limit:
                   out.append("_Truncated; the full range-diff is in the workflow log._")
                   break
