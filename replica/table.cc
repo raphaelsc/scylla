@@ -88,7 +88,7 @@ table_holder::table_holder(table& t)
 
 sstables::generation_type table::calculate_generation_for_new_table() {
     auto ret = _sstable_generation_generator();
-    tlogger.debug("{}.{} new sstable generation {}", schema()->ks_name(), schema()->cf_name(), ret);
+    tlogger.trace("{}.{} new sstable generation {}", schema()->ks_name(), schema()->cf_name(), ret);
     return ret;
 }
 
@@ -287,7 +287,7 @@ table::make_mutation_reader(schema_ptr s,
 
 sstables::shared_sstable table::make_streaming_sstable_for_write() {
     auto newtab = make_sstable(sstables::sstable_state::normal);
-    tlogger.debug("Created sstable for streaming: ks={}, cf={}", schema()->ks_name(), schema()->cf_name());
+    tlogger.trace("Created sstable for streaming: ks={}, cf={}", schema()->ks_name(), schema()->cf_name());
     return newtab;
 }
 
@@ -932,7 +932,7 @@ public:
             }
 
             auto range = tmap.get_token_range(tid);
-            tlogger.debug("Tablet with id {} and range {} present for {}.{}", tid, range, schema()->ks_name(), schema()->cf_name());
+            tlogger.trace("Tablet with id {} and range {} present for {}.{}", tid, range, schema()->ks_name(), schema()->cf_name());
             ret[tid.value()] = allocate_storage_group(tmap, tid, std::move(range));
         }
         _storage_groups = std::move(ret);
@@ -1087,7 +1087,7 @@ bool storage_group::set_split_mode() {
     if (!splitting_mode()) {
         // Don't create new compaction groups if the main cg has compaction disabled
         if (_main_cg->compaction_disabled()) {
-            tlogger.debug("storage_group::set_split_mode: split ready groups not created due to compaction disabled on the main group");
+            tlogger.trace("storage_group::set_split_mode: split ready groups not created due to compaction disabled on the main group");
             return false;
         }
         // Each split-ready group is given the sub-range it will own once the split
@@ -1987,10 +1987,10 @@ table::seal_active_memtable(compaction_group& cg, flush_permit&& flush_permit) n
     // If we are being flushed for any other reason, we still change the RP range
     // remaining unflushed in the memtable_list (to none)
     auto old_low = std::exchange(cg._lowest_rp, db::replay_position::max);
-    tlogger.debug("Sealing active memtable of {}.{}, partitions: {}, occupancy: {}, low_rp: {}", _schema->ks_name(), _schema->cf_name(), old->partition_count(), old->occupancy(), old_low);
+    tlogger.trace("Sealing active memtable of {}.{}, partitions: {}, occupancy: {}, low_rp: {}", _schema->ks_name(), _schema->cf_name(), old->partition_count(), old->occupancy(), old_low);
 
     if (old->empty()) {
-        tlogger.debug("Memtable is empty");
+        tlogger.trace("Memtable is empty");
         co_return co_await _flush_barrier.advance_and_await();
     }
 
@@ -2095,7 +2095,7 @@ table::seal_active_memtable(compaction_group& cg, flush_permit&& flush_permit) n
     co_await with_retry([&] () -> future<> {
         // Reacquiring the write permit might be needed if retrying flush
         if (!permit.has_sstable_write_permit()) {
-            tlogger.debug("seal_active_memtable: reacquiring write permit");
+            tlogger.trace("seal_active_memtable: reacquiring write permit");
             utils::get_local_injector().inject("table_seal_active_memtable_reacquire_write_permit", []() {
                 throw std::bad_alloc();
             });
@@ -2159,7 +2159,7 @@ table::try_flush_memtable_to_sstable(compaction_group& cg, lw_shared_ptr<memtabl
 
         auto newtab = make_sstable();
         newtabs.push_back(newtab);
-        tlogger.debug("Flushing to {}", newtab->get_filename());
+        tlogger.trace("Flushing to {}", newtab->get_filename());
 
         auto monitor = database_sstable_write_monitor(permit, newtab, cg,
             old->get_max_timestamp());
@@ -2207,7 +2207,7 @@ table::try_flush_memtable_to_sstable(compaction_group& cg, lw_shared_ptr<memtabl
         });
 
         cg.memtables()->erase(old);
-        tlogger.debug("Memtable for {}.{} replaced, into {} sstables", old->schema()->ks_name(), old->schema()->cf_name(), newtabs.size());
+        tlogger.trace("Memtable for {}.{} replaced, into {} sstables", old->schema()->ks_name(), old->schema()->cf_name(), newtabs.size());
         co_return;
     } catch (const std::exception& e) {
         for (auto& newtab : newtabs) {
@@ -2919,7 +2919,7 @@ void compaction_group::set_compaction_strategy_state(compaction::compaction_stra
 }
 
 void table::set_compaction_strategy(compaction::compaction_strategy_type strategy) {
-    tlogger.debug("Setting compaction strategy of {}.{} to {}", _schema->ks_name(), _schema->cf_name(), compaction::compaction_strategy::name(strategy));
+    tlogger.trace("Setting compaction strategy of {}.{} to {}", _schema->ks_name(), _schema->cf_name(), compaction::compaction_strategy::name(strategy));
     auto new_cs = make_compaction_strategy(strategy, _schema->compaction_strategy_options());
 
     struct compaction_group_strategy_updater {
@@ -3683,7 +3683,7 @@ void tablet_storage_group_manager::handle_tablet_split_completion(const locator:
 
     unsigned growth_factor = log2ceil(new_tablet_count / old_tablet_count);
     unsigned split_size = 1 << growth_factor;
-    tlogger.debug("Growth factor: {}, split size {}", growth_factor, split_size);
+    tlogger.trace("Growth factor: {}, split size {}", growth_factor, split_size);
 
     if (old_tablet_count * split_size != new_tablet_count) {
         on_internal_error(tlogger, format("New tablet count for table {} is unexpected, actual: {}, expected {}.",
@@ -3719,7 +3719,7 @@ void tablet_storage_group_manager::handle_tablet_split_completion(const locator:
             auto old_range = old_tmap.get_token_range(locator::tablet_id(id));
             auto new_range = new_tmap.get_token_range(locator::tablet_id(group_id));
             auto sstables_repaired_at = new_tmap.get_tablet_info(locator::tablet_id(group_id)).sstables_repaired_at;
-            tlogger.debug("Setting sstables_repaired_at={} for split tablet_id={} old_tid={} new_tid={} old_range={} new_range={} idx={}",
+            tlogger.trace("Setting sstables_repaired_at={} for split tablet_id={} old_tid={} new_tid={} old_range={} new_range={} idx={}",
                     sstables_repaired_at, table_id, id, group_id, old_range, new_range, i);
             split_ready_groups[i]->update_id_and_range(group_id, new_range);
             new_storage_groups[group_id] = make_lw_shared<storage_group>(std::move(split_ready_groups[i]));
@@ -3745,12 +3745,12 @@ future<> tablet_storage_group_manager::merge_completion_fiber() {
             auto logstor_cres = std::exchange(_compaction_reenablers_for_logstor_merging, {});
             co_await for_each_storage_group_gently([ks_name, cf_name] (storage_group& sg) -> future<> {
                 auto main_group = sg.main_compaction_group();
-                tlogger.debug("Merge compaction groups for table={}.{} group_id={} range={} started",
+                tlogger.trace("Merge compaction groups for table={}.{} group_id={} range={} started",
                         ks_name, cf_name, main_group->group_id(), main_group->token_range());
                 int nr = 0;
                 int sz = sg.merging_groups().size();
                 for (auto& group : sg.merging_groups()) {
-                    tlogger.debug("Merge compaction groups for table={}.{} group_id={} range={} merging {} out of {} groups",
+                    tlogger.trace("Merge compaction groups for table={}.{} group_id={} range={} merging {} out of {} groups",
                             ks_name, cf_name, main_group->group_id(), main_group->token_range(), ++nr, sz);
                     // Synchronize with ongoing writes that might be blocked waiting for memory.
                     // Also, disabling compaction provides stability on the sstable set.
@@ -3775,7 +3775,7 @@ future<> tablet_storage_group_manager::merge_completion_fiber() {
         });
         _pending_merge_fiber_work.reset();
         co_await _merge_completion_event.wait();
-        tlogger.debug("Merge completion fiber woke up for {}.{}", schema()->ks_name(), schema()->cf_name());
+        tlogger.trace("Merge completion fiber woke up for {}.{}", schema()->ks_name(), schema()->cf_name());
     }
 }
 
@@ -3843,7 +3843,7 @@ void tablet_storage_group_manager::handle_tablet_merge_completion(locator::effec
             auto& sg = it->second;
             sg->for_each_compaction_group([&] (const compaction_group_ptr& cg) {
                 cg->update_id(size_t(current_new));
-                tlogger.debug("Adding merging_group: sstables_repaired_at={} old_range={} new_range={} old_tid={} new_tid={} old_group_id={}",
+                tlogger.trace("Adding merging_group: sstables_repaired_at={} old_range={} new_range={} old_tid={} new_tid={} old_group_id={}",
                         cg->get_sstables_repaired_at(), cg->token_range(), new_sg->token_range(), cg->group_id(), current_new, group_id);
                 new_sg->add_merging_group(cg);
             });
@@ -4279,7 +4279,7 @@ future<> database::snapshot_table_on_all_shards(sharded<database>& sharded_db, c
     co_await smp::submit_to(orchestrator, [&] () -> future<> {
         auto& t = *table_shards;
         auto s = t.schema();
-        tlogger.debug("Taking snapshot of {}.{}: name={}", s->ks_name(), s->cf_name(), name);
+        tlogger.trace("Taking snapshot of {}.{}: name={}", s->ks_name(), s->cf_name(), name);
 
         std::vector<snapshot_sstable_set> sstable_sets(this_smp_shard_count());
 
@@ -4294,7 +4294,7 @@ future<> database::snapshot_table_on_all_shards(sharded<database>& sharded_db, c
 
         std::exception_ptr ex;
 
-        tlogger.debug("snapshot {}: writing schema.cql", name);
+        tlogger.trace("snapshot {}: writing schema.cql", name);
         // With internals, so that schema.cql records the table's dropped columns: without them, an
         // sstable that still holds a dropped column's data is unreadable once restored.
         auto schema_desc = s->describe(replica::make_schema_describe_helper(table_shards), cql3::describe_option::STMTS_AND_INTERNALS);
@@ -4693,7 +4693,7 @@ future<db::replay_position> table::discard_sstables(db_clock::time_point truncat
             cg.set_maintenance_sstables(std::move(maintenance_pruned));
         });
         refresh_compound_sstable_set();
-        tlogger.debug("cleaning out row cache");
+        tlogger.trace("cleaning out row cache");
     }));
     rebuild_statistics();
 
@@ -4771,7 +4771,7 @@ shared_ptr<db::large_data_guardrail_base> table::make_large_data_guardrail() con
 
 void table::set_schema(schema_ptr s) {
     SCYLLA_ASSERT(s->is_counter() == _schema->is_counter());
-    tlogger.debug("Changing schema version of {}.{} ({}) from {} to {}",
+    tlogger.trace("Changing schema version of {}.{} ({}) from {} to {}",
                 _schema->ks_name(), _schema->cf_name(), _schema->id(), _schema->version(), s->version());
 
     _flush_timer.cancel();
@@ -6061,7 +6061,7 @@ future<> table::truncate_tablet_locally(database& db, locator::tablet_id tid) {
         co_await mt->clear_gently();
     }
 
-    tlogger.debug("Truncated tablet {} of table {}.{} locally, range {}",
+    tlogger.trace("Truncated tablet {} of table {}.{} locally, range {}",
             tid, schema()->ks_name(), schema()->cf_name(), sg.token_range());
 }
 
