@@ -101,8 +101,9 @@ jobs:
           for c in commits:
               if c["status"] != "!":
                   continue
-              # Lines added or removed between the two versions of the commit.
-              changed = sum(l[:1] in ("+", "-") for l in c["diff"])
+              # Code lines of the patch added or removed between the two versions,
+              # not counting the context lines that come and go with a hunk.
+              changed = sum(l[:2] in ("++", "+-", "-+", "--") for l in c["diff"])
               # Keep a section open only if it fits on about one screen.
               opened = " open" if len(c["diff"]) <= 40 else ""
               title = html.escape(c["title"]).replace("@", "@\u200b").replace("#", "#\u200b")
