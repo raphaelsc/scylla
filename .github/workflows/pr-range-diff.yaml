@@ -51,7 +51,12 @@ jobs:
         run: |
           old_base=$(git merge-base "$BASE_SHA" "$OLD_HEAD")
           new_base=$(git merge-base "$BASE_SHA" "$NEW_HEAD")
-          git range-diff --no-color "$old_base..$OLD_HEAD" "$new_base..$NEW_HEAD" | tee ../range-diff.txt
+          # Without a checkout, git doesn't see the repository's diff settings;
+          # take them from the base, not the PR: C++ hunk headers from
+          # .gitattributes and the headers-first file order from .gitorderfile.
+          git show "$BASE_SHA:.gitattributes" > .git/info/attributes || true
+          git show "$BASE_SHA:.gitorderfile" > .git/orderfile || true
+          git -c diff.orderfile=.git/orderfile range-diff --no-color "$old_base..$OLD_HEAD" "$new_base..$NEW_HEAD" | tee ../range-diff.txt
 
       - name: Format comment
         if: steps.forced.outputs.forced == 'true'
@@ -104,11 +109,11 @@ jobs:
               # Code lines of the patch added or removed between the two versions,
               # not counting the context lines that come and go with a hunk.
               changed = sum(l[:2] in ("++", "+-", "-+", "--") for l in c["diff"])
-              # Keep a section open only if it fits on about one screen.
-              opened = " open" if len(c["diff"]) <= 40 else ""
               title = html.escape(c["title"]).replace("@", "@\u200b").replace("#", "#\u200b")
               f = fence(c["diff"])
-              section = [f"<details{opened}><summary><b>{c['pos']}/{total} {title}</b> ({changed} lines changed)</summary>", "",
+              # Collapsed, so the comment stays short however much changed;
+              # the heading says how much is inside.
+              section = [f"<details><summary><b>{c['pos']}/{total} {title}</b> ({changed} lines changed)</summary>", "",
                          f + "diff", *c["diff"], f, "</details>", ""]
               if sum(len(l) + 1 for l in out + section) > limit:
                   out.append("_Truncated; the full range-diff is in the workflow log._")
