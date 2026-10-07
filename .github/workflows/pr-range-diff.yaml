@@ -98,11 +98,13 @@ jobs:
           total = sum(c["status"] != "<" for c in commits)
           repo, old, new = os.environ["REPO_URL"], os.environ["OLD_HEAD"], os.environ["NEW_HEAD"]
           out = [f"### Changes since previous version ([`{old[:10]}`]({repo}/commit/{old}) → [`{new[:10]}`]({repo}/commit/{new}))", ""]
+          # Each block is (head, body, tail); only a section has a body, which
+          # is what gets cut if the comment runs out of room.
           blocks = []
           for c in commits:
               pos = f"{c['pos']}/{total}" if c["status"] != "<" else "–"
-              blocks.append([f"- `{pos}` {label[c['status']]}: [{md(c['title'])}]({repo}/commit/{c['sha']})"])
-          blocks.append([""])
+              blocks.append(([f"- `{pos}` {label[c['status']]}: [{md(c['title'])}]({repo}/commit/{c['sha']})"], [], []))
+          blocks.append(([""], [], []))
 
           for c in commits:
               if c["status"] != "!":
@@ -114,20 +116,33 @@ jobs:
               f = fence(c["diff"])
               # Collapsed, so the comment stays short however much changed;
               # the heading says how much is inside.
-              blocks.append([f"<details><summary><b>{c['pos']}/{total} {title}</b> ({changed} lines changed)</summary>", "",
-                             f + "diff", *c["diff"], f, "</details>", ""])
+              blocks.append(([f"<details><summary><b>{c['pos']}/{total} {title}</b> ({changed} lines changed)</summary>", "", f + "diff"],
+                             c["diff"], [f, "</details>", ""]))
 
-          # GitHub comments are capped at 65536 characters. Stop well short of
-          # that, at a whole list entry or section so no fence is left open,
-          # with room to spare for the notice.
-          limit = 60000
-          size = sum(len(l) + 1 for l in out)
-          for block in blocks:
-              size += sum(len(l) + 1 for l in block)
-              if size > limit:
-                  out.append("_Truncated; the full range-diff is in the workflow log._")
-                  break
-              out += block
+          # GitHub comments are capped at 65536 characters; stay well short of
+          # that, keeping room for the notice. The block that doesn't fit is cut:
+          # a section keeps as much of its diff as fits and still closes its
+          # fence and <details>, a list entry is dropped.
+          def size(lines):
+              return sum(len(l) + 1 for l in lines)
+          notice = "_Truncated; the full range-diff is in the workflow log._"
+          room = 60000 - size(out) - size([notice])
+          for head, body, tail in blocks:
+              if size(head + body + tail) <= room:
+                  out += head + body + tail
+                  room -= size(head + body + tail)
+                  continue
+              room -= size(head + tail)
+              if body and room > 0:
+                  kept = []
+                  for l in body:
+                      room -= len(l) + 1
+                      if room < 0:
+                          break
+                      kept.append(l)
+                  out += head + kept + tail
+              out.append(notice)
+              break
           open("comment.md", "w").write("\n".join(out) + "\n")
 
       - name: Post comment
