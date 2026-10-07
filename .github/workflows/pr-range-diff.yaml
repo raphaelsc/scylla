@@ -68,9 +68,11 @@ jobs:
         run: |
           import html, os, re
 
-          # Commit pair lines look like "1:  abc1234 ! 1:  def5678 title";
-          # everything else is the indented diff of the pair above.
-          pair = re.compile(r"^\s*(-|\d+):\s+(-+|[0-9a-f]+) ([<>=!])\s+(-|\d+):\s+(-+|[0-9a-f]+) (.*)$")
+          # Commit pair lines look like "1:  abc1234 ! 1:  def5678 title", with
+          # the numbers padded to a common width; everything else is the diff of
+          # the pair above, indented by four spaces, so a line quoted in it (say,
+          # from a commit message) can't pass for a pair line.
+          pair = re.compile(r"^ {0,3}(-|\d+):\s+(-+|[0-9a-f]+) ([<>=!])\s+(-|\d+):\s+(-+|[0-9a-f]+) (.*)$")
           commits = []
           for line in open("range-diff.txt").read().splitlines():
               m = pair.match(line)
@@ -96,13 +98,12 @@ jobs:
           total = sum(c["status"] != "<" for c in commits)
           repo, old, new = os.environ["REPO_URL"], os.environ["OLD_HEAD"], os.environ["NEW_HEAD"]
           out = [f"### Changes since previous version ([`{old[:10]}`]({repo}/commit/{old}) → [`{new[:10]}`]({repo}/commit/{new}))", ""]
+          blocks = []
           for c in commits:
               pos = f"{c['pos']}/{total}" if c["status"] != "<" else "–"
-              out.append(f"- `{pos}` {label[c['status']]}: [{md(c['title'])}]({repo}/commit/{c['sha']})")
-          out.append("")
+              blocks.append([f"- `{pos}` {label[c['status']]}: [{md(c['title'])}]({repo}/commit/{c['sha']})"])
+          blocks.append([""])
 
-          # GitHub comments are capped at 65536 characters.
-          limit = 60000
           for c in commits:
               if c["status"] != "!":
                   continue
@@ -113,12 +114,20 @@ jobs:
               f = fence(c["diff"])
               # Collapsed, so the comment stays short however much changed;
               # the heading says how much is inside.
-              section = [f"<details><summary><b>{c['pos']}/{total} {title}</b> ({changed} lines changed)</summary>", "",
-                         f + "diff", *c["diff"], f, "</details>", ""]
-              if sum(len(l) + 1 for l in out + section) > limit:
+              blocks.append([f"<details><summary><b>{c['pos']}/{total} {title}</b> ({changed} lines changed)</summary>", "",
+                             f + "diff", *c["diff"], f, "</details>", ""])
+
+          # GitHub comments are capped at 65536 characters. Stop well short of
+          # that, at a whole list entry or section so no fence is left open,
+          # with room to spare for the notice.
+          limit = 60000
+          size = sum(len(l) + 1 for l in out)
+          for block in blocks:
+              size += sum(len(l) + 1 for l in block)
+              if size > limit:
                   out.append("_Truncated; the full range-diff is in the workflow log._")
                   break
-              out += section
+              out += block
           open("comment.md", "w").write("\n".join(out) + "\n")
 
       - name: Post comment
