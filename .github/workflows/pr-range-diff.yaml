@@ -62,6 +62,7 @@ jobs:
         if: steps.forced.outputs.forced == 'true'
         env:
           REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           OLD_HEAD: ${{ github.event.before }}
           NEW_HEAD: ${{ github.event.after }}
         shell: python
@@ -119,31 +120,44 @@ jobs:
               blocks.append(([f"<details><summary><b>{c['pos']}/{total} {title}</b> ({changed} lines changed)</summary>", "", f + "diff"],
                              c["diff"], [f, "</details>", ""]))
 
-          # GitHub comments are capped at 65536 characters; stay well short of
-          # that, keeping room for the notice. The block that doesn't fit is cut:
-          # a section keeps as much of its diff as fits and still closes its
-          # fence and <details>, a list entry is dropped.
           def size(lines):
-              return sum(len(l) + 1 for l in lines)
-          notice = "_Truncated; the full range-diff is in the workflow log._"
-          room = 60000 - size(out) - size([notice])
-          for head, body, tail in blocks:
-              if size(head + body + tail) <= room:
-                  out += head + body + tail
-                  room -= size(head + body + tail)
-                  continue
-              room -= size(head + tail)
-              if body and room > 0:
-                  kept = []
-                  for l in body:
-                      room -= len(l) + 1
-                      if room < 0:
-                          break
-                      kept.append(l)
-                  out += head + kept + tail
-              out.append(notice)
-              break
-          open("comment.md", "w").write("\n".join(out) + "\n")
+              return sum(len(l.encode()) + 1 for l in lines)
+
+          # Render up to limit bytes, keeping room for the notice. The block that
+          # doesn't fit is cut: a section keeps as much of its diff as fits and
+          # still closes its fence and <details>, a list entry is dropped.
+          def render(limit, notice):
+              lines, room = list(out), limit - size(out) - size([notice])
+              for head, body, tail in blocks:
+                  if size(head + body + tail) <= room:
+                      lines += head + body + tail
+                      room -= size(head + body + tail)
+                      continue
+                  room -= size(head + tail)
+                  if body and room > 0:
+                      kept = []
+                      for l in body:
+                          room -= len(l.encode()) + 1
+                          if room < 0:
+                              break
+                          kept.append(l)
+                      lines += head + kept + tail
+                  lines.append(notice)
+                  break
+              return "\n".join(lines) + "\n"
+
+          # A comment is capped at 65536 characters. If the range-diff doesn't fit
+          # in one, the comment is cut and links to the job summary, which is
+          # capped at 1 MiB and gets all of it; the workflow log has it anyway.
+          full = render(1000000, "_Truncated; the full range-diff is in the workflow log._")
+          if len(full.encode()) <= 60000:
+              comment = full
+          else:
+              run = os.environ["RUN_URL"]
+              comment = render(60000, f"_Truncated; the full range-diff is in the [job summary]({run})._")
+              with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+                  summary.write(full)
+          open("comment.md", "w").write(comment)
 
       - name: Post comment
         if: steps.forced.outputs.forced == 'true'
