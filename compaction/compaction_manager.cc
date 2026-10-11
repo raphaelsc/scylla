@@ -346,10 +346,10 @@ future<compaction_manager::compaction_stats_opt> compaction_manager::perform_tas
 
     try {
         auto&& res = co_await task->run_compaction();
-        cmlog.debug("{}: done", *task);
+        cmlog.debug("{}: done in {}", *task, task->elapsed());
         co_return res;
     } catch (compaction_stopped_exception& e) {
-        cmlog.info("{}: stopped, reason: {}", *task, e.what());
+        cmlog.info("{}: stopped after {}, reason: {}", *task, task->elapsed(), e.what());
         if (do_throw_if_stopping) {
             throw;
         }
