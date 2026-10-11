@@ -193,6 +193,8 @@ private:
 
     // Return the largest fan-in of currently running compactions
     unsigned current_compaction_fan_in_threshold() const;
+    // Time elapsed since the task started.
+    std::chrono::milliseconds elapsed() const;
 
     // Return true if compaction can be initiated
     bool can_register_compaction(compaction::compaction_group_view& t, int weight, unsigned fan_in) const;
