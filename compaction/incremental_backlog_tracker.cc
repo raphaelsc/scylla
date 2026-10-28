@@ -10,8 +10,12 @@
 #include "compaction.hh"
 #include "sstables/sstables.hh"
 #include "sstables/sstable_set.hh"
+#include "utils/log.hh"
 
 namespace compaction {
+
+// FIXME: experiment only, to see what compaction_controller_v2's target is made of.
+static logging::logger rates_logger("compaction_rates");
 
 incremental_backlog_tracker::inflight_component incremental_backlog_tracker::compacted_backlog(const compaction_backlog_tracker::ongoing_compactions& ongoing_compactions) const {
     inflight_component in;
@@ -102,11 +106,17 @@ double incremental_backlog_tracker::urgency_factor(const read_amplification_stat
     // The most runs the tree holds when no tier is overdue.
     auto expected_runs = (double(_tiers) - 1) * (threshold - 1) + threshold;
     auto urgency = std::max(_runs / expected_runs, read_amplification.mean_sstables_read() / expected_runs);
+    auto unclamped = urgency;
     urgency = std::clamp(urgency, min_urgency_factor, max_urgency_factor);
+    auto previous = _urgency_factor;
     if (urgency >= _urgency_factor * urgency_hysteresis || urgency <= _urgency_factor / urgency_hysteresis
             || urgency == min_urgency_factor || urgency == max_urgency_factor) {
         _urgency_factor = urgency;
     }
+    rates_logger.debug("urgency: runs {} tiers {} expected_runs {:.1f} runs/expected {:.2f} point_reads/s {:.1f} mean_sstables_read {:.2f} sstables_read/expected {:.2f} "
+            "unclamped {:.2f} clamped {:.2f} previous {:.2f} -> {:.2f}",
+            _runs, _tiers, expected_runs, _runs / expected_runs, read_amplification.point_reads.per_second(), read_amplification.mean_sstables_read(),
+            read_amplification.mean_sstables_read() / expected_runs, unclamped, urgency, previous, _urgency_factor);
     return _urgency_factor;
 }
 
@@ -130,8 +140,16 @@ compaction_rates incremental_backlog_tracker::rates(const compaction_backlog_sou
     auto from_ingestion = stats.rates.flushed_bytes * rewrites;
     auto target = from_ingestion.per_second() >= _ingestion_rate_from_sstables.per_second() ? from_ingestion : _ingestion_rate_from_sstables;
 
+    auto urgency = urgency_factor(stats.read_amplification, threshold);
+    rates_logger.debug("{}.{}: flushed {:.0f} B/s over {}s, mean_flush_size {:.0f} (used {:.0f}), total_bytes {} backlog_bytes {}, rewrites {:.2f}, "
+            "from_ingestion {:.0f} B/s, from_sstables {:.0f} B/s over {}s, using {}, urgency {:.2f}, target {:.0f} B/s, achieved {:.0f} B/s over {}s",
+            src.schema()->ks_name(), src.schema()->cf_name(), stats.rates.flushed_bytes.per_second(), stats.rates.flushed_bytes.interval().count(),
+            stats.rates.mean_flush_size, flush_size, _total_bytes, _total_backlog_bytes, rewrites,
+            from_ingestion.per_second(), _ingestion_rate_from_sstables.per_second(), _ingestion_rate_from_sstables.interval().count(),
+            from_ingestion.per_second() >= _ingestion_rate_from_sstables.per_second() ? "from_ingestion" : "from_sstables", urgency, (target * urgency).per_second(),
+            stats.rates.compacted_bytes.per_second(), stats.rates.compacted_bytes.interval().count());
     return compaction_rates{
-        .target = target * urgency_factor(stats.read_amplification, threshold),
+        .target = target * urgency,
         .achieved = stats.rates.compacted_bytes,
     };
 }
