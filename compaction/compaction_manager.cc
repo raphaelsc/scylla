@@ -948,7 +948,10 @@ std::unique_ptr<compaction_controller_v2> compaction_manager::make_compaction_co
     // Updated every minute: often enough to follow compactions completing, rarely enough
     // for the rates, averaged over minutes, to respond to the shares.
     return std::make_unique<compaction_controller_v2>(_cfg.controller_v2, compaction_sg(), static_shares(), max_shares(), 1min,
-            [this] { return _backlog_manager.rates(); },
+            [this] {
+                credit_regular_compaction_progress();
+                return _backlog_manager.rates();
+            },
             // The fraction of the interval since the last update regular compaction was busy.
             [this, last_busy_time = regular_compaction_busy_time(), last_update = lowres_clock::now()] () mutable {
                 auto busy_time = regular_compaction_busy_time();
@@ -959,6 +962,20 @@ std::unique_ptr<compaction_controller_v2> compaction_manager::make_compaction_co
                 return busy;
             },
             dry_run);
+}
+
+void compaction_manager::credit_regular_compaction_progress() noexcept {
+    for (auto& task : _tasks) {
+        if (task.compaction_type() == compaction_type::Compaction) {
+            task.credit_compaction_progress();
+        }
+    }
+}
+
+void compaction_task_executor::credit_compaction_progress() noexcept {
+    if (_compacting_table) {
+        _compacting_table->add_compacted_bytes(_progress_monitor.credit_up_to(_progress_monitor.get_progress()));
+    }
 }
 
 lowres_clock::duration compaction_manager::regular_compaction_busy_time() const noexcept {

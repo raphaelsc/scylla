@@ -551,6 +551,14 @@ private:
 
 void compaction_progress_monitor::set_generator(std::unique_ptr<sstables::read_monitor_generator> generator) {
     _generator = std::move(generator);
+    _credited = 0;
+}
+
+uint64_t compaction_progress_monitor::credit_up_to(uint64_t bytes) noexcept {
+    if (bytes <= _credited) {
+        return 0;
+    }
+    return bytes - std::exchange(_credited, bytes);
 }
 
 void compaction_progress_monitor::reset_generator() {
@@ -622,10 +630,10 @@ protected:
     int64_t _output_repaired_at = 0;
     // Combination of the inputs' ingestion metadata, written to every output.
     std::optional<sstables::ingestion_metadata> _output_ingestion;
-private:
     // Keeps track of monitors for input sstable.
     // If _update_backlog_tracker is set to true, monitors are responsible for adjusting backlog as compaction progresses.
     compaction_progress_monitor& _progress_monitor;
+private:
     compaction_data& init_compaction_data(compaction_data& cdata, const compaction_descriptor& descriptor) const {
         cdata.compaction_fan_in = descriptor.fan_in();
         return cdata;
@@ -1313,6 +1321,7 @@ class regular_compaction : public compaction {
 public:
     regular_compaction(compaction_group_view& table_s, compaction_descriptor descriptor, compaction_data& cdata, compaction_progress_monitor& progress_monitor, use_backlog_tracker use_backlog_tracker = use_backlog_tracker::yes)
         : compaction(table_s, std::move(descriptor), cdata, progress_monitor, use_backlog_tracker)
+        , _input_data_size(std::ranges::fold_left(_sstables | std::views::transform([] (const auto& sst) { return sst->data_size(); }), uint64_t(0), std::plus()))
     {
     }
 
@@ -1367,8 +1376,16 @@ public:
 
     virtual void on_end_of_compaction() override {
         replace_remaining_exhausted_sstables();
+        // Only regular compaction is driven by the compaction controller; other kinds run
+        // with maintenance shares. What its progress didn't credit yet, e.g. while nothing
+        // credited it, is credited now, so that the input counts in full.
+        if (_type == compaction_type::Compaction) {
+            _table_s.add_compacted_bytes(_progress_monitor.credit_up_to(_input_data_size));
+        }
     }
 private:
+    // The data size of the input sstables, which the compaction's progress reaches by its end.
+    uint64_t _input_data_size;
     void maybe_replace_exhausted_sstables_by_sst(sstables::shared_sstable sst) {
         // Skip earlier replacement of exhausted sstables if compaction works with only single-fragment runs,
         // meaning incremental compaction is disabled for this compaction.

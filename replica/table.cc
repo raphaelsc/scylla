@@ -2925,24 +2925,12 @@ compaction_group::update_sstable_sets_on_compaction_completion(compaction::compa
     // (finish() already moved them out of the compaction, and they are sealed so ~sstable()
     // won't unlink them either), so a failure here would otherwise leak them on disk forever.
     auto new_sstables = desc.all_new_sstables();
-    // The bytes compacted are those of the input sstables being replaced. Only regular
-    // compaction is driven by the compaction controller; other kinds, whose outputs carry
-    // their own origin, run with maintenance shares.
-    uint64_t compacted_bytes = 0;
-    if (std::ranges::any_of(new_sstables, compaction::has_regular_compaction_origin)) {
-        for (const auto& sst : desc.old_sstables) {
-            compacted_bytes += sst->data_size();
-        }
-    }
     bool attached = false;
     std::exception_ptr ex;
     try {
         co_await do_update_sstable_sets_on_compaction_completion(std::move(desc), attached);
     } catch (...) {
         ex = std::current_exception();
-    }
-    if (!ex) {
-        _compacted_bytes.add(compacted_bytes);
     }
     if (!attached && !new_sstables.empty()) {
         table::sstable_list_builder builder(_t, co_await _t.get_sstable_list_permit());
@@ -3487,6 +3475,9 @@ public:
         if (offstrategy) {
             _cg.trigger_compaction();
         }
+    }
+    void add_compacted_bytes(uint64_t bytes) noexcept override {
+        _cg._compacted_bytes.add(bytes);
     }
     bool is_auto_compaction_disabled_by_user() const noexcept override {
         return _t.is_auto_compaction_disabled_by_user();
