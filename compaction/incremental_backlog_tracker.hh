@@ -96,9 +96,8 @@ public:
     //
     // URGENCY_FACTOR compares the number of runs, which range scans read, and the mean
     // number of sstables point reads read, with the most runs the tree holds when no
-    // tier is overdue, (tiers - 1) * (2f - 1) + 2f, i.e. 2f - 1 runs in each tier and one
-    // tier reaching 2f, so that a tier filling up again while it's being compacted isn't
-    // overdue. It's clamped to [0.25, 4].
+    // tier is overdue, (tiers - 1) * (f - 1) + f, i.e. f - 1 runs in each tier and one
+    // tier reaching f. It's clamped to [0.25, 4].
     virtual compaction_rates rates(const compaction_backlog_source& src) const override;
 
     // The replaced sstables are already reflected in the group's sstable set, so this

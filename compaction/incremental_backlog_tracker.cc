@@ -103,9 +103,8 @@ void incremental_backlog_tracker::refresh(const compaction_backlog_source& src) 
 }
 
 double incremental_backlog_tracker::urgency_factor(const read_amplification_stats& read_amplification, double threshold) const {
-    // The most runs the tree holds when no tier is overdue, leaving room for a tier to fill
-    // up again while it's being compacted.
-    auto expected_runs = (double(_tiers) - 1) * (2 * threshold - 1) + 2 * threshold;
+    // The most runs the tree holds when no tier is overdue.
+    auto expected_runs = (double(_tiers) - 1) * (threshold - 1) + threshold;
     auto urgency = std::max(_runs / expected_runs, read_amplification.mean_sstables_read() / expected_runs);
     auto unclamped = urgency;
     urgency = std::clamp(urgency, min_urgency_factor, max_urgency_factor);

@@ -5253,33 +5253,32 @@ SEASTAR_TEST_CASE(incremental_backlog_tracker_rates_test) {
         };
 
         // Three tiers, of a run each, none ready to be compacted. Compaction rewrites ingested data
-        // log4(T / F) times, and the tree holds 3 runs where it would hold up to 2 * 7 + 8 = 22,
-        // which takes URGENCY_FACTOR to its minimum.
+        // log4(T / F) times, and the tree holds 3 runs where it would hold up to 2 * 3 + 4 = 10.
         auto ingestion = rates_of(make_source({{1600 * MB}, {400 * MB}, {100 * MB}}, flushing(10 * MB, 100 * MB)));
-        BOOST_REQUIRE_CLOSE(ingestion.target.per_second(), 10 * MB * std::log(21.0) / std::log(4.0) * 0.25, 1e-6);
+        BOOST_REQUIRE_CLOSE(ingestion.target.per_second(), 10 * MB * std::log(21.0) / std::log(4.0) * 0.3, 1e-6);
         BOOST_REQUIRE(ingestion.target.interval() == 600s);
         BOOST_REQUIRE_EQUAL(ingestion.achieved.per_second(), 5 * MB);
 
         // The flush size is no smaller than min_sstable_size, 50MB.
         auto small_flushes = rates_of(make_source({{1600 * MB}, {400 * MB}, {100 * MB}}, flushing(10 * MB, 10 * MB)));
-        BOOST_REQUIRE_CLOSE(small_flushes.target.per_second(), 10 * MB * std::log(42.0) / std::log(4.0) * 0.25, 1e-6);
+        BOOST_REQUIRE_CLOSE(small_flushes.target.per_second(), 10 * MB * std::log(42.0) / std::log(4.0) * 0.3, 1e-6);
 
         // A tier ready to be compacted, whose data was ingested over 40 minutes, while nothing was
-        // flushed lately, e.g. after a restart. It holds half the runs expected, 8.
+        // flushed lately, e.g. after a restart. It holds as many runs as expected.
         std::vector<run_spec> ready_tier = {{100 * MB, {{0, 10}}}, {100 * MB, {{10, 20}}}, {100 * MB, {{20, 30}}}, {100 * MB, {{30, 40}}}};
         auto from_sstables = rates_of(make_source(ready_tier, {}));
-        BOOST_REQUIRE_CLOSE(from_sstables.target.per_second(), 400 * MB / 2400 * 0.5, 1e-6);
+        BOOST_REQUIRE_CLOSE(from_sstables.target.per_second(), 400 * MB / 2400, 1e-6);
         BOOST_REQUIRE(from_sstables.target.interval() == 2400s);
 
         // Data ingested in a burst is considered ingested over at least 10 minutes.
         auto burst = rates_of(make_source({{100 * MB, {{0, 1}}}, {100 * MB, {{0, 1}}}, {100 * MB, {{0, 1}}}, {100 * MB, {{0, 1}}}}, {}));
-        BOOST_REQUIRE_CLOSE(burst.target.per_second(), 400 * MB / 600 * 0.5, 1e-6);
+        BOOST_REQUIRE_CLOSE(burst.target.per_second(), 400 * MB / 600, 1e-6);
 
         // Data that wasn't flushed, e.g. written by repair, has no ingestion time.
         auto repaired = rates_of(make_source({{100 * MB, {{0, 10}}}, {100 * MB, {{10, 20}}}, {100 * MB, {{20, 30}}}, {100 * MB}}, {}));
-        BOOST_REQUIRE_CLOSE(repaired.target.per_second(), 300 * MB / 1800 * 0.5, 1e-6);
+        BOOST_REQUIRE_CLOSE(repaired.target.per_second(), 300 * MB / 1800, 1e-6);
 
-        // Point reads that read more sstables than the tree is expected to hold runs, 8, make
+        // Point reads that read more sstables than the tree is expected to hold runs, 4, make
         // compaction more urgent. URGENCY_FACTOR only moves once it moved by more than 25%.
         auto src = make_source(ready_tier, {});
         compaction::incremental_backlog_tracker tracker({});
@@ -5290,14 +5289,12 @@ SEASTAR_TEST_CASE(incremental_backlog_tracker_rates_test) {
             };
             return tracker.rates(src).target.per_second() / (400 * MB / 2400);
         };
-        BOOST_REQUIRE_CLOSE(urgency_with_reads(0), 0.5, 1e-6);
-        BOOST_REQUIRE_CLOSE(urgency_with_reads(4.8), 0.5, 1e-6);
-        BOOST_REQUIRE_CLOSE(urgency_with_reads(8), 1, 1e-6);
-        BOOST_REQUIRE_CLOSE(urgency_with_reads(8.8), 1, 1e-6);
-        BOOST_REQUIRE_CLOSE(urgency_with_reads(12), 1.5, 1e-6);
-        BOOST_REQUIRE_CLOSE(urgency_with_reads(10.4), 1.5, 1e-6);
-        BOOST_REQUIRE_CLOSE(urgency_with_reads(8.8), 1.1, 1e-6);
-        BOOST_REQUIRE_CLOSE(urgency_with_reads(80), 4, 1e-6);
+        BOOST_REQUIRE_CLOSE(urgency_with_reads(0), 1, 1e-6);
+        BOOST_REQUIRE_CLOSE(urgency_with_reads(4.4), 1, 1e-6);
+        BOOST_REQUIRE_CLOSE(urgency_with_reads(6), 1.5, 1e-6);
+        BOOST_REQUIRE_CLOSE(urgency_with_reads(5.2), 1.5, 1e-6);
+        BOOST_REQUIRE_CLOSE(urgency_with_reads(4.4), 1.1, 1e-6);
+        BOOST_REQUIRE_CLOSE(urgency_with_reads(40), 4, 1e-6);
     });
 }
 
