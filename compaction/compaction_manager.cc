@@ -1298,9 +1298,11 @@ void compaction_manager::register_metrics() {
                        sm::description("Holds the number of failed compaction tasks.")),
         sm::make_gauge("postponed_compactions", [this] { return _postponed.size(); },
                        sm::description("Holds the number of tables with postponed compaction.")),
-        sm::make_gauge("backlog", [this] { return _last_backlog; },
+        // The backlog is computed here rather than taken from the controller's last reading,
+        // which only the backlog controller takes: with compaction_controller_v2 it would go stale.
+        sm::make_gauge("backlog", [this] { return _last_backlog = backlog(); },
                        sm::description("Holds the sum of compaction backlog for all tables in the system.")),
-        sm::make_gauge("normalized_backlog", [this] { return _last_backlog / available_memory(); },
+        sm::make_gauge("normalized_backlog", [this] { return (_last_backlog = backlog()) / available_memory(); },
                        sm::description("Holds the sum of normalized compaction backlog for all tables in the system. Backlog is normalized by dividing backlog by shard's available memory.")),
         sm::make_counter("validation_errors", [this] { return _validation_errors; },
                        sm::description("Holds the number of encountered validation errors.")).set_skip_when_empty(),
