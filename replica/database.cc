@@ -705,20 +705,23 @@ void compaction_controller_v2::adjust() {
         // The shares are left as they are, as with unknown rates.
         dblog.warn("Failed to compute the compaction rates, leaving compaction shares at {}: {}", _shares, std::current_exception());
     }
+    // What the shares were derived from: the ratio the step is a power of, so the
+    // logs tell a step held back by the busy fraction or the limits from no error.
+    auto ratio = rates.achieved.per_second() > 0 ? rates.target.per_second() / rates.achieved.per_second() : std::numeric_limits<double>::infinity();
     if (_dry_run) {
         dblog.log(log_level::info, _dry_run_log_limit,
                 "compaction controller v2 dry run: would set shares from {:.1f} to {:.1f}, while they are {:.1f}; "
-                "regular compaction busy {:.0f}%, target {:.0f} bytes/s over {:.0f}s, achieved {:.0f} bytes/s over {:.0f}s",
+                "regular compaction busy {:.0f}%, target {:.0f} bytes/s over {:.0f}s, achieved {:.0f} bytes/s over {:.0f}s, target/achieved {:.2f}",
                 previous_shares, _shares, _scheduling_group.get_shares(), busy * 100,
                 rates.target.per_second(), rates.target.interval().count(),
-                rates.achieved.per_second(), rates.achieved.interval().count());
+                rates.achieved.per_second(), rates.achieved.interval().count(), ratio);
         return;
     }
     dblog.debug("compaction controller v2: setting shares from {:.1f} to {:.1f}; "
-            "regular compaction busy {:.0f}%, target {:.0f} bytes/s over {:.0f}s, achieved {:.0f} bytes/s over {:.0f}s",
+            "regular compaction busy {:.0f}%, target {:.0f} bytes/s over {:.0f}s, achieved {:.0f} bytes/s over {:.0f}s, target/achieved {:.2f}",
             previous_shares, _shares, busy * 100,
             rates.target.per_second(), rates.target.interval().count(),
-            rates.achieved.per_second(), rates.achieved.interval().count());
+            rates.achieved.per_second(), rates.achieved.interval().count(), ratio);
     _scheduling_group.set_shares(_shares);
 }
 

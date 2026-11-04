@@ -13,6 +13,7 @@
 #include "sstables/shared_sstable.hh"
 #include "mutation/timestamp.hh"
 #include "schema/schema_fwd.hh"
+#include "utils/log.hh"
 #include "utils/rate.hh"
 
 namespace sstables {
@@ -23,6 +24,10 @@ class sstable_run;
 namespace compaction {
 
 class compaction_backlog_manager;
+
+// Logs what the compaction controller matches compaction to, per compaction group
+// and per shard, at debug level.
+extern logging::logger compaction_rates_logger;
 
 // Rates of a compaction group, which the compaction controller compares to match
 // compaction to ingestion. They cover the same interval: a window of minutes, or

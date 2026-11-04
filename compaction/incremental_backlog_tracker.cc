@@ -15,7 +15,6 @@
 namespace compaction {
 
 // FIXME: experiment only, to see what compaction_controller_v2's target is made of.
-static logging::logger rates_logger("compaction_rates");
 
 incremental_backlog_tracker::inflight_component incremental_backlog_tracker::compacted_backlog(const compaction_backlog_tracker::ongoing_compactions& ongoing_compactions) const {
     inflight_component in;
@@ -53,14 +52,18 @@ incremental_backlog_tracker::calculate_sstables_backlog_contribution(const compa
     }
 
     size_t tiers = 0;
+    size_t eligible_tiers = 0;
+    size_t max_runs_in_tier = 0;
     utils::rate<utils::units::bytes> ingestion_rate_from_sstables;
     if (!all.empty()) {
       auto buckets = incremental_compaction_strategy::get_buckets(all, options);
       tiers = buckets.size();
       for (auto& bucket : buckets) {
+        max_runs_in_tier = std::max(max_runs_in_tier, bucket.size());
         if (!incremental_compaction_strategy::is_bucket_interesting(bucket, threshold)) {
             continue;
         }
+        eligible_tiers++;
         ingestion_rate_from_sstables = ingestion_rate_from_sstables + compaction::ingestion_rate_from_sstables(bucket, min_ingestion_span);
         for (const sstables::frozen_sstable_run& run_ptr : bucket) {
             auto& run = *run_ptr;
@@ -83,6 +86,8 @@ incremental_backlog_tracker::calculate_sstables_backlog_contribution(const compa
         .sstable_runs_contributing_backlog = std::move(sstable_runs_contributing_backlog),
         .runs = all.size(),
         .tiers = tiers,
+        .eligible_tiers = eligible_tiers,
+        .max_runs_in_tier = max_runs_in_tier,
         .ingestion_rate_from_sstables = ingestion_rate_from_sstables,
     };
 }
@@ -98,6 +103,8 @@ void incremental_backlog_tracker::refresh(const compaction_backlog_source& src) 
     _sstable_runs_contributing_backlog = std::move(result.sstable_runs_contributing_backlog);
     _runs = result.runs;
     _tiers = result.tiers;
+    _eligible_tiers = result.eligible_tiers;
+    _max_runs_in_tier = result.max_runs_in_tier;
     _ingestion_rate_from_sstables = result.ingestion_rate_from_sstables;
     _backlog_dirty = false;
 }
@@ -113,9 +120,9 @@ double incremental_backlog_tracker::urgency_factor(const read_amplification_stat
             || urgency == min_urgency_factor || urgency == max_urgency_factor) {
         _urgency_factor = urgency;
     }
-    rates_logger.debug("urgency: runs {} tiers {} expected_runs {:.1f} runs/expected {:.2f} point_reads/s {:.1f} mean_sstables_read {:.2f} sstables_read/expected {:.2f} "
-            "unclamped {:.2f} clamped {:.2f} previous {:.2f} -> {:.2f}",
-            _runs, _tiers, expected_runs, _runs / expected_runs, read_amplification.point_reads.per_second(), read_amplification.mean_sstables_read(),
+    compaction_rates_logger.debug("urgency: runs {} tiers {} eligible_tiers {} max_runs_in_tier {} threshold {} expected_runs {:.1f} runs/expected {:.2f} "
+            "point_reads/s {:.1f} mean_sstables_read {:.2f} sstables_read/expected {:.2f} unclamped {:.2f} clamped {:.2f} previous {:.2f} -> {:.2f}",
+            _runs, _tiers, _eligible_tiers, _max_runs_in_tier, threshold, expected_runs, _runs / expected_runs, read_amplification.point_reads.per_second(), read_amplification.mean_sstables_read(),
             read_amplification.mean_sstables_read() / expected_runs, unclamped, urgency, previous, _urgency_factor);
     return _urgency_factor;
 }
@@ -141,7 +148,7 @@ compaction_rates incremental_backlog_tracker::rates(const compaction_backlog_sou
     auto target = from_ingestion.per_second() >= _ingestion_rate_from_sstables.per_second() ? from_ingestion : _ingestion_rate_from_sstables;
 
     auto urgency = urgency_factor(stats.read_amplification, threshold);
-    rates_logger.debug("{}.{}: flushed {:.0f} B/s over {}s, mean_flush_size {:.0f} (used {:.0f}), total_bytes {} backlog_bytes {}, rewrites {:.2f}, "
+    compaction_rates_logger.debug("{}.{}: flushed {:.0f} B/s over {}s, mean_flush_size {:.0f} (used {:.0f}), total_bytes {} backlog_bytes {}, rewrites {:.2f}, "
             "from_ingestion {:.0f} B/s, from_sstables {:.0f} B/s over {}s, using {}, urgency {:.2f}, target {:.0f} B/s, achieved {:.0f} B/s over {}s",
             src.schema()->ks_name(), src.schema()->cf_name(), stats.rates.flushed_bytes.per_second(), stats.rates.flushed_bytes.interval().count(),
             stats.rates.mean_flush_size, flush_size, _total_bytes, _total_backlog_bytes, rewrites,

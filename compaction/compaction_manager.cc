@@ -37,6 +37,7 @@
 #include "utils/labels.hh"
 
 static logging::logger cmlog("compaction_manager");
+logging::logger compaction::compaction_rates_logger("compaction_rates");
 using namespace std::chrono_literals;
 
 namespace compaction {
@@ -949,8 +950,24 @@ std::unique_ptr<compaction_controller_v2> compaction_manager::make_compaction_co
     // for the rates, averaged over minutes, to respond to the shares.
     return std::make_unique<compaction_controller_v2>(_cfg.controller_v2, compaction_sg(), static_shares(), max_shares(), 1min,
             [this] {
-                credit_regular_compaction_progress();
-                return _backlog_manager.rates();
+                auto credited = credit_regular_compaction_progress();
+                auto rates = _backlog_manager.rates();
+                if (compaction_rates_logger.is_enabled(log_level::debug)) {
+                    std::vector<sstring> running;
+                    for (auto& task : _tasks) {
+                        if (task.compaction_type() == compaction_type::Compaction && task.compacting_table()) {
+                            running.push_back(format("{}.{} {} bytes in", task.compacting_table()->schema()->ks_name(),
+                                    task.compacting_table()->schema()->cf_name(), task.compaction_progress()));
+                        }
+                    }
+                    auto backlog = this->backlog();
+                    compaction_rates_logger.debug("shard: target {:.0f} B/s, achieved {:.0f} B/s over {}s, backlog {:.0f} bytes (normalized {:.2f}), "
+                            "regular compaction busy {}ms in total, credited {} bytes in flight, running [{}]",
+                            rates.target.per_second(), rates.achieved.per_second(), rates.achieved.interval().count(),
+                            backlog, backlog / available_memory(), std::chrono::duration_cast<std::chrono::milliseconds>(regular_compaction_busy_time()).count(),
+                            credited, fmt::join(running, ", "));
+                }
+                return rates;
             },
             // The fraction of the interval since the last update regular compaction was busy.
             [this, last_busy_time = regular_compaction_busy_time(), last_update = lowres_clock::now()] () mutable {
@@ -964,18 +981,23 @@ std::unique_ptr<compaction_controller_v2> compaction_manager::make_compaction_co
             dry_run);
 }
 
-void compaction_manager::credit_regular_compaction_progress() noexcept {
+uint64_t compaction_manager::credit_regular_compaction_progress() noexcept {
+    uint64_t credited = 0;
     for (auto& task : _tasks) {
         if (task.compaction_type() == compaction_type::Compaction) {
-            task.credit_compaction_progress();
+            credited += task.credit_compaction_progress();
         }
     }
+    return credited;
 }
 
-void compaction_task_executor::credit_compaction_progress() noexcept {
-    if (_compacting_table) {
-        _compacting_table->add_compacted_bytes(_progress_monitor.credit_up_to(_progress_monitor.get_progress()));
+uint64_t compaction_task_executor::credit_compaction_progress() noexcept {
+    if (!_compacting_table) {
+        return 0;
     }
+    auto credited = _progress_monitor.credit_up_to(_progress_monitor.get_progress());
+    _compacting_table->add_compacted_bytes(credited);
+    return credited;
 }
 
 lowres_clock::duration compaction_manager::regular_compaction_busy_time() const noexcept {

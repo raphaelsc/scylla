@@ -178,7 +178,8 @@ private:
     seastar::lowres_clock::duration regular_compaction_busy_time() const noexcept;
     // Credits the groups with what the regular compactions running compacted so far, so
     // the rates read next see it.
-    void credit_regular_compaction_progress() noexcept;
+    // Returns the bytes credited.
+    uint64_t credit_regular_compaction_progress() noexcept;
     void stop_compaction_controller(std::unique_ptr<compaction_controller> controller);
     compaction_backlog_manager _backlog_manager;
     optimized_optional<abort_source::subscription> _early_abort_subscription;
@@ -700,7 +701,11 @@ public:
 
     // Credits the compaction group with the bytes regular compaction compacted since the
     // last credit, so that its rate follows compaction in flight.
-    void credit_compaction_progress() noexcept;
+    uint64_t credit_compaction_progress() noexcept;
+    // Bytes of the input sstables the compaction has processed so far.
+    uint64_t compaction_progress() const noexcept {
+        return _progress_monitor.get_progress();
+    }
 
     const ::compaction::compaction_data& compaction_data() const noexcept {
         return _compaction_data;

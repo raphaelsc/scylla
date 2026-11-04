@@ -36,6 +36,10 @@ class incremental_backlog_tracker final : public compaction_backlog_tracker::imp
     // compacted was ingested.
     mutable size_t _runs = 0;
     mutable size_t _tiers = 0;
+    // The tiers with enough runs to compact, and the runs of the fullest tier: what the
+    // strategy has to work on, logged with the rates.
+    mutable size_t _eligible_tiers = 0;
+    mutable size_t _max_runs_in_tier = 0;
     mutable utils::rate<utils::units::bytes> _ingestion_rate_from_sstables;
 
     // URGENCY_FACTOR last reported, which only moves once the tree's shape moved it by
@@ -65,6 +69,8 @@ class incremental_backlog_tracker final : public compaction_backlog_tracker::imp
         std::unordered_set<sstables::run_id> sstable_runs_contributing_backlog;
         size_t runs;
         size_t tiers;
+        size_t eligible_tiers;
+        size_t max_runs_in_tier;
         utils::rate<utils::units::bytes> ingestion_rate_from_sstables;
     };
 
