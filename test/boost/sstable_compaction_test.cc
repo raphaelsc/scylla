@@ -5179,8 +5179,10 @@ BOOST_AUTO_TEST_CASE(compaction_backlog_manager_sums_rates) {
     };
     auto a = make_tracker(compaction::compaction_rates{.target = rate(1000, 10s), .achieved = rate(500, 10s)});
     auto b = make_tracker(compaction::compaction_rates{.target = rate(2000, 10s), .achieved = rate(2000, 10s)});
+    // A group with nothing pending adds nothing either, not even what it achieved lately.
+    auto idle = make_tracker(compaction::compaction_rates{.target = rate(0, 10s), .achieved = rate(5000, 10s)});
     auto failing = make_tracker(std::nullopt);
-    for (auto* t : {&a, &b, &failing}) {
+    for (auto* t : {&a, &b, &idle, &failing}) {
         manager.register_backlog_tracker(*t, src);
     }
 
@@ -5202,16 +5204,18 @@ struct fixed_backlog_source : public compaction::compaction_backlog_source {
 };
 }
 
-// The ICS target: max(ingestion_rate * (WA - 1), ingestion_rate_from_sstables) * URGENCY_FACTOR.
+// The ICS target: ingestion_rate * pending_runs / min_threshold, summed over the tiers with
+// at least min_threshold runs, from the sstables' ingestion rate when nothing was flushed.
 SEASTAR_TEST_CASE(incremental_backlog_tracker_rates_test) {
     return test_env::do_with_async([] (test_env& env) {
         using rate = utils::rate<utils::units::bytes>;
         using namespace std::chrono_literals;
         constexpr double MB = 1 << 20;
-        // min_threshold is 4.
         auto s = schema_builder(this_smp_shard_count(), "tests", "incremental_backlog_tracker_rates")
                 .with_column("id", utf8_type, column_kind::partition_key)
                 .with_column("value", int32_type)
+                .set_min_compaction_threshold(4)
+                .set_max_compaction_threshold(6)
                 .build();
         auto cs = compaction::make_compaction_strategy(compaction::compaction_strategy_type::incremental, {});
         auto keys = tests::generate_partition_keys(2, s, local_shard_only::yes);
@@ -5244,69 +5248,82 @@ SEASTAR_TEST_CASE(incremental_backlog_tracker_rates_test) {
         auto rates_of = [] (const fixed_backlog_source& src) {
             return compaction::incremental_backlog_tracker({}).rates(src);
         };
-        auto flushing = [] (double flushed_per_second, double mean_flush_size) {
+        auto flushing = [] (double flushed_per_second) {
             return compaction::compaction_group_stats{.rates = {
                 .flushed_bytes = rate(flushed_per_second * 600, 600s),
-                .mean_flush_size = mean_flush_size,
+                .mean_flush_size = 100 * MB,
                 .compacted_bytes = rate(5 * MB * 600, 600s),
             }};
         };
+        auto tier = [] (size_t runs, double size, std::optional<std::pair<int64_t, int64_t>> ingested = std::nullopt) {
+            std::vector<run_spec> t;
+            for (size_t i = 0; i < runs; i++) {
+                t.push_back({size, ingested});
+            }
+            return t;
+        };
+        auto tiers = [] (std::vector<std::vector<run_spec>> ts) {
+            std::vector<run_spec> all;
+            for (auto& t : ts) {
+                all.insert(all.end(), t.begin(), t.end());
+            }
+            return all;
+        };
 
-        // Three tiers, of a run each, none ready to be compacted. Compaction rewrites ingested data
-        // log4(T / F) times, and the tree holds 3 runs where it would hold up to 2 * 3 + 4 = 10.
-        auto ingestion = rates_of(make_source({{1600 * MB}, {400 * MB}, {100 * MB}}, flushing(10 * MB, 100 * MB)));
-        BOOST_REQUIRE_CLOSE(ingestion.target.per_second(), 10 * MB * std::log(21.0) / std::log(4.0) * 0.3, 1e-6);
-        BOOST_REQUIRE(ingestion.target.interval() == 600s);
-        BOOST_REQUIRE_EQUAL(ingestion.achieved.per_second(), 5 * MB);
+        // Three tiers, of a run each: nothing to compact, nothing to ask for, whatever is flushed.
+        auto in_shape = rates_of(make_source(tiers({tier(1, 1600 * MB), tier(1, 400 * MB), tier(1, 100 * MB)}), flushing(10 * MB)));
+        BOOST_REQUIRE_EQUAL(in_shape.target.per_second(), 0);
+        BOOST_REQUIRE_EQUAL(in_shape.achieved.per_second(), 5 * MB);
 
-        // The flush size is no smaller than min_sstable_size, 50MB.
-        auto small_flushes = rates_of(make_source({{1600 * MB}, {400 * MB}, {100 * MB}}, flushing(10 * MB, 10 * MB)));
-        BOOST_REQUIRE_CLOSE(small_flushes.target.per_second(), 10 * MB * std::log(42.0) / std::log(4.0) * 0.3, 1e-6);
+        // A tier with min_threshold runs asks for the ingestion rate: its compaction then ends as
+        // the next one is due. The target covers the flush window.
+        auto ready = rates_of(make_source(tiers({tier(1, 1600 * MB), tier(4, 100 * MB)}), flushing(10 * MB)));
+        BOOST_REQUIRE_CLOSE(ready.target.per_second(), 10 * MB, 1e-6);
+        BOOST_REQUIRE(ready.target.interval() == 600s);
 
-        // A tier ready to be compacted, whose data was ingested over 40 minutes, while nothing was
-        // flushed lately, e.g. after a restart. It holds as many runs as expected.
+        // Two such tiers ask for twice that, and a tier with more runs than the threshold for the
+        // surplus to be gone by its next deadline, up to the runs one compaction takes.
+        auto two_ready = rates_of(make_source(tiers({tier(4, 400 * MB), tier(4, 100 * MB)}), flushing(10 * MB)));
+        BOOST_REQUIRE_CLOSE(two_ready.target.per_second(), 20 * MB, 1e-6);
+        auto overdue = rates_of(make_source(tiers({tier(5, 100 * MB)}), flushing(10 * MB)));
+        BOOST_REQUIRE_CLOSE(overdue.target.per_second(), 12.5 * MB, 1e-6);
+        auto beyond_max_threshold = rates_of(make_source(tiers({tier(8, 100 * MB)}), flushing(10 * MB)));
+        BOOST_REQUIRE_CLOSE(beyond_max_threshold.target.per_second(), 15 * MB, 1e-6);
+
+        // When nothing was flushed lately, e.g. after a restart, the rate the pending tiers' data
+        // was ingested at stands in, e.g. 4 runs ingested over 40 minutes.
         std::vector<run_spec> ready_tier = {{100 * MB, {{0, 10}}}, {100 * MB, {{10, 20}}}, {100 * MB, {{20, 30}}}, {100 * MB, {{30, 40}}}};
         auto from_sstables = rates_of(make_source(ready_tier, {}));
         BOOST_REQUIRE_CLOSE(from_sstables.target.per_second(), 400 * MB / 2400, 1e-6);
         BOOST_REQUIRE(from_sstables.target.interval() == 2400s);
+        // A flush window that saw nothing, rather than one that is missing, is the same.
+        auto empty_window = rates_of(make_source(ready_tier, {.rates = {.flushed_bytes = rate(0, 600s)}}));
+        BOOST_REQUIRE_CLOSE(empty_window.target.per_second(), 400 * MB / 2400, 1e-6);
+        // A tier below the threshold asks for nothing from its sstables either, and a tier above
+        // it for the surplus, like from the flushes.
+        auto not_ready = rates_of(make_source(tiers({tier(3, 100 * MB, {{0, 30}}), tier(1, 400 * MB, {{0, 30}})}), {}));
+        BOOST_REQUIRE_EQUAL(not_ready.target.per_second(), 0);
+        auto overdue_from_sstables = rates_of(make_source(tier(5, 100 * MB, {{0, 50}}), {}));
+        BOOST_REQUIRE_CLOSE(overdue_from_sstables.target.per_second(), 500 * MB / 3000 * 5 / 4, 1e-6);
 
         // Data ingested in a burst is considered ingested over at least 10 minutes.
-        auto burst = rates_of(make_source({{100 * MB, {{0, 1}}}, {100 * MB, {{0, 1}}}, {100 * MB, {{0, 1}}}, {100 * MB, {{0, 1}}}}, {}));
+        auto burst = rates_of(make_source(tier(4, 100 * MB, {{0, 1}}), {}));
         BOOST_REQUIRE_CLOSE(burst.target.per_second(), 400 * MB / 600, 1e-6);
 
         // Data that wasn't flushed, e.g. written by repair, has no ingestion time.
         auto repaired = rates_of(make_source({{100 * MB, {{0, 10}}}, {100 * MB, {{10, 20}}}, {100 * MB, {{20, 30}}}, {100 * MB}}, {}));
         BOOST_REQUIRE_CLOSE(repaired.target.per_second(), 300 * MB / 1800, 1e-6);
-
-        // Point reads that read more sstables than the tree is expected to hold runs, 4, make
-        // compaction more urgent. URGENCY_FACTOR only moves once it moved by more than 25%.
-        auto src = make_source(ready_tier, {});
-        compaction::incremental_backlog_tracker tracker({});
-        auto urgency_with_reads = [&] (double mean_sstables_read) {
-            src.group_stats.read_amplification = {
-                .point_reads = utils::rate<utils::units::reads>(100, 10s),
-                .sstables_read = utils::rate<utils::units::sstables>(100 * mean_sstables_read, 10s),
-            };
-            return tracker.rates(src).target.per_second() / (400 * MB / 2400);
-        };
-        BOOST_REQUIRE_CLOSE(urgency_with_reads(0), 1, 1e-6);
-        BOOST_REQUIRE_CLOSE(urgency_with_reads(4.4), 1, 1e-6);
-        BOOST_REQUIRE_CLOSE(urgency_with_reads(6), 1.5, 1e-6);
-        BOOST_REQUIRE_CLOSE(urgency_with_reads(5.2), 1.5, 1e-6);
-        BOOST_REQUIRE_CLOSE(urgency_with_reads(4.4), 1.1, 1e-6);
-        BOOST_REQUIRE_CLOSE(urgency_with_reads(40), 4, 1e-6);
     });
 }
 
 // compaction_controller_v2 scales the shares by (target / achieved)^alpha, by up to x2 either
-// way, within the bounds, while regular compaction is busy: raising them takes it to be busy
-// for most of the interval.
+// way, within the bounds, and lowers them while nothing is pending.
 BOOST_AUTO_TEST_CASE(compaction_controller_v2_next_shares) {
     using rate = utils::rate<utils::units::bytes>;
     using namespace std::chrono_literals;
     const compaction_controller_v2::config cfg;
-    auto next = [&cfg] (float shares, double target, double achieved, float max_shares = 1000, double busy = 1) {
-        return compaction_controller_v2::next_shares(cfg, shares, {.target = rate(target, 10s), .achieved = rate(achieved, 10s)}, busy, max_shares);
+    auto next = [&cfg] (float shares, double target, double achieved, float max_shares = 1000) {
+        return compaction_controller_v2::next_shares(cfg, shares, {.target = rate(target, 10s), .achieved = rate(achieved, 10s)}, max_shares);
     };
     const auto alpha = cfg.alpha;
     // Behind the target, or ahead of it.
@@ -5319,40 +5336,32 @@ BOOST_AUTO_TEST_CASE(compaction_controller_v2_next_shares) {
     BOOST_REQUIRE_CLOSE(next(200, 1, 1e9), 100, 1e-4);
     BOOST_REQUIRE_CLOSE(next(200, 1000, 0), 400, 1e-4);
     BOOST_REQUIRE_CLOSE(next(200, 0, 1000), 100, 1e-4);
-    // Nothing to compare, e.g. unknown rates.
-    BOOST_REQUIRE_CLOSE(next(200, 0, 0), 200, 1e-4);
+    // Nothing pending, and nothing compacted lately either: the shares come down just the same.
+    BOOST_REQUIRE_CLOSE(next(200, 0, 0), 100, 1e-4);
     // Within the bounds.
     BOOST_REQUIRE_CLOSE(next(800, 1000, 0), 1000, 1e-4);
     BOOST_REQUIRE_CLOSE(next(800, 1000, 0, 1200), 1200, 1e-4);
     BOOST_REQUIRE_CLOSE(next(60, 0, 1000), compaction_controller_v2::min_shares, 1e-4);
-    // Compaction idle part of the interval is held back by the work available, so its
-    // shares are only lowered; idle all of it, they are left as they are.
-    const auto min_busy = cfg.min_busy_fraction_to_raise;
-    BOOST_REQUIRE_CLOSE(next(200, 1500, 1000, 1000, min_busy), 200 * std::pow(1.5, alpha), 1e-4);
-    BOOST_REQUIRE_CLOSE(next(200, 1500, 1000, 1000, min_busy / 2), 200, 1e-4);
-    BOOST_REQUIRE_CLOSE(next(200, 1000, 1500, 1000, min_busy / 2), 200 * std::pow(1 / 1.5, alpha), 1e-4);
-    BOOST_REQUIRE_CLOSE(next(200, 1000, 1500, 1000, 0), 200, 1e-4);
+    BOOST_REQUIRE_CLOSE(next(60, 0, 0), compaction_controller_v2::min_shares, 1e-4);
 }
 
 // The settings of compaction_controller_v2 replace the defaults, and are rejected out of range.
 BOOST_AUTO_TEST_CASE(compaction_controller_v2_config) {
     using rate = utils::rate<utils::units::bytes>;
     using namespace std::chrono_literals;
-    const compaction_controller_v2::config cfg{.alpha = 1, .max_step = 4, .min_busy_fraction_to_raise = 0.9};
+    const compaction_controller_v2::config cfg{.alpha = 1, .max_step = 4};
     cfg.validate();
-    auto next = [&cfg] (float shares, double target, double achieved, double busy = 1) {
-        return compaction_controller_v2::next_shares(cfg, shares, {.target = rate(target, 10s), .achieved = rate(achieved, 10s)}, busy, 1000);
+    auto next = [&cfg] (float shares, double target, double achieved) {
+        return compaction_controller_v2::next_shares(cfg, shares, {.target = rate(target, 10s), .achieved = rate(achieved, 10s)}, 1000);
     };
     BOOST_REQUIRE_CLOSE(next(100, 3000, 1000), 300, 1e-4);
     BOOST_REQUIRE_CLOSE(next(100, 1e9, 1), 400, 1e-4);
-    BOOST_REQUIRE_CLOSE(next(100, 3000, 1000, 0.8), 100, 1e-4);
+    BOOST_REQUIRE_CLOSE(next(400, 0, 1000), 100, 1e-4);
 
     BOOST_REQUIRE_THROW((compaction_controller_v2::config{.rate_window = 0min}.validate()), std::invalid_argument);
     BOOST_REQUIRE_THROW((compaction_controller_v2::config{.alpha = 0}.validate()), std::invalid_argument);
     BOOST_REQUIRE_THROW((compaction_controller_v2::config{.alpha = 1.5}.validate()), std::invalid_argument);
     BOOST_REQUIRE_THROW((compaction_controller_v2::config{.max_step = 1}.validate()), std::invalid_argument);
-    BOOST_REQUIRE_THROW((compaction_controller_v2::config{.min_busy_fraction_to_raise = -0.1}.validate()), std::invalid_argument);
-    BOOST_REQUIRE_THROW((compaction_controller_v2::config{.min_busy_fraction_to_raise = 1.1}.validate()), std::invalid_argument);
 }
 
 void test_major_does_not_miss_data_in_memtable_fn(test_env& env) {

@@ -1896,9 +1896,6 @@ db::config::config(std::shared_ptr<db::extensions> exts)
     , compaction_controller_v2_max_step(this, "compaction_controller_v2_max_step", value_status::Used, 2.0,
         "The factor by which compaction_controller v2 can change the shares of regular compaction at most in an update, either way. "
         "Must be greater than 1. Do not set this unless you know what you are doing.")
-    , compaction_controller_v2_min_busy_fraction_to_raise(this, "compaction_controller_v2_min_busy_fraction_to_raise", value_status::Used, 0.5,
-        "compaction_controller v2 only raises the shares of regular compaction if it was busy for at least this fraction of the time since its last update. "
-        "Must be in [0, 1]. Do not set this unless you know what you are doing.")
     , compaction_normalization_factor(this, "compaction_normalization_factor", value_status::Used, 30,
         "The normalized backlog (backlog divided by the shard's memory) at which the compaction controller reaches the maximum shares. Lower values make compaction more aggressive, favoring reads over writes. Must be greater than 1.5. Do not set this unless you know what you are doing. This option will be retired when the controller reaches more maturity.")
     , compaction_enforce_min_threshold(this, "compaction_enforce_min_threshold", liveness::LiveUpdate, value_status::Used, false,

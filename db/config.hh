@@ -694,7 +694,6 @@ public:
     named_value<uint32_t> compaction_controller_v2_rate_window_in_minutes;
     named_value<double> compaction_controller_v2_alpha;
     named_value<double> compaction_controller_v2_max_step;
-    named_value<double> compaction_controller_v2_min_busy_fraction_to_raise;
     named_value<float> compaction_normalization_factor;
     named_value<bool> compaction_enforce_min_threshold;
     named_value<uint32_t> compaction_flush_all_tables_before_major_seconds;

@@ -82,15 +82,9 @@ public:
 // Compaction rates of a compaction group, which the compaction controller compares
 // to set the shares of compaction.
 struct compaction_rates {
-    // TARGET_COMPACTION_RATE: the bytes the group's data has to be compacted at,
-    //
-    //   max(ingestion_rate * WA, ingestion_rate_from_sstables) * URGENCY_FACTOR
-    //
-    // where ingestion_rate is the group's flushed bytes, WA the write amplification of
-    // the strategy, ingestion_rate_from_sstables the bytes in sstables awaiting
-    // compaction over the period they were ingested in, and URGENCY_FACTOR how much
-    // faster than that compaction has to go. The terms cover different intervals, so
-    // they are compared per second, and the target covers the interval of the larger one.
+    // TARGET_COMPACTION_RATE: the bytes the group's data has to be compacted at for
+    // the compactions pending in it to end by the time the next ones are due, as the
+    // group's strategy models it. 0 when nothing is pending.
     utils::rate<utils::units::bytes> target;
     // The bytes regular compaction compacted, from the group's stats.
     utils::rate<utils::units::bytes> achieved;

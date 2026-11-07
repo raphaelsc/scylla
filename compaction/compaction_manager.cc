@@ -969,15 +969,6 @@ std::unique_ptr<compaction_controller_v2> compaction_manager::make_compaction_co
                 }
                 return rates;
             },
-            // The fraction of the interval since the last update regular compaction was busy.
-            [this, last_busy_time = regular_compaction_busy_time(), last_update = lowres_clock::now()] () mutable {
-                auto busy_time = regular_compaction_busy_time();
-                auto now = lowres_clock::now();
-                auto busy = now > last_update ? std::chrono::duration<double>(busy_time - last_busy_time) / (now - last_update) : 0.0;
-                last_busy_time = busy_time;
-                last_update = now;
-                return busy;
-            },
             dry_run);
 }
 
@@ -3077,7 +3068,14 @@ utils::rate<utils::units::bytes> ingestion_rate_from_sstables(const std::vector<
 compaction_rates compaction_backlog_manager::rates() const {
     compaction_rates rates;
     for (auto& [tracker, src] : _backlog_trackers) {
-        rates = rates + tracker->rates(*src);
+        auto r = tracker->rates(*src);
+        // A group with nothing pending has no say in the shard's shares: its target
+        // would add nothing, and what it achieved lately would only hide what the
+        // groups with pending work are short of.
+        if (r.target.per_second() <= 0) {
+            continue;
+        }
+        rates = rates + r;
     }
     return rates;
 }

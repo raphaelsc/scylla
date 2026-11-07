@@ -624,18 +624,13 @@ void compaction_controller_v2::config::validate() const {
     if (!(max_step > 1)) {
         throw std::invalid_argument(fmt::format("The step limit of compaction controller v2 must be greater than 1, got {}", max_step));
     }
-    if (!(min_busy_fraction_to_raise >= 0 && min_busy_fraction_to_raise <= 1)) {
-        throw std::invalid_argument(fmt::format("The busy fraction compaction controller v2 raises the shares at must be in [0, 1], got {}",
-                min_busy_fraction_to_raise));
-    }
 }
 
 compaction_controller_v2::compaction_controller_v2(config cfg, scheduling_group sg, float static_shares, std::optional<float> max_shares,
-        std::chrono::milliseconds interval, std::function<compaction::compaction_rates()> current_rates, std::function<double()> busy, dry_run dry_run)
+        std::chrono::milliseconds interval, std::function<compaction::compaction_rates()> current_rates, dry_run dry_run)
     : _config(std::move(cfg))
     , _scheduling_group(std::move(sg))
     , _current_rates(std::move(current_rates))
-    , _busy(std::move(busy))
     , _static_shares(static_shares)
     , _dry_run(dry_run)
     , _update_timer([this] { adjust(); })
@@ -666,20 +661,16 @@ void compaction_controller_v2::set_max_shares(float max_shares) {
     _shares = std::min(_shares, _max_shares);
 }
 
-float compaction_controller_v2::next_shares(const config& cfg, float shares, const compaction::compaction_rates& rates, double busy, float max_shares) {
-    if (busy <= 0) {
-        return shares;
-    }
+float compaction_controller_v2::next_shares(const config& cfg, float shares, const compaction::compaction_rates& rates, float max_shares) {
     auto target = rates.target.per_second();
     auto achieved = rates.achieved.per_second();
-    double step = 1;
+    double step;
     if (achieved > 0) {
         step = std::clamp(std::pow(target / achieved, cfg.alpha), 1 / cfg.max_step, cfg.max_step);
     } else if (target > 0) {
         step = cfg.max_step;
-    }
-    if (step > 1 && busy < cfg.min_busy_fraction_to_raise) {
-        return shares;
+    } else {
+        step = 1 / cfg.max_step;
     }
     return std::clamp(float(shares * step), min_shares, max_shares);
 }
@@ -691,7 +682,6 @@ void compaction_controller_v2::adjust() {
         }
         return;
     }
-    double busy = 0;
     compaction::compaction_rates rates;
     auto previous_shares = _shares;
     try {
@@ -699,27 +689,26 @@ void compaction_controller_v2::adjust() {
         // metrics show what the controller sees.
         rates = _current_rates();
         _last_rates = rates;
-        busy = _busy();
-        _shares = next_shares(_config, _shares, rates, busy, _max_shares);
+        _shares = next_shares(_config, _shares, rates, _max_shares);
     } catch (...) {
-        // The shares are left as they are, as with unknown rates.
+        // The shares are left as they are.
         dblog.warn("Failed to compute the compaction rates, leaving compaction shares at {}: {}", _shares, std::current_exception());
     }
     // What the shares were derived from: the ratio the step is a power of, so the
-    // logs tell a step held back by the busy fraction or the limits from no error.
+    // logs tell a step held back by the limits from no error.
     auto ratio = rates.achieved.per_second() > 0 ? rates.target.per_second() / rates.achieved.per_second() : std::numeric_limits<double>::infinity();
     if (_dry_run) {
         dblog.log(log_level::info, _dry_run_log_limit,
                 "compaction controller v2 dry run: would set shares from {:.1f} to {:.1f}, while they are {:.1f}; "
-                "regular compaction busy {:.0f}%, target {:.0f} bytes/s over {:.0f}s, achieved {:.0f} bytes/s over {:.0f}s, target/achieved {:.2f}",
-                previous_shares, _shares, _scheduling_group.get_shares(), busy * 100,
+                "target {:.0f} bytes/s over {:.0f}s, achieved {:.0f} bytes/s over {:.0f}s, target/achieved {:.2f}",
+                previous_shares, _shares, _scheduling_group.get_shares(),
                 rates.target.per_second(), rates.target.interval().count(),
                 rates.achieved.per_second(), rates.achieved.interval().count(), ratio);
         return;
     }
     dblog.debug("compaction controller v2: setting shares from {:.1f} to {:.1f}; "
-            "regular compaction busy {:.0f}%, target {:.0f} bytes/s over {:.0f}s, achieved {:.0f} bytes/s over {:.0f}s, target/achieved {:.2f}",
-            previous_shares, _shares, busy * 100,
+            "target {:.0f} bytes/s over {:.0f}s, achieved {:.0f} bytes/s over {:.0f}s, target/achieved {:.2f}",
+            previous_shares, _shares,
             rates.target.per_second(), rates.target.interval().count(),
             rates.achieved.per_second(), rates.achieved.interval().count(), ratio);
     _scheduling_group.set_shares(_shares);

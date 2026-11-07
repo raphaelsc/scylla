@@ -199,12 +199,6 @@ public:
         double alpha = 0.3;
         // An update changes the shares by up to this factor, either way.
         double max_step = 2;
-        // The shares are only raised if regular compaction was busy for at least this
-        // fraction of the interval since the last update. Compaction that is idle part of
-        // the time is held back by the work available, not by its shares, so raising them
-        // would only wind them up for the next large compaction, which then runs at shares
-        // way above what it needs.
-        double min_busy_fraction_to_raise = 0.5;
 
         // Throws std::invalid_argument if a setting is out of its range.
         void validate() const;
@@ -213,11 +207,6 @@ private:
     config _config;
     scheduling_group _scheduling_group;
     std::function<compaction::compaction_rates()> _current_rates;
-    // The fraction of the interval since the last update during which regular compaction
-    // was busy, i.e. at least one ran. The shares only matter for compaction that
-    // competes for CPU; while there is none, comparing the rates tells nothing about them.
-    // FIXME: use the time the compaction scheduling group waited for CPU instead.
-    std::function<double()> _busy;
     float _static_shares;
     // FIXME: the maximum is v1's by default, but v2 doesn't have to stop there. Lift
     // the default once tested; compaction_max_shares can raise it meanwhile.
@@ -227,7 +216,7 @@ private:
     // group's default, the maximum, e.g. when the node switches to this controller, or
     // starts it in shadow mode, early at startup.
     float _shares = min_shares;
-    // The rates at the last update, compared only if regular compaction was busy.
+    // The rates at the last update.
     compaction::compaction_rates _last_rates;
     dry_run _dry_run;
     // A dry run logs its updates at most this often, so as not to flood the logs.
@@ -237,7 +226,7 @@ private:
     void adjust();
 public:
     compaction_controller_v2(config cfg, scheduling_group sg, float static_shares, std::optional<float> max_shares, std::chrono::milliseconds interval,
-            std::function<compaction::compaction_rates()> current_rates, std::function<double()> busy, dry_run dry_run = dry_run::no);
+            std::function<compaction::compaction_rates()> current_rates, dry_run dry_run = dry_run::no);
 
     future<> shutdown() override;
     future<> update_static_shares(float static_shares) override;
@@ -247,15 +236,14 @@ public:
     float shares() const noexcept {
         return _shares;
     }
-    // The rates at the last update, compared only if regular compaction was busy.
+    // The rates at the last update.
     const compaction::compaction_rates& last_rates() const noexcept {
         return _last_rates;
     }
 
-    // The shares after an update from `shares`, given the rates and the fraction of the
-    // interval regular compaction was busy. A target above what compaction achieves
-    // raises them, if compaction was busy for most of the interval; a target below lowers
-    // them, if compaction was busy at all. With nothing to compare, e.g. unknown rates,
-    // they are left as they are.
-    static float next_shares(const config& cfg, float shares, const compaction::compaction_rates& rates, double busy, float max_shares);
+    // The shares after an update from `shares`, given the rates. A target above what
+    // compaction achieves raises them, a target below lowers them. With no target, i.e.
+    // nothing pending, they are lowered whatever compaction achieved lately: the shares
+    // only matter for compaction that competes for CPU, and there is none to come.
+    static float next_shares(const config& cfg, float shares, const compaction::compaction_rates& rates, float max_shares);
 };

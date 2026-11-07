@@ -1370,7 +1370,6 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                         .rate_window = std::chrono::minutes(cfg->compaction_controller_v2_rate_window_in_minutes()),
                         .alpha = cfg->compaction_controller_v2_alpha(),
                         .max_step = cfg->compaction_controller_v2_max_step(),
-                        .min_busy_fraction_to_raise = cfg->compaction_controller_v2_min_busy_fraction_to_raise(),
                     },
                 };
             });
