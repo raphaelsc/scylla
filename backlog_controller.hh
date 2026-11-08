@@ -196,6 +196,15 @@ public:
         // follows a change in the workload: the rates reflect a new ingestion rate only
         // once the window covers it, so the shares settle within about a window.
         std::chrono::minutes rate_window{30};
+        // The window the achieved rate, what regular compaction compacted, is averaged
+        // over. Shorter than rate_window: the target follows the tree as it changes, and
+        // the comparison needs the rate compaction delivers now, not what it delivered
+        // half an hour ago. Compaction progress is credited at every update, so a few
+        // updates are enough to average over. With the two windows equal, the achieved
+        // rate kept reporting a burst of compaction for the whole window after it ended,
+        // the shares fell to the floor on the strength of it while the tiers filled, and
+        // the next burst followed: a cycle of the window's length.
+        std::chrono::minutes achieved_window{5};
         double alpha = 0.3;
         // An update changes the shares by up to this factor, either way.
         double max_step = 2;

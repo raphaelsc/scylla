@@ -1887,8 +1887,12 @@ db::config::config(std::shared_ptr<db::extensions> exts)
     , compaction_controller_v2_shadow_mode(this, "compaction_controller_v2_shadow_mode", value_status::Used, false,
         "Only for testing compaction_controller v2. If set to true while v1 controls the shares of regular compaction, v2 runs alongside it without setting them, logging the shares it would set and what led to them.")
     , compaction_controller_v2_rate_window_in_minutes(this, "compaction_controller_v2_rate_window_in_minutes", value_status::Used, 30,
-        "The window, in minutes, over which the ingestion and compaction rates compaction_controller v2 compares are averaged. "
-        "A longer window smooths out bursts of flushes and compactions, but makes the controller follow a change in the workload more slowly. "
+        "The window, in minutes, over which the ingestion rate compaction_controller v2 sets its target from is averaged. "
+        "A longer window smooths out bursts of flushes, but makes the controller follow a change in the workload more slowly. "
+        "Do not set this unless you know what you are doing.")
+    , compaction_controller_v2_achieved_window_in_minutes(this, "compaction_controller_v2_achieved_window_in_minutes", value_status::Used, 5,
+        "The window, in minutes, over which the rate regular compaction achieves, which compaction_controller v2 compares to its target, is averaged. "
+        "Shorter than the ingestion window: the target follows the table as it changes, and the comparison needs the rate compaction delivers now. "
         "Do not set this unless you know what you are doing.")
     , compaction_controller_v2_alpha(this, "compaction_controller_v2_alpha", value_status::Used, 0.3,
         "At every update, compaction_controller v2 scales the shares of regular compaction by (target rate / achieved rate)^alpha. "

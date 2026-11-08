@@ -692,6 +692,7 @@ public:
     named_value<enum_option<compaction_controller_t>> compaction_controller;
     named_value<bool> compaction_controller_v2_shadow_mode;
     named_value<uint32_t> compaction_controller_v2_rate_window_in_minutes;
+    named_value<uint32_t> compaction_controller_v2_achieved_window_in_minutes;
     named_value<double> compaction_controller_v2_alpha;
     named_value<double> compaction_controller_v2_max_step;
     named_value<float> compaction_normalization_factor;

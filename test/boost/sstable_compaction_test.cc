@@ -5359,6 +5359,7 @@ BOOST_AUTO_TEST_CASE(compaction_controller_v2_config) {
     BOOST_REQUIRE_CLOSE(next(400, 0, 1000), 100, 1e-4);
 
     BOOST_REQUIRE_THROW((compaction_controller_v2::config{.rate_window = 0min}.validate()), std::invalid_argument);
+    BOOST_REQUIRE_THROW((compaction_controller_v2::config{.achieved_window = 0min}.validate()), std::invalid_argument);
     BOOST_REQUIRE_THROW((compaction_controller_v2::config{.alpha = 0}.validate()), std::invalid_argument);
     BOOST_REQUIRE_THROW((compaction_controller_v2::config{.alpha = 1.5}.validate()), std::invalid_argument);
     BOOST_REQUIRE_THROW((compaction_controller_v2::config{.max_step = 1}.validate()), std::invalid_argument);

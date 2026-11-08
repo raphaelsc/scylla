@@ -618,6 +618,9 @@ void compaction_controller_v2::config::validate() const {
     if (rate_window < std::chrono::minutes(1)) {
         throw std::invalid_argument(fmt::format("The window of the compaction rates must be at least 1 minute, got {} minutes", rate_window.count()));
     }
+    if (achieved_window < std::chrono::minutes(1)) {
+        throw std::invalid_argument(fmt::format("The window of the achieved compaction rate must be at least 1 minute, got {} minutes", achieved_window.count()));
+    }
     if (!(alpha > 0 && alpha <= 1)) {
         throw std::invalid_argument(fmt::format("The alpha of compaction controller v2 must be in (0, 1], got {}", alpha));
     }

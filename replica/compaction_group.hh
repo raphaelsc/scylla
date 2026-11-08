@@ -105,10 +105,11 @@ class compaction_group : public compaction::compaction_backlog_source {
     std::unique_ptr<compaction_group_logstor_state> _logstor_state;
 
     db::replay_position _lowest_rp;
-    // The rates this group tracks share the window and the start, so rates read from them
-    // at the same time cover the same interval, whether the window has filled or not, and
-    // can be compared and combined.
+    // The rates this group tracks share the start, so rates read from them at the same
+    // time end together, whether their windows have filled or not. The flushed rates share
+    // the window too, so they can be divided; the compacted rate has its own, shorter one.
     lowres_db_clock::duration _rate_window;
+    lowres_db_clock::duration _achieved_window;
     lowres_db_clock::time_point _rates_start = lowres_db_clock::now();
     // Bytes flushed from memtables into this group, which the compaction controller
     // will use to match compaction to ingestion.
@@ -123,7 +124,7 @@ class compaction_group : public compaction::compaction_backlog_source {
     // compactions running at every update of compaction_controller_v2, and in full once
     // they complete, so the rate follows compaction in flight rather than its completion,
     // which with tablets and incremental compaction happens every few GB at most.
-    utils::moving_average_rate<utils::units::bytes, uint64_t, lowres_db_clock> _compacted_bytes{_rate_window, _rates_start};
+    utils::moving_average_rate<utils::units::bytes, uint64_t, lowres_db_clock> _compacted_bytes{_achieved_window, _rates_start};
     // Single-partition reads served from this group's sstables, and the sstables they read.
     sstables::read_amplification_tracker _point_read_amplification{_rate_window, _rates_start};
     friend class table;

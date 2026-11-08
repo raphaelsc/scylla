@@ -30,8 +30,9 @@ class compaction_backlog_manager;
 extern logging::logger compaction_rates_logger;
 
 // Rates of a compaction group, which the compaction controller compares to match
-// compaction to ingestion. They cover the same interval: a window of minutes, or
-// the time since the group was created while it is younger than that.
+// compaction to ingestion. Each covers its window of minutes, or the time since the
+// group was created while it is younger than that; the flushed rates share one
+// window, the compacted rate has a shorter one of its own.
 struct rate_stats {
     utils::rate<utils::units::bytes> flushed_bytes;
     // Byte-weighted mean size of the flushed sstables, in bytes, or 0 when nothing
