@@ -56,6 +56,7 @@
 #include "view_info.hh"
 #include "db/schema_tables.hh"
 #include "compaction/compaction_manager.hh"
+#include "compaction/compaction_backlog_manager.hh"
 #include "gms/feature_service.hh"
 #include "timeout_config.hh"
 #include "service/storage_proxy.hh"
@@ -709,7 +710,8 @@ void compaction_controller_v2::adjust() {
                 rates.achieved.per_second(), rates.achieved.interval().count(), ratio);
         return;
     }
-    dblog.debug("compaction controller v2: setting shares from {:.1f} to {:.1f}; "
+    // On the rates' logger, so that enabling it shows the decision with its inputs.
+    compaction::compaction_rates_logger.debug("compaction controller v2: setting shares from {:.1f} to {:.1f}; "
             "target {:.0f} bytes/s over {:.0f}s, achieved {:.0f} bytes/s over {:.0f}s, target/achieved {:.2f}",
             previous_shares, _shares,
             rates.target.per_second(), rates.target.interval().count(),
