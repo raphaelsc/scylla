@@ -5248,21 +5248,14 @@ SEASTAR_TEST_CASE(incremental_backlog_tracker_rates_test) {
         auto rates_of = [] (const fixed_backlog_source& src) {
             return compaction::incremental_backlog_tracker({}).rates(src);
         };
-        // Point reads touching the given number of sstables each; 100 pays for any surplus.
-        auto reading = [] (double sstables_per_read) {
-            return compaction::read_amplification_stats{
-                .point_reads = utils::rate<utils::units::reads>(1000 * 600, 600s),
-                .sstables_read = utils::rate<utils::units::sstables>(1000 * 600 * sstables_per_read, 600s),
-            };
-        };
-        auto flushing = [&] (double flushed_per_second, double sstables_per_read = 100) {
+        auto flushing = [&] (double flushed_per_second) {
             return compaction::compaction_group_stats{.rates = {
                 .flushed_bytes = rate(flushed_per_second * 600, 600s),
                 .mean_flush_size = 100 * MB,
                 .compacted_bytes = rate(5 * MB * 600, 600s),
-            }, .read_amplification = reading(sstables_per_read)};
+            }};
         };
-        const auto only_reads = compaction::compaction_group_stats{.read_amplification = reading(100)};
+        const auto no_flushes = compaction::compaction_group_stats{};
         auto tier = [] (size_t runs, double size, std::optional<std::pair<int64_t, int64_t>> ingested = std::nullopt) {
             std::vector<run_spec> t;
             for (size_t i = 0; i < runs; i++) {
@@ -5298,45 +5291,35 @@ SEASTAR_TEST_CASE(incremental_backlog_tracker_rates_test) {
         auto beyond_max_threshold = rates_of(make_source(tiers({tier(8, 100 * MB)}), flushing(10 * MB)));
         BOOST_REQUIRE_CLOSE(beyond_max_threshold.target.per_second(), 15 * MB, 1e-6);
 
-        // The reads pay for the surplus only insofar as they touch it. With no tier above the
-        // threshold a point read touches at most one sstable per run, 12 here; reads touching
-        // that many leave the target as is, reads touching fewer scale it down, to a quarter at
-        // the least, whether they touch one sstable or there are no reads at all.
-        auto deep = tiers({tier(8, 1600 * MB), tier(8, 400 * MB), tier(8, 100 * MB)});
-        BOOST_REQUIRE_CLOSE(rates_of(make_source(deep, flushing(10 * MB, 12))).target.per_second(), 45 * MB, 1e-6);
-        BOOST_REQUIRE_CLOSE(rates_of(make_source(deep, flushing(10 * MB, 6))).target.per_second(), 22.5 * MB, 1e-6);
-        BOOST_REQUIRE_CLOSE(rates_of(make_source(deep, flushing(10 * MB, 1))).target.per_second(), 11.25 * MB, 1e-6);
-        BOOST_REQUIRE_CLOSE(rates_of(make_source(deep, flushing(10 * MB, 0))).target.per_second(), 11.25 * MB, 1e-6);
-        // Never below the ingestion rate while a tier is pending, though.
-        auto two_ready_unread = rates_of(make_source(tiers({tier(4, 400 * MB), tier(4, 100 * MB)}), flushing(10 * MB, 0)));
-        BOOST_REQUIRE_CLOSE(two_ready_unread.target.per_second(), 10 * MB, 1e-6);
+        // Three tiers of eight runs: each asks for the runs one compaction takes of it over the
+        // threshold, 6 / 4, as a bigger tier's compaction is longer but so is its refill, the
+        // tiers being the write amplification as it stands.
+        auto deep = rates_of(make_source(tiers({tier(8, 1600 * MB), tier(8, 400 * MB), tier(8, 100 * MB)}), flushing(10 * MB)));
+        BOOST_REQUIRE_CLOSE(deep.target.per_second(), 45 * MB, 1e-6);
 
         // When nothing was flushed lately, e.g. after a restart, the rate the pending tiers' data
         // was ingested at stands in, e.g. 4 runs ingested over 40 minutes.
         std::vector<run_spec> ready_tier = {{100 * MB, {{0, 10}}}, {100 * MB, {{10, 20}}}, {100 * MB, {{20, 30}}}, {100 * MB, {{30, 40}}}};
-        auto from_sstables = rates_of(make_source(ready_tier, only_reads));
+        auto from_sstables = rates_of(make_source(ready_tier, no_flushes));
         BOOST_REQUIRE_CLOSE(from_sstables.target.per_second(), 400 * MB / 2400, 1e-6);
         BOOST_REQUIRE(from_sstables.target.interval() == 2400s);
         // A flush window that saw nothing, rather than one that is missing, is the same.
-        auto empty_window = rates_of(make_source(ready_tier, {.rates = {.flushed_bytes = rate(0, 600s)}, .read_amplification = reading(100)}));
+        auto empty_window = rates_of(make_source(ready_tier, {.rates = {.flushed_bytes = rate(0, 600s)}}));
         BOOST_REQUIRE_CLOSE(empty_window.target.per_second(), 400 * MB / 2400, 1e-6);
         // A tier below the threshold asks for nothing from its sstables either, and a tier above
         // it for the surplus, like from the flushes.
-        auto not_ready = rates_of(make_source(tiers({tier(3, 100 * MB, {{0, 30}}), tier(1, 400 * MB, {{0, 30}})}), only_reads));
+        auto not_ready = rates_of(make_source(tiers({tier(3, 100 * MB, {{0, 30}}), tier(1, 400 * MB, {{0, 30}})}), no_flushes));
         BOOST_REQUIRE_EQUAL(not_ready.target.per_second(), 0);
-        auto overdue_from_sstables = rates_of(make_source(tier(5, 100 * MB, {{0, 50}}), only_reads));
+        auto overdue_from_sstables = rates_of(make_source(tier(5, 100 * MB, {{0, 50}}), no_flushes));
         BOOST_REQUIRE_CLOSE(overdue_from_sstables.target.per_second(), 500 * MB / 3000 * 5 / 4, 1e-6);
 
         // Data ingested in a burst is considered ingested over at least 10 minutes.
-        auto burst = rates_of(make_source(tier(4, 100 * MB, {{0, 1}}), only_reads));
+        auto burst = rates_of(make_source(tier(4, 100 * MB, {{0, 1}}), no_flushes));
         BOOST_REQUIRE_CLOSE(burst.target.per_second(), 400 * MB / 600, 1e-6);
 
         // Data that wasn't flushed, e.g. written by repair, has no ingestion time.
-        auto repaired = rates_of(make_source({{100 * MB, {{0, 10}}}, {100 * MB, {{10, 20}}}, {100 * MB, {{20, 30}}}, {100 * MB}}, only_reads));
+        auto repaired = rates_of(make_source({{100 * MB, {{0, 10}}}, {100 * MB, {{10, 20}}}, {100 * MB, {{20, 30}}}, {100 * MB}}, no_flushes));
         BOOST_REQUIRE_CLOSE(repaired.target.per_second(), 300 * MB / 1800, 1e-6);
-        // The urgency applies to that rate too; there is no ingestion rate to floor it at.
-        auto from_sstables_unread = rates_of(make_source(ready_tier, {}));
-        BOOST_REQUIRE_CLOSE(from_sstables_unread.target.per_second(), 400 * MB / 2400 / 4, 1e-6);
     });
 }
 

@@ -55,15 +55,11 @@ incremental_backlog_tracker::calculate_sstables_backlog_contribution(const compa
     size_t eligible_tiers = 0;
     size_t eligible_runs = 0;
     utils::rate<utils::units::bytes> pending_rate_from_sstables;
-    size_t ideal_runs = 0;
     if (!all.empty()) {
       auto buckets = incremental_compaction_strategy::get_buckets(all, options);
       tiers = buckets.size();
       for (auto& bucket : buckets) {
         max_runs_in_tier = std::max(max_runs_in_tier, bucket.size());
-        // A point read touches at most one sstable per run, so with no tier above the
-        // threshold it touches at most this many.
-        ideal_runs += std::min(bucket.size(), threshold);
         if (!incremental_compaction_strategy::is_bucket_interesting(bucket, threshold)) {
             continue;
         }
@@ -100,7 +96,6 @@ incremental_backlog_tracker::calculate_sstables_backlog_contribution(const compa
         .eligible_tiers = eligible_tiers,
         .eligible_runs = eligible_runs,
         .pending_rate_from_sstables = pending_rate_from_sstables,
-        .ideal_runs = ideal_runs,
     };
 }
 
@@ -119,8 +114,11 @@ void incremental_backlog_tracker::refresh(const compaction_backlog_source& src) 
     _eligible_tiers = result.eligible_tiers;
     _eligible_runs = result.eligible_runs;
     _pending_rate_from_sstables = result.pending_rate_from_sstables;
-    _ideal_runs = result.ideal_runs;
     _backlog_dirty = false;
+}
+
+double incremental_backlog_tracker::urgency_factor(double threshold) const {
+    return _eligible_tiers > 0 ? _eligible_runs / (_eligible_tiers * threshold) : 1;
 }
 
 compaction_rates incremental_backlog_tracker::rates(const compaction_backlog_source& src) const {
@@ -135,43 +133,35 @@ compaction_rates incremental_backlog_tracker::rates(const compaction_backlog_sou
     //     r * S / (threshold * S / ingestion) = ingestion * r / threshold
     //
     // S cancels: a bigger tier's compaction is longer, but so is its refill. Summed over
-    // the tiers with enough runs to compact, _eligible_runs / threshold, this is the rate
-    // at which each current compaction ends when the next one of its tier is due. A tier
-    // below the threshold has nothing to compact and asks for nothing, so a table whose
-    // tree is in shape has a target of 0, and a tier holding more than threshold runs
-    // asks for the surplus to be gone by its next deadline.
+    // the tiers with enough runs to compact this is
+    //
+    //     ingestion * tiers * URGENCY_FACTOR, URGENCY_FACTOR = runs / (tiers * threshold)
+    //
+    // the rate at which each current compaction ends when the next one of its tier is
+    // due: at least the ingestion rate per eligible tier, since each holds at least
+    // threshold runs, and more in proportion to the runs past the threshold. The tiers
+    // are the write amplification as it stands, each one more rewrite of what is
+    // ingested, rather than an estimate of it from the size of the table. A tier below
+    // the threshold has nothing to compact and asks for nothing, so a table whose tree
+    // is in shape has a target of 0, and a tier holding more than threshold runs asks
+    // for the surplus to be gone by its next deadline.
     //
     // Every flushed byte reaches every tier, so the ingestion is the rate the table
     // flushes at. Only when the window has seen no flush, after a restart or once writes
     // stopped for longer than it covers, does the rate the pending tiers' own data was
     // ingested at, from their sstables, stand in: _pending_rate_from_sstables, the same
     // sum with each tier's inflow in place of the flush rate.
-    //
-    // How urgent that is depends on who pays for the surplus. A point read touches at
-    // most one sstable per run, so with no tier above the threshold it touches at most
-    // _ideal_runs sstables; reads touching that many, or more, are paying for every
-    // pending run and the sum stands. Reads touching fewer, because the pending runs
-    // hold no version of the keys they read, as under unique keys, scale the sum down
-    // in proportion, to no less than min_urgency, where the tiers settle at threshold /
-    // min_urgency runs instead of threshold. No reads at all, as in a bulk load, are the
-    // same as reads touching nothing. Reads touching more than the ideal add nothing:
-    // the runs they touch are the pending runs the sum already counts.
-    //
-    // While a tier is pending the target never drops below the ingestion rate, whatever
-    // the reads: every flushed byte is compacted at least once, so the number of sstables
-    // stays bounded while compaction is deferred.
-    auto sstables_per_read = stats.read_amplification.mean_sstables_read();
-    auto urgency = _ideal_runs > 0 ? std::clamp(sstables_per_read / _ideal_runs, min_urgency, 1.0) : min_urgency;
-    auto from_ingestion = stats.rates.flushed_bytes * (_eligible_runs > 0 ? std::max(1.0, urgency * (_eligible_runs / threshold)) : 0.0);
-    auto from_sstables = _pending_rate_from_sstables * urgency;
+    auto urgency = urgency_factor(threshold);
+    auto from_ingestion = stats.rates.flushed_bytes * (_eligible_tiers * urgency);
+    auto from_sstables = _pending_rate_from_sstables;
     auto target = stats.rates.flushed_bytes.amount() > 0 ? from_ingestion : from_sstables;
 
     compaction_rates_logger.debug("{}.{}: flushed {:.0f} B/s over {}s, {} runs in {} pending tiers of {} tiers ({} runs, {} at most in a tier), threshold {}, "
-            "point reads {:.1f}/s touching {:.2f} sstables of {} ideal, urgency {:.2f}, "
+            "urgency {:.2f}, point reads {:.1f}/s touching {:.2f} sstables, "
             "from_ingestion {:.0f} B/s, from_sstables {:.0f} B/s over {}s, using {}, target {:.0f} B/s, achieved {:.0f} B/s over {}s",
             src.schema()->ks_name(), src.schema()->cf_name(), stats.rates.flushed_bytes.per_second(), stats.rates.flushed_bytes.interval().count(),
             _eligible_runs, _eligible_tiers, _tiers, _runs, _max_runs_in_tier, threshold,
-            stats.read_amplification.point_reads.per_second(), sstables_per_read, _ideal_runs, urgency,
+            urgency, stats.read_amplification.point_reads.per_second(), stats.read_amplification.mean_sstables_read(),
             from_ingestion.per_second(), from_sstables.per_second(), from_sstables.interval().count(),
             stats.rates.flushed_bytes.amount() > 0 ? "from_ingestion" : "from_sstables", target.per_second(),
             stats.rates.compacted_bytes.per_second(), stats.rates.compacted_bytes.interval().count());
