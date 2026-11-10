@@ -43,10 +43,19 @@ class incremental_backlog_tracker final : public compaction_backlog_tracker::imp
     mutable utils::rate<utils::units::bytes> _pending_rate_from_sstables;
 
     // URGENCY_FACTOR: the runs the eligible tiers hold over the runs they hold at the
-    // threshold, _eligible_runs / (_eligible_tiers * threshold). 1 when every eligible
-    // tier has just reached the threshold, more the further past it they are, and 1
-    // with no tier eligible, when the target is 0 anyway.
-    double urgency_factor(double threshold) const;
+    // threshold, _eligible_runs / (_eligible_tiers * threshold), times the read discount.
+    // 1 when every eligible tier has just reached the threshold and the reads pay for it,
+    // more the further past the threshold the tiers are, and 1 with no tier eligible,
+    // when the target is 0 anyway.
+    double urgency_factor(double threshold, double read_discount) const;
+    // The sstables a point read touched, on average, over the threshold, between
+    // 1 / threshold and 1: how far the reads pay for the tiers past the threshold. A read
+    // touching threshold sstables, or more, pays for a tier's worth of runs that should
+    // have been merged, and the target stands; a read touching fewer, because the runs
+    // hold no version of its key, as under unique keys, pays less, and the target is
+    // discounted in proportion, to no less than 1 / threshold, where a tier settles at
+    // threshold^2 runs. No reads at all, as in a bulk load, are reads touching nothing.
+    static double read_discount(double threshold, double sstables_per_read);
 
     // Shortest period the data of a tier is considered ingested over. It keeps a tier
     // whose data was ingested in a burst, or whose span is unknown, from demanding to
@@ -88,13 +97,15 @@ public:
 
     virtual double backlog(const compaction_backlog_source& src, const compaction_backlog_tracker::ongoing_writes& ow, const compaction_backlog_tracker::ongoing_compactions& oc) const override;
     // The target is ingestion_rate * tiers * URGENCY_FACTOR, with tiers the ones holding
-    // at least min_threshold runs and URGENCY_FACTOR their runs over tiers * min_threshold,
-    // i.e. ingestion_rate * runs / min_threshold: the rate at which the compaction of
-    // each such tier ends by the time the tier has min_threshold new runs, i.e. the next
-    // one is due. Every eligible tier asks for at least the ingestion rate, and for
-    // more in proportion to the runs it holds past the threshold. A tier below the
-    // threshold has nothing to compact and asks for nothing. The tiers stand in for the
-    // write amplification: each is one more rewrite of what is ingested.
+    // at least min_threshold runs and URGENCY_FACTOR their runs over tiers * min_threshold
+    // times the read discount, i.e. ingestion_rate * runs / min_threshold * read_discount:
+    // the rate at which the compaction of each such tier ends by the time the tier has
+    // min_threshold new runs, i.e. the next one is due, insofar as the reads pay for the
+    // runs past the threshold. Every eligible tier asks for at least the ingestion rate,
+    // whatever the reads, and for more in proportion to the runs it holds past the
+    // threshold. A tier below the threshold has nothing to compact and asks for nothing.
+    // The tiers stand in for the write amplification: each is one more rewrite of what
+    // is ingested.
     //
     // ingestion_rate is the group's flushed bytes. When nothing was flushed within the
     // rate window, e.g. after a restart, the rate at which the data of the pending tiers

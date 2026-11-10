@@ -44,8 +44,8 @@ struct rate_stats {
 };
 
 // Read amplification of the single-partition reads served from a compaction
-// group's sstables, which the compaction controller will use to tell how urgent
-// compaction is. Covers the same interval as the group's rate_stats.
+// group's sstables, which the compaction controller uses to tell how urgent
+// compaction is. Covers the same interval as the group's compacted_bytes.
 struct read_amplification_stats {
     utils::rate<utils::units::reads> point_reads;
     // The sstables the point reads actually read, after bloom filters.

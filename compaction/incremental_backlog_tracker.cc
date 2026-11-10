@@ -117,8 +117,12 @@ void incremental_backlog_tracker::refresh(const compaction_backlog_source& src) 
     _backlog_dirty = false;
 }
 
-double incremental_backlog_tracker::urgency_factor(double threshold) const {
-    return _eligible_tiers > 0 ? _eligible_runs / (_eligible_tiers * threshold) : 1;
+double incremental_backlog_tracker::read_discount(double threshold, double sstables_per_read) {
+    return std::clamp(sstables_per_read / threshold, 1 / threshold, 1.0);
+}
+
+double incremental_backlog_tracker::urgency_factor(double threshold, double read_discount) const {
+    return _eligible_tiers > 0 ? _eligible_runs / (_eligible_tiers * threshold) * read_discount : 1;
 }
 
 compaction_rates incremental_backlog_tracker::rates(const compaction_backlog_source& src) const {
@@ -151,17 +155,27 @@ compaction_rates incremental_backlog_tracker::rates(const compaction_backlog_sou
     // stopped for longer than it covers, does the rate the pending tiers' own data was
     // ingested at, from their sstables, stand in: _pending_rate_from_sstables, the same
     // sum with each tier's inflow in place of the flush rate.
-    auto urgency = urgency_factor(threshold);
-    auto from_ingestion = stats.rates.flushed_bytes * (_eligible_tiers * urgency);
-    auto from_sstables = _pending_rate_from_sstables;
+    //
+    // How much of the runs past the threshold the target asks to be gone by then depends
+    // on who pays for them. A point read touches one sstable per run that holds a version
+    // of its key, so the sstables a read touches, over the threshold, is how far the reads
+    // pay for a tier's worth of surplus: see read_discount. While a tier is pending the
+    // target never drops below the ingestion rate, whatever the reads: every flushed byte
+    // is compacted at least once, so the number of sstables stays bounded while compaction
+    // is deferred.
+    auto sstables_per_read = stats.read_amplification.mean_sstables_read();
+    auto discount = read_discount(threshold, sstables_per_read);
+    auto urgency = urgency_factor(threshold, discount);
+    auto from_ingestion = stats.rates.flushed_bytes * (_eligible_tiers > 0 ? std::max(1.0, _eligible_tiers * urgency) : 0.0);
+    auto from_sstables = _pending_rate_from_sstables * discount;
     auto target = stats.rates.flushed_bytes.amount() > 0 ? from_ingestion : from_sstables;
 
     compaction_rates_logger.debug("{}.{}: flushed {:.0f} B/s over {}s, {} runs in {} pending tiers of {} tiers ({} runs, {} at most in a tier), threshold {}, "
-            "urgency {:.2f}, point reads {:.1f}/s touching {:.2f} sstables, "
+            "point reads {:.1f}/s touching {:.2f} sstables over {}s, read discount {:.2f}, urgency {:.2f}, "
             "from_ingestion {:.0f} B/s, from_sstables {:.0f} B/s over {}s, using {}, target {:.0f} B/s, achieved {:.0f} B/s over {}s",
             src.schema()->ks_name(), src.schema()->cf_name(), stats.rates.flushed_bytes.per_second(), stats.rates.flushed_bytes.interval().count(),
             _eligible_runs, _eligible_tiers, _tiers, _runs, _max_runs_in_tier, threshold,
-            urgency, stats.read_amplification.point_reads.per_second(), stats.read_amplification.mean_sstables_read(),
+            stats.read_amplification.point_reads.per_second(), sstables_per_read, stats.read_amplification.point_reads.interval().count(), discount, urgency,
             from_ingestion.per_second(), from_sstables.per_second(), from_sstables.interval().count(),
             stats.rates.flushed_bytes.amount() > 0 ? "from_ingestion" : "from_sstables", target.per_second(),
             stats.rates.compacted_bytes.per_second(), stats.rates.compacted_bytes.interval().count());

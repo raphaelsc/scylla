@@ -126,7 +126,10 @@ class compaction_group : public compaction::compaction_backlog_source {
     // which with tablets and incremental compaction happens every few GB at most.
     utils::moving_average_rate<utils::units::bytes, uint64_t, lowres_db_clock> _compacted_bytes{_achieved_window, _rates_start};
     // Single-partition reads served from this group's sstables, and the sstables they read.
-    sstables::read_amplification_tracker _point_read_amplification{_rate_window, _rates_start};
+    // Over the achieved window, like the compacted rate: the controller discounts its target
+    // by what the reads touch now, and reads starting or stopping, as a bulk load ends or
+    // begins, should move it within a few updates, not a flush window.
+    sstables::read_amplification_tracker _point_read_amplification{_achieved_window, _rates_start};
     friend class table;
 private:
     std::unique_ptr<compaction_group_view> make_compacting_view();
