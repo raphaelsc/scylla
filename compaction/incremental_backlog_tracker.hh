@@ -36,11 +36,19 @@ class incremental_backlog_tracker final : public compaction_backlog_tracker::imp
     mutable size_t _runs = 0;
     mutable size_t _tiers = 0;
     mutable size_t _max_runs_in_tier = 0;
-    // The tiers with enough runs to compact, the runs their next compactions read, and
-    // the rate at which those runs' data was ingested: what the target is made of.
+    // A tier with enough runs to compact: the runs its next compaction reads, at most what
+    // one compaction takes, the mean size of its runs, and the rate at which its data was
+    // ingested, from the ingestion metadata of its sstables.
+    struct pending_tier {
+        size_t runs;
+        double run_size;
+        utils::rate<utils::units::bytes> ingestion;
+    };
+    // The tiers with enough runs to compact and the runs their next compactions read:
+    // what the target is made of.
     mutable size_t _eligible_tiers = 0;
     mutable size_t _eligible_runs = 0;
-    mutable utils::rate<utils::units::bytes> _pending_rate_from_sstables;
+    mutable std::vector<pending_tier> _pending_tiers;
 
     // URGENCY_FACTOR: the runs the eligible tiers hold over the runs they hold at the
     // threshold, _eligible_runs / (_eligible_tiers * threshold), times the read discount.
@@ -62,6 +70,11 @@ class incremental_backlog_tracker final : public compaction_backlog_tracker::imp
     // be compacted at an arbitrary rate.
     static constexpr std::chrono::minutes min_ingestion_span{10};
 
+    // Added to the refill period of every tier, so that a tier refilled within a fraction
+    // of a second, e.g. one of tiny runs while tiny sstables are being flushed, asks for no
+    // more than the bytes it holds per refill_tax.
+    static constexpr std::chrono::seconds refill_tax{1};
+
     struct inflight_component {
         int64_t total_bytes = 0;
         double contribution = 0;
@@ -79,7 +92,7 @@ class incremental_backlog_tracker final : public compaction_backlog_tracker::imp
         size_t max_runs_in_tier;
         size_t eligible_tiers;
         size_t eligible_runs;
-        utils::rate<utils::units::bytes> pending_rate_from_sstables;
+        std::vector<pending_tier> pending_tiers;
     };
 
     // Recalculates the cached fields if the sstables changed since.
@@ -96,20 +109,21 @@ public:
     incremental_backlog_tracker(incremental_compaction_strategy_options options);
 
     virtual double backlog(const compaction_backlog_source& src, const compaction_backlog_tracker::ongoing_writes& ow, const compaction_backlog_tracker::ongoing_compactions& oc) const override;
-    // The target is ingestion_rate * tiers * URGENCY_FACTOR, with tiers the ones holding
-    // at least min_threshold runs and URGENCY_FACTOR their runs over tiers * min_threshold
-    // times the read discount, i.e. ingestion_rate * runs / min_threshold * read_discount:
-    // the rate at which the compaction of each such tier ends by the time the tier has
-    // min_threshold new runs, i.e. the next one is due, insofar as the reads pay for the
-    // runs past the threshold. Every eligible tier asks for at least the ingestion rate,
-    // whatever the reads, and for more in proportion to the runs it holds past the
-    // threshold. A tier below the threshold has nothing to compact and asks for nothing.
-    // The tiers stand in for the write amplification: each is one more rewrite of what
-    // is ingested.
+    // The target is the sum, over the tiers holding at least min_threshold runs, of what
+    // each needs for its compaction to end by the time the tier has min_threshold new
+    // runs, i.e. the next one is due: runs * run_size over the tier's refill period,
+    // min_threshold * run_size / inflow + refill_tax, times the read discount, insofar as
+    // the reads pay for the runs past the threshold. The target is no lower than the
+    // ingestion rate while a tier is pending, whatever the reads. A tier below the
+    // threshold has nothing to compact and asks for nothing. The tiers stand in for the
+    // write amplification: each is one more rewrite of what is ingested.
     //
-    // ingestion_rate is the group's flushed bytes. When nothing was flushed within the
-    // rate window, e.g. after a restart, the rate at which the data of the pending tiers
-    // was ingested, from the ingestion metadata of their sstables, stands in.
+    // A tier's inflow is the group's flushed bytes when its runs are the size of the
+    // flushed sstables or larger, which every flushed byte passes through; a tier of
+    // smaller runs only receives the flushes of its size, and its inflow is the rate its
+    // data was ingested at, from the ingestion metadata of its sstables, no higher than
+    // the flushed bytes. When nothing was flushed within the rate window, e.g. after a
+    // restart, that rate stands in for every tier.
     virtual compaction_rates rates(const compaction_backlog_source& src) const override;
 
     // The replaced sstables are already reflected in the group's sstable set, so this
