@@ -89,10 +89,21 @@ struct compaction_rates {
     utils::rate<utils::units::bytes> target;
     // The bytes regular compaction compacted, from the group's stats.
     utils::rate<utils::units::bytes> achieved;
+    // What the target is made of, for the controller to tell when the work changes: the
+    // bytes flushed into the group, and the runs in its pending tiers over min_threshold,
+    // i.e. how many compactions' worth of runs wait. Left empty by a strategy with no
+    // model for the target.
+    utils::rate<utils::units::bytes> flushed;
+    double pending_runs = 0;
 
     // The rates of two groups together, e.g. of all the groups of a shard.
     friend compaction_rates operator+(const compaction_rates& a, const compaction_rates& b) noexcept {
-        return compaction_rates{.target = a.target + b.target, .achieved = a.achieved + b.achieved};
+        return compaction_rates{
+            .target = a.target + b.target,
+            .achieved = a.achieved + b.achieved,
+            .flushed = a.flushed + b.flushed,
+            .pending_runs = a.pending_runs + b.pending_runs,
+        };
     }
 };
 

@@ -210,6 +210,8 @@ compaction_rates incremental_backlog_tracker::rates(const compaction_backlog_sou
     return compaction_rates{
         .target = target,
         .achieved = stats.rates.compacted_bytes,
+        .flushed = flushed,
+        .pending_runs = _eligible_runs / threshold,
     };
 }
 
