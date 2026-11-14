@@ -230,7 +230,10 @@ public:
     // and raising holds off for hold_period, doubling with every consecutive raise that
     // didn't pay, up to max_hold_period. The hold ends early when the work changes, i.e.
     // the flush rate by half or the pending runs more than doubling, as the shares may pay
-    // then. Lowering is never held back.
+    // then. It also ends once the target is twice as far above achieved as when the hold
+    // began, whether compaction fell behind more work or achieves less on the same shares,
+    // e.g. once reads took the CPU: holding then would starve compaction. Lowering is never
+    // held back.
     //
     // The raise is judged over a whole window, and against a gain well above the noise:
     // achieved measured a window apart moves by 7% at the median and by 25% at p90, as
@@ -246,6 +249,8 @@ public:
         clock_type::time_point hold_until = clock_type::time_point::min();
         double hold_flushed = 0;
         double hold_pending_runs = 0;
+        // How far the target was above achieved when the hold began.
+        double hold_ratio = 0;
         unsigned failed_raises = 0;
     };
     static constexpr double verify_raise = 1.5;

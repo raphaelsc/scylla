@@ -5433,6 +5433,23 @@ BOOST_AUTO_TEST_CASE(compaction_controller_v2_verified_shares) {
     // The hold ends when the work changes, e.g. the flush rate doubles.
     BOOST_REQUIRE_GT(update(200, 100, 20), 100);
 
+    // The hold also ends once the target is twice as far above achieved as when it began,
+    // here 2: when compaction achieves half as much on the same shares, e.g. once reads took
+    // the CPU, or when the target doubles as runs pile up. Within the noise, it holds.
+    auto hold_at_anchor = [&] {
+        v = {};
+        shares = 100;
+        for (int i = 0; update(200, 100) != 100; i++) {
+            BOOST_REQUIRE_LT(i, 20);
+        }
+    };
+    hold_at_anchor();
+    BOOST_REQUIRE_EQUAL(update(200, 60), 100);
+    BOOST_REQUIRE_GT(update(200, 45), 100);
+    hold_at_anchor();
+    BOOST_REQUIRE_EQUAL(update(300, 100), 100);
+    BOOST_REQUIRE_GT(update(400, 100), 100);
+
     // A raise that pays is kept, and the next run of raises starts from it: with achieved
     // following the shares, they reach the maximum.
     controller::raise_verification paying;

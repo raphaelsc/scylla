@@ -685,7 +685,8 @@ float compaction_controller_v2::verified_shares(const config& cfg, raise_verific
     auto achieved = rates.achieved.per_second();
     auto flushed = rates.flushed.per_second();
     if (v.hold_until > now && ((v.hold_flushed > 0 && std::abs(flushed / v.hold_flushed - 1) > 0.5)
-            || rates.pending_runs >= 2 * v.hold_pending_runs + 1)) {
+            || rates.pending_runs >= 2 * v.hold_pending_runs + 1
+            || (v.hold_ratio > 0 && rates.target.per_second() > 0 && rates.target.per_second() >= 2 * v.hold_ratio * achieved))) {
         v.hold_until = clock_type::time_point::min();
     }
     // Lowering, or holding below the maximum, ends the run of raises.
@@ -720,6 +721,7 @@ float compaction_controller_v2::verified_shares(const config& cfg, raise_verific
     v.hold_until = now + std::min<clock_type::duration>(hold_period * (1 << std::min(v.failed_raises - 1, 8u)), max_hold_period);
     v.hold_flushed = flushed;
     v.hold_pending_runs = rates.pending_runs;
+    v.hold_ratio = achieved > 0 ? rates.target.per_second() / achieved : 0;
     v.start.reset();
     return anchor_shares;
 }
@@ -756,7 +758,10 @@ void compaction_controller_v2::adjust() {
         return;
     }
     // On the rates' logger, so that enabling it shows the decision with its inputs.
-    auto held_for = std::chrono::duration_cast<std::chrono::seconds>(std::max(_verification.hold_until - clock_type::now(), clock_type::duration::zero()));
+    // hold_until is the clock's minimum when nothing is held, which subtracting now from
+    // would overflow.
+    auto now = clock_type::now();
+    auto held_for = std::chrono::duration_cast<std::chrono::seconds>(_verification.hold_until > now ? _verification.hold_until - now : clock_type::duration::zero());
     compaction::compaction_rates_logger.debug("compaction controller v2: setting shares from {:.1f} to {:.1f}; "
             "target {:.0f} bytes/s over {:.0f}s, achieved {:.0f} bytes/s over {:.0f}s, target/achieved {:.2f}; "
             "raises from {:.1f} shares at {:.0f} bytes/s, {} in a row that didn't pay, held off for {}s",
