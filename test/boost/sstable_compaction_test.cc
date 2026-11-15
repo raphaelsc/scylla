@@ -5394,8 +5394,8 @@ BOOST_AUTO_TEST_CASE(compaction_controller_v2_next_shares) {
 
 // compaction_controller_v2 keeps a raise only if what compaction achieves follows it: a
 // run of raises that didn't lift achieved by more than verify_gain within an achieved window
-// of reaching verify_raise times its start is undone, and raising holds off until the hold
-// period passes or the work changes. Lowering is never held back.
+// of reaching verify_raise times its start is undone, and raising holds off for the hold
+// period, unless compaction falls twice as far behind meanwhile. Lowering is never held back.
 BOOST_AUTO_TEST_CASE(compaction_controller_v2_verified_shares) {
     using rate = utils::rate<utils::units::bytes>;
     using namespace std::chrono_literals;
@@ -5404,10 +5404,8 @@ BOOST_AUTO_TEST_CASE(compaction_controller_v2_verified_shares) {
     controller::raise_verification v;
     auto now = controller::clock_type::now();
     float shares = 100;
-    auto update = [&] (double target, double achieved, double flushed = 10, double pending_runs = 2) {
-        shares = controller::verified_shares(cfg, v, shares, {
-            .target = rate(target, 300s), .achieved = rate(achieved, 300s),
-            .flushed = rate(flushed, 1800s), .pending_runs = pending_runs}, 1000, now);
+    auto update = [&] (double target, double achieved) {
+        shares = controller::verified_shares(cfg, v, shares, {.target = rate(target, 300s), .achieved = rate(achieved, 300s)}, 1000, now);
         now += 1min;
         return shares;
     };
@@ -5430,8 +5428,10 @@ BOOST_AUTO_TEST_CASE(compaction_controller_v2_verified_shares) {
     BOOST_REQUIRE_LT(update(50, 100), 100);
     shares = 100;
     BOOST_REQUIRE_EQUAL(update(200, 100), 100);
-    // The hold ends when the work changes, e.g. the flush rate doubles.
-    BOOST_REQUIRE_GT(update(200, 100, 20), 100);
+    // A minute with nothing pending, whose rates are empty, doesn't end the hold.
+    BOOST_REQUIRE_LT(update(0, 0), 100);
+    shares = 100;
+    BOOST_REQUIRE_EQUAL(update(200, 100), 100);
 
     // The hold also ends once the target is twice as far above achieved as when it began,
     // here 2: when compaction achieves half as much on the same shares, e.g. once reads took
@@ -5455,32 +5455,28 @@ BOOST_AUTO_TEST_CASE(compaction_controller_v2_verified_shares) {
     controller::raise_verification paying;
     float s = 100;
     for (int i = 0; i < 120 && s < 1000; i++) {
-        s = controller::verified_shares(cfg, paying, s, {
-            .target = rate(2 * s, 300s), .achieved = rate(s, 300s),
-            .flushed = rate(10, 1800s), .pending_runs = 2}, 1000, now);
+        s = controller::verified_shares(cfg, paying, s, {.target = rate(2 * s, 300s), .achieved = rate(s, 300s)}, 1000, now);
         now += 1min;
     }
     BOOST_REQUIRE_EQUAL(s, 1000);
-    BOOST_REQUIRE_EQUAL(paying.failed_raises, 0);
 
-    // Every raise in a row that doesn't pay doubles the hold.
+    // Every raise that doesn't pay holds raising off for the same period, however many
+    // failed before it.
     controller::raise_verification failing;
     s = 100;
     std::vector<controller::clock_type::duration> holds;
     for (int i = 0; i < 300 && holds.size() < 3; i++) {
-        auto before = failing.failed_raises;
-        s = controller::verified_shares(cfg, failing, s, {
-            .target = rate(200, 300s), .achieved = rate(100, 300s),
-            .flushed = rate(10, 1800s), .pending_runs = 2}, 1000, now);
-        if (failing.failed_raises > before) {
+        auto held = failing.hold_until > now;
+        s = controller::verified_shares(cfg, failing, s, {.target = rate(200, 300s), .achieved = rate(100, 300s)}, 1000, now);
+        if (!held && failing.hold_until > now) {
             holds.push_back(failing.hold_until - now);
         }
         now += 1min;
     }
     BOOST_REQUIRE_EQUAL(holds.size(), 3);
-    BOOST_REQUIRE(holds[0] == 30min);
-    BOOST_REQUIRE(holds[1] == 60min);
-    BOOST_REQUIRE(holds[2] == 120min);
+    for (auto hold : holds) {
+        BOOST_REQUIRE(hold == controller::hold_period);
+    }
 }
 
 // The settings of compaction_controller_v2 replace the defaults, and are rejected out of range.

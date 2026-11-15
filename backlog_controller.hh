@@ -227,13 +227,15 @@ public:
     // been at least verify_raise times the anchor's for a whole achieved window, achieved
     // must be more than verify_gain above the anchor's: then the raise paid, and the
     // current shares become the next anchor. Otherwise the shares go back to the anchor's
-    // and raising holds off for hold_period, doubling with every consecutive raise that
-    // didn't pay, up to max_hold_period. The hold ends early when the work changes, i.e.
-    // the flush rate by half or the pending runs more than doubling, as the shares may pay
-    // then. It also ends once the target is twice as far above achieved as when the hold
-    // began, whether compaction fell behind more work or achieves less on the same shares,
-    // e.g. once reads took the CPU: holding then would starve compaction. Lowering is never
-    // held back.
+    // and raising holds off for hold_period. The hold ends early once the target is twice
+    // as far above achieved as when the hold began, whether compaction fell behind more work
+    // or achieves less on the same shares, e.g. once reads took the CPU: holding then would
+    // starve compaction. Lowering is never held back.
+    //
+    // A raise that didn't pay says only that the shares didn't buy compaction then: the disk
+    // may have been the limit, or too few compactions were running, or reads may not have
+    // taken the CPU yet. That can change within the hour, so every hold is the same length,
+    // whatever came before it.
     //
     // The raise is judged over a whole window, and against a gain well above the noise:
     // achieved measured a window apart moves by 7% at the median and by 25% at p90, as
@@ -247,16 +249,12 @@ public:
         // When the shares reached verify_raise times the anchor's.
         std::optional<clock_type::time_point> raised_at;
         clock_type::time_point hold_until = clock_type::time_point::min();
-        double hold_flushed = 0;
-        double hold_pending_runs = 0;
         // How far the target was above achieved when the hold began.
         double hold_ratio = 0;
-        unsigned failed_raises = 0;
     };
     static constexpr double verify_raise = 1.5;
     static constexpr double verify_gain = 0.25;
     static constexpr std::chrono::minutes hold_period{30};
-    static constexpr std::chrono::hours max_hold_period{4};
 private:
     config _config;
     scheduling_group _scheduling_group;
