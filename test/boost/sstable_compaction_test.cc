@@ -5364,13 +5364,16 @@ SEASTAR_TEST_CASE(incremental_backlog_tracker_rates_test) {
 }
 
 // compaction_controller_v2 scales the shares by (target / achieved)^alpha, by up to x2 either
-// way, within the bounds, and lowers them while nothing is pending.
+// way, within the bounds, and lowers them while nothing is pending. It raises them only while
+// compaction is behind over both the achieved window and the rate window, and lowers them only
+// while it is ahead over both, stepping to the nearer of the two.
 BOOST_AUTO_TEST_CASE(compaction_controller_v2_next_shares) {
     using rate = utils::rate<utils::units::bytes>;
     using namespace std::chrono_literals;
     const compaction_controller_v2::config cfg;
-    auto next = [&cfg] (float shares, double target, double achieved, float max_shares = 1000) {
-        return compaction_controller_v2::next_shares(cfg, shares, {.target = rate(target, 10s), .achieved = rate(achieved, 10s)}, max_shares);
+    auto next = [&cfg] (float shares, double target, double achieved, std::optional<double> achieved_long = {}, float max_shares = 1000) {
+        return compaction_controller_v2::next_shares(cfg, shares, {.target = rate(target, 10s), .achieved = rate(achieved, 10s),
+                .achieved_long = rate(achieved_long.value_or(achieved), 10s)}, max_shares);
     };
     const auto alpha = cfg.alpha;
     // Behind the target, or ahead of it.
@@ -5378,105 +5381,27 @@ BOOST_AUTO_TEST_CASE(compaction_controller_v2_next_shares) {
     BOOST_REQUIRE_CLOSE(next(200, 1000, 1500), 200 * std::pow(1 / 1.5, alpha), 1e-4);
     // Keeping up.
     BOOST_REQUIRE_CLOSE(next(200, 1000, 1000), 200, 1e-4);
-    // Far behind or far ahead, or nothing achieved or targeted.
+    // Far behind or far ahead.
     BOOST_REQUIRE_CLOSE(next(200, 1e9, 1), 400, 1e-4);
     BOOST_REQUIRE_CLOSE(next(200, 1, 1e9), 100, 1e-4);
-    BOOST_REQUIRE_CLOSE(next(200, 1000, 0), 400, 1e-4);
+    // Nothing running: the shares have nothing to speed up.
+    BOOST_REQUIRE_CLOSE(next(200, 1000, 0), 200, 1e-4);
+    BOOST_REQUIRE_CLOSE(next(200, 1000, 0, 500), 200, 1e-4);
+    // Nothing pending, whatever was compacted lately: the shares come down.
     BOOST_REQUIRE_CLOSE(next(200, 0, 1000), 100, 1e-4);
-    // Nothing pending, and nothing compacted lately either: the shares come down just the same.
     BOOST_REQUIRE_CLOSE(next(200, 0, 0), 100, 1e-4);
+    // A lull after keeping up over the rate window, or catching up on what compaction fell
+    // behind by over it: the shares stay.
+    BOOST_REQUIRE_CLOSE(next(200, 1000, 500, 1500), 200, 1e-4);
+    BOOST_REQUIRE_CLOSE(next(200, 1000, 1500, 500), 200, 1e-4);
+    // Behind or ahead over both: the step is to the nearer.
+    BOOST_REQUIRE_CLOSE(next(200, 2000, 500, 1000), 200 * std::pow(2, alpha), 1e-4);
+    BOOST_REQUIRE_CLOSE(next(200, 500, 2000, 1000), 200 * std::pow(0.5, alpha), 1e-4);
     // Within the bounds.
-    BOOST_REQUIRE_CLOSE(next(800, 1000, 0), 1000, 1e-4);
-    BOOST_REQUIRE_CLOSE(next(800, 1000, 0, 1200), 1200, 1e-4);
+    BOOST_REQUIRE_CLOSE(next(800, 1e9, 1), 1000, 1e-4);
+    BOOST_REQUIRE_CLOSE(next(800, 1e9, 1, {}, 1200), 1200, 1e-4);
     BOOST_REQUIRE_CLOSE(next(60, 0, 1000), compaction_controller_v2::min_shares, 1e-4);
     BOOST_REQUIRE_CLOSE(next(60, 0, 0), compaction_controller_v2::min_shares, 1e-4);
-}
-
-// compaction_controller_v2 keeps a raise only if what compaction achieves follows it: a
-// run of raises that didn't lift achieved by more than verify_gain within an achieved window
-// of reaching verify_raise times its start is undone, and raising holds off for the hold
-// period, unless compaction falls twice as far behind meanwhile. Lowering is never held back.
-BOOST_AUTO_TEST_CASE(compaction_controller_v2_verified_shares) {
-    using rate = utils::rate<utils::units::bytes>;
-    using namespace std::chrono_literals;
-    using controller = compaction_controller_v2;
-    const controller::config cfg;
-    controller::raise_verification v;
-    auto now = controller::clock_type::now();
-    float shares = 100;
-    auto update = [&] (double target, double achieved) {
-        shares = controller::verified_shares(cfg, v, shares, {.target = rate(target, 300s), .achieved = rate(achieved, 300s)}, 1000, now);
-        now += 1min;
-        return shares;
-    };
-
-    // The target is twice what compaction achieves, whatever the shares, e.g. on a node whose
-    // disk is the limit: the shares rise, then go back to where the raises started.
-    float highest = shares;
-    int updates = 0;
-    while (update(200, 100) != 100) {
-        highest = std::max(highest, shares);
-        BOOST_REQUIRE_LT(++updates, 20);
-    }
-    BOOST_REQUIRE_GE(highest, 150);
-    BOOST_REQUIRE_LT(highest, 1000);
-    // ... and stay there while raising holds off, though the target is still out of reach.
-    for (int i = 0; i < 10; i++) {
-        BOOST_REQUIRE_EQUAL(update(200, 100), 100);
-    }
-    // Lowering is never held back.
-    BOOST_REQUIRE_LT(update(50, 100), 100);
-    shares = 100;
-    BOOST_REQUIRE_EQUAL(update(200, 100), 100);
-    // A minute with nothing pending, whose rates are empty, doesn't end the hold.
-    BOOST_REQUIRE_LT(update(0, 0), 100);
-    shares = 100;
-    BOOST_REQUIRE_EQUAL(update(200, 100), 100);
-
-    // The hold also ends once the target is twice as far above achieved as when it began,
-    // here 2: when compaction achieves half as much on the same shares, e.g. once reads took
-    // the CPU, or when the target doubles as runs pile up. Within the noise, it holds.
-    auto hold_at_anchor = [&] {
-        v = {};
-        shares = 100;
-        for (int i = 0; update(200, 100) != 100; i++) {
-            BOOST_REQUIRE_LT(i, 20);
-        }
-    };
-    hold_at_anchor();
-    BOOST_REQUIRE_EQUAL(update(200, 60), 100);
-    BOOST_REQUIRE_GT(update(200, 45), 100);
-    hold_at_anchor();
-    BOOST_REQUIRE_EQUAL(update(300, 100), 100);
-    BOOST_REQUIRE_GT(update(400, 100), 100);
-
-    // A raise that pays is kept, and the next run of raises starts from it: with achieved
-    // following the shares, they reach the maximum.
-    controller::raise_verification paying;
-    float s = 100;
-    for (int i = 0; i < 120 && s < 1000; i++) {
-        s = controller::verified_shares(cfg, paying, s, {.target = rate(2 * s, 300s), .achieved = rate(s, 300s)}, 1000, now);
-        now += 1min;
-    }
-    BOOST_REQUIRE_EQUAL(s, 1000);
-
-    // Every raise that doesn't pay holds raising off for the same period, however many
-    // failed before it.
-    controller::raise_verification failing;
-    s = 100;
-    std::vector<controller::clock_type::duration> holds;
-    for (int i = 0; i < 300 && holds.size() < 3; i++) {
-        auto held = failing.hold_until > now;
-        s = controller::verified_shares(cfg, failing, s, {.target = rate(200, 300s), .achieved = rate(100, 300s)}, 1000, now);
-        if (!held && failing.hold_until > now) {
-            holds.push_back(failing.hold_until - now);
-        }
-        now += 1min;
-    }
-    BOOST_REQUIRE_EQUAL(holds.size(), 3);
-    for (auto hold : holds) {
-        BOOST_REQUIRE(hold == controller::hold_period);
-    }
 }
 
 // The settings of compaction_controller_v2 replace the defaults, and are rejected out of range.
@@ -5486,7 +5411,8 @@ BOOST_AUTO_TEST_CASE(compaction_controller_v2_config) {
     const compaction_controller_v2::config cfg{.alpha = 1, .max_step = 4};
     cfg.validate();
     auto next = [&cfg] (float shares, double target, double achieved) {
-        return compaction_controller_v2::next_shares(cfg, shares, {.target = rate(target, 10s), .achieved = rate(achieved, 10s)}, 1000);
+        return compaction_controller_v2::next_shares(cfg, shares, {.target = rate(target, 10s), .achieved = rate(achieved, 10s),
+                .achieved_long = rate(achieved, 10s)}, 1000);
     };
     BOOST_REQUIRE_CLOSE(next(100, 3000, 1000), 300, 1e-4);
     BOOST_REQUIRE_CLOSE(next(100, 1e9, 1), 400, 1e-4);

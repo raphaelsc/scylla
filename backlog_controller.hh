@@ -186,10 +186,12 @@ public:
 // alpha and the step limit keep each update to a part of the way, as the rates are
 // averaged over minutes and respond slowly to the shares.
 //
-// A raise is kept only if it pays: shares that stopped buying compaction, e.g. on a
-// node whose disk is the limit, where compaction gets the same leftover whatever its
-// shares, would otherwise climb to the maximum on a target compaction can't reach and
-// only push the reads back in the I/O queue. See raise_verification.
+// What compaction achieves is taken over two windows: the achieved window, what it
+// delivers now, and the rate window the target is based on, what it delivered over the
+// same time. The shares are raised only while compaction is behind over both, and
+// lowered only while it is ahead over both. When they disagree, they stay: a lull after
+// keeping up over the rate window isn't falling behind, and catching up for a few
+// minutes doesn't repay what compaction fell behind by over it.
 class compaction_controller_v2 final : public compaction_controller {
 public:
     using scheduling_group = seastar::scheduling_group;
@@ -220,41 +222,6 @@ public:
         void validate() const;
     };
 
-    using clock_type = seastar::lowres_clock;
-
-    // Raises are made as next_shares says, then verified. A run of raises starts from an
-    // anchor, the shares and what compaction achieved at its start. Once the shares have
-    // been at least verify_raise times the anchor's for a whole achieved window, achieved
-    // must be more than verify_gain above the anchor's: then the raise paid, and the
-    // current shares become the next anchor. Otherwise the shares go back to the anchor's
-    // and raising holds off for hold_period. The hold ends early once the target is twice
-    // as far above achieved as when the hold began, whether compaction fell behind more work
-    // or achieves less on the same shares, e.g. once reads took the CPU: holding then would
-    // starve compaction. Lowering is never held back.
-    //
-    // A raise that didn't pay says only that the shares didn't buy compaction then: the disk
-    // may have been the limit, or too few compactions were running, or reads may not have
-    // taken the CPU yet. That can change within the hour, so every hold is the same length,
-    // whatever came before it.
-    //
-    // The raise is judged over a whole window, and against a gain well above the noise:
-    // achieved measured a window apart moves by 7% at the median and by 25% at p90, as
-    // compactions start and end, so a single update's raise can't be told from noise.
-    struct raise_verification {
-        struct anchor {
-            float shares;
-            double achieved;
-        };
-        std::optional<anchor> start;
-        // When the shares reached verify_raise times the anchor's.
-        std::optional<clock_type::time_point> raised_at;
-        clock_type::time_point hold_until = clock_type::time_point::min();
-        // How far the target was above achieved when the hold began.
-        double hold_ratio = 0;
-    };
-    static constexpr double verify_raise = 1.5;
-    static constexpr double verify_gain = 0.25;
-    static constexpr std::chrono::minutes hold_period{30};
 private:
     config _config;
     scheduling_group _scheduling_group;
@@ -270,7 +237,6 @@ private:
     float _shares = min_shares;
     // The rates at the last update.
     compaction::compaction_rates _last_rates;
-    raise_verification _verification;
     dry_run _dry_run;
     // A dry run logs its updates at most this often, so as not to flood the logs.
     seastar::logger::rate_limit _dry_run_log_limit{std::chrono::seconds(30)};
@@ -295,12 +261,10 @@ public:
     }
 
     // The shares after an update from `shares`, given the rates. A target above what
-    // compaction achieves raises them, a target below lowers them. With no target, i.e.
-    // nothing pending, they are lowered whatever compaction achieved lately: the shares
-    // only matter for compaction that competes for CPU, and there is none to come.
+    // compaction achieves over both windows raises them, by the step to the nearer of the
+    // two; a target below both lowers them, by the step to the nearer. With no target, i.e.
+    // nothing pending, they are lowered whatever compaction achieved lately; with nothing
+    // compacted over the achieved window, i.e. nothing running, they stay. The shares only
+    // matter for compaction that competes for CPU.
     static float next_shares(const config& cfg, float shares, const compaction::compaction_rates& rates, float max_shares);
-    // The shares after an update from `shares` at `now`, the ones next_shares gives unless
-    // a raise didn't pay or raising is held off: see raise_verification, which it updates.
-    static float verified_shares(const config& cfg, raise_verification& v, float shares, const compaction::compaction_rates& rates,
-            float max_shares, clock_type::time_point now);
 };

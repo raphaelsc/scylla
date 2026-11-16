@@ -668,57 +668,23 @@ void compaction_controller_v2::set_max_shares(float max_shares) {
 float compaction_controller_v2::next_shares(const config& cfg, float shares, const compaction::compaction_rates& rates, float max_shares) {
     auto target = rates.target.per_second();
     auto achieved = rates.achieved.per_second();
-    double step;
-    if (achieved > 0) {
-        step = std::clamp(std::pow(target / achieved, cfg.alpha), 1 / cfg.max_step, cfg.max_step);
-    } else if (target > 0) {
-        step = cfg.max_step;
-    } else {
+    auto achieved_long = rates.achieved_long.per_second();
+    double step = 1;
+    if (target <= 0) {
+        // Nothing pending.
         step = 1 / cfg.max_step;
+    } else if (achieved <= 0) {
+        // Nothing running, for the shares to speed up.
+        step = 1;
+    } else if (target > std::max(achieved, achieved_long)) {
+        // Behind now and over the rate window.
+        step = std::min(std::pow(target / std::max(achieved, achieved_long), cfg.alpha), cfg.max_step);
+    } else if (target < std::min(achieved, achieved_long)) {
+        // Ahead now and over the rate window.
+        step = std::max(std::pow(target / std::min(achieved, achieved_long), cfg.alpha), 1 / cfg.max_step);
     }
+    // Otherwise the windows disagree, and the shares stay.
     return std::clamp(float(shares * step), min_shares, max_shares);
-}
-
-float compaction_controller_v2::verified_shares(const config& cfg, raise_verification& v, float shares, const compaction::compaction_rates& rates,
-        float max_shares, clock_type::time_point now) {
-    auto next = next_shares(cfg, shares, rates, max_shares);
-    auto target = rates.target.per_second();
-    auto achieved = rates.achieved.per_second();
-    // With nothing pending the target is 0, and says nothing about the hold.
-    if (v.hold_until > now && v.hold_ratio > 0 && target > 0 && target >= 2 * v.hold_ratio * achieved) {
-        v.hold_until = clock_type::time_point::min();
-    }
-    // Lowering, or holding below the maximum, ends the run of raises.
-    if (next <= shares && !(shares >= max_shares && next >= shares)) {
-        v.start.reset();
-        v.raised_at.reset();
-        return next;
-    }
-    if (v.hold_until > now) {
-        return shares;
-    }
-    if (!v.start) {
-        v.start = raise_verification::anchor{shares, achieved};
-    }
-    if (shares >= max_shares) {
-        return shares;
-    }
-    if (shares >= verify_raise * v.start->shares && !v.raised_at) {
-        v.raised_at = now;
-    }
-    if (!v.raised_at || now - *v.raised_at < cfg.achieved_window) {
-        return next;
-    }
-    v.raised_at.reset();
-    if (achieved > v.start->achieved * (1 + verify_gain) || (v.start->achieved <= 0 && achieved > 0)) {
-        v.start = raise_verification::anchor{shares, achieved};
-        return next;
-    }
-    auto anchor_shares = v.start->shares;
-    v.hold_until = now + hold_period;
-    v.hold_ratio = achieved > 0 ? target / achieved : 0;
-    v.start.reset();
-    return anchor_shares;
 }
 
 void compaction_controller_v2::adjust() {
@@ -735,7 +701,7 @@ void compaction_controller_v2::adjust() {
         // metrics show what the controller sees.
         rates = _current_rates();
         _last_rates = rates;
-        _shares = verified_shares(_config, _verification, _shares, rates, _max_shares, clock_type::now());
+        _shares = next_shares(_config, _shares, rates, _max_shares);
     } catch (...) {
         // The shares are left as they are.
         dblog.warn("Failed to compute the compaction rates, leaving compaction shares at {}: {}", _shares, std::current_exception());
@@ -746,25 +712,20 @@ void compaction_controller_v2::adjust() {
     if (_dry_run) {
         dblog.log(log_level::info, _dry_run_log_limit,
                 "compaction controller v2 dry run: would set shares from {:.1f} to {:.1f}, while they are {:.1f}; "
-                "target {:.0f} bytes/s over {:.0f}s, achieved {:.0f} bytes/s over {:.0f}s, target/achieved {:.2f}",
+                "target {:.0f} bytes/s over {:.0f}s, achieved {:.0f} bytes/s over {:.0f}s and {:.0f} bytes/s over {:.0f}s, target/achieved {:.2f}",
                 previous_shares, _shares, _scheduling_group.get_shares(),
                 rates.target.per_second(), rates.target.interval().count(),
-                rates.achieved.per_second(), rates.achieved.interval().count(), ratio);
+                rates.achieved.per_second(), rates.achieved.interval().count(),
+                rates.achieved_long.per_second(), rates.achieved_long.interval().count(), ratio);
         return;
     }
     // On the rates' logger, so that enabling it shows the decision with its inputs.
-    // hold_until is the clock's minimum when nothing is held, which subtracting now from
-    // would overflow.
-    auto now = clock_type::now();
-    auto held_for = std::chrono::duration_cast<std::chrono::seconds>(_verification.hold_until > now ? _verification.hold_until - now : clock_type::duration::zero());
     compaction::compaction_rates_logger.debug("compaction controller v2: setting shares from {:.1f} to {:.1f}; "
-            "target {:.0f} bytes/s over {:.0f}s, achieved {:.0f} bytes/s over {:.0f}s, target/achieved {:.2f}; "
-            "raises from {:.1f} shares at {:.0f} bytes/s, held off for {}s",
+            "target {:.0f} bytes/s over {:.0f}s, achieved {:.0f} bytes/s over {:.0f}s and {:.0f} bytes/s over {:.0f}s, target/achieved {:.2f}",
             previous_shares, _shares,
             rates.target.per_second(), rates.target.interval().count(),
-            rates.achieved.per_second(), rates.achieved.interval().count(), ratio,
-            _verification.start ? _verification.start->shares : 0.0f, _verification.start ? _verification.start->achieved : 0.0,
-            held_for.count());
+            rates.achieved.per_second(), rates.achieved.interval().count(),
+            rates.achieved_long.per_second(), rates.achieved_long.interval().count(), ratio);
     _scheduling_group.set_shares(_shares);
 }
 
