@@ -5263,7 +5263,7 @@ SEASTAR_TEST_CASE(incremental_backlog_tracker_rates_test) {
         // What a tier of the given runs needs from the given inflow: the threshold's worth of
         // runs plus a quarter of the surplus, over its refill period plus the 1s tax.
         auto needed = [] (double runs, double run_size, double inflow) {
-            auto due_runs = 4 + (runs - 4) / compaction::incremental_backlog_tracker::repayment_refills;
+            auto due_runs = 4 + (runs - 4) / 4;
             return due_runs * run_size / (4 * run_size / inflow + 1);
         };
         auto flushing = [&] (double flushed_per_second, double sstables_per_read = 100, double mean_flush_size = 100 * MB) {
