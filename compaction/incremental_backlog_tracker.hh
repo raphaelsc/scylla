@@ -77,8 +77,11 @@ class incremental_backlog_tracker final : public compaction_backlog_tracker::imp
     // not as fast as the tier fills. The tier never asks for less than its inflow, so the
     // surplus shrinks every refill; asked to clear it within a single refill, a tier of 16
     // runs at threshold 4 asked for four times its inflow, and a few such tiers more than
-    // compaction could do at any shares.
-    static constexpr double repayment_refills = 4;
+    // compaction could do at any shares. The longer the repayment, though, the larger the
+    // surplus a tier settles at before it asks for what compaction does: in the simulator,
+    // over 4 refills, bulk's runs and moderate's sstables per read grew well past what 1
+    // left; 2 halves the ask of a tier of 16 runs at threshold 4 and about half the growth.
+    static constexpr double repayment_refills = 2;
 
     // Added to the refill period of every tier, so that a tier refilled within a fraction
     // of a second, e.g. one of tiny runs while tiny sstables are being flushed, asks for no

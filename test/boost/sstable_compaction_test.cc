@@ -5261,9 +5261,9 @@ SEASTAR_TEST_CASE(incremental_backlog_tracker_rates_test) {
             };
         };
         // What a tier of the given runs needs from the given inflow: the threshold's worth of
-        // runs plus a quarter of the surplus, over its refill period plus the 1s tax.
+        // runs plus half the surplus, over its refill period plus the 1s tax.
         auto needed = [] (double runs, double run_size, double inflow) {
-            auto due_runs = 4 + (runs - 4) / 4;
+            auto due_runs = 4 + (runs - 4) / 2;
             return due_runs * run_size / (4 * run_size / inflow + 1);
         };
         auto flushing = [&] (double flushed_per_second, double sstables_per_read = 100, double mean_flush_size = 100 * MB) {
@@ -5302,7 +5302,7 @@ SEASTAR_TEST_CASE(incremental_backlog_tracker_rates_test) {
         BOOST_REQUIRE(ready.target.interval() == 600s);
 
         // Two such tiers ask for twice that, and a tier with more runs than the threshold for a
-        // quarter of the surplus on top, up to the runs one compaction takes.
+        // half the surplus on top, up to the runs one compaction takes.
         auto two_ready = rates_of(make_source(tiers({tier(4, 400 * MB), tier(4, 100 * MB)}), flushing(10 * MB)));
         BOOST_REQUIRE_CLOSE(two_ready.target.per_second(), needed(4, 400 * MB, 10 * MB) + needed(4, 100 * MB, 10 * MB), 1e-6);
         auto overdue = rates_of(make_source(tiers({tier(5, 100 * MB)}), flushing(10 * MB)));
@@ -5310,8 +5310,8 @@ SEASTAR_TEST_CASE(incremental_backlog_tracker_rates_test) {
         auto beyond_max_threshold = rates_of(make_source(tiers({tier(8, 100 * MB)}), flushing(10 * MB)));
         BOOST_REQUIRE_CLOSE(beyond_max_threshold.target.per_second(), needed(6, 100 * MB, 10 * MB), 1e-6);
 
-        // Four tiers of eight runs ask for the threshold's worth of each plus a quarter of the
-        // surplus one compaction takes, about 4 x 4.5 / 4 times the ingestion rate, insofar as the reads pay for the surplus: a point read touching
+        // Four tiers of eight runs ask for the threshold's worth of each plus half the surplus
+        // one compaction takes, about 4 x 5 / 4 times the ingestion rate, insofar as the reads pay for the surplus: a point read touching
         // threshold sstables, 4, pays for a tier's worth of runs that should have been merged
         // and leaves the target as is; one touching fewer scales it down in proportion, to
         // 1 / threshold at the least, whether it touches one sstable or there are no reads at all.
@@ -5354,9 +5354,9 @@ SEASTAR_TEST_CASE(incremental_backlog_tracker_rates_test) {
         auto gap = rates_of(make_source(tiers({tier(4, 1600 * MB), tier(4, 100 * MB)}), merging(0.5)));
         BOOST_REQUIRE_CLOSE(gap.target.per_second(), needed(4, 1600 * MB, 5 * MB) + needed(4, 100 * MB, 10 * MB), 1e-6);
         // A tier of runs the size of the flushes gets the whole flush rate, but its refill is
-        // taxed with a second: 6 runs of 4 MB refilled every 16 s ask for 4.5 x 4 MB over 17 s, not 16.
+        // taxed with a second: 6 runs of 4 MB refilled every 16 s ask for 5 x 4 MB over 17 s, not 16.
         auto taxed = rates_of(make_source(tier(6, 4 * MB), flushing(1 * MB, 100, 4 * MB)));
-        BOOST_REQUIRE_CLOSE(taxed.target.per_second(), 4.5 * 4 * MB / 17, 1e-6);
+        BOOST_REQUIRE_CLOSE(taxed.target.per_second(), 5 * 4 * MB / 17, 1e-6);
 
         // When nothing was flushed lately, e.g. after a restart, the rate the pending tiers' data
         // was ingested at stands in, e.g. 4 runs ingested over 40 minutes.
