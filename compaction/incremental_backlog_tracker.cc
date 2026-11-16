@@ -5,6 +5,7 @@
  */
 
 #include <algorithm>
+#include <iterator>
 
 #include "incremental_backlog_tracker.hh"
 #include "compaction.hh"
@@ -208,6 +209,9 @@ compaction_rates incremental_backlog_tracker::rates(const compaction_backlog_sou
     const auto& merged = stats.rates.completed_input_bytes;
     const double kept = merged.amount() > 0 ? std::clamp(stats.rates.completed_output_bytes.amount() / merged.amount(), 0.0, 1.0) : 1.0;
     utils::rate<utils::units::bytes> needed;
+    // Each pending tier's runs, mean run size, tiers below it, inflow and need, for the log.
+    const bool log_tiers = compaction_rates_logger.is_enabled(seastar::log_level::debug);
+    std::string tiers_log;
     for (const auto& tier : _pending_tiers) {
         auto inflow = tier.ingestion;
         if (flushing) {
@@ -219,13 +223,17 @@ compaction_rates incremental_backlog_tracker::rates(const compaction_backlog_sou
                 inflow = inflow * std::pow(kept, tier.tiers_below);
             }
         }
-        if (inflow.per_second() <= 0) {
-            continue;
+        double per_second = 0;
+        if (inflow.per_second() > 0) {
+            auto refill = threshold * tier.run_size / inflow.per_second() + std::chrono::duration<double>(refill_tax).count();
+            auto due_runs = threshold + (tier.runs - threshold) / repayment_refills;
+            per_second = due_runs * tier.run_size / refill * discount;
+            needed = needed + utils::rate<utils::units::bytes>(per_second * inflow.interval().count(), inflow.interval());
         }
-        auto refill = threshold * tier.run_size / inflow.per_second() + std::chrono::duration<double>(refill_tax).count();
-        auto due_runs = threshold + (tier.runs - threshold) / repayment_refills;
-        auto per_second = due_runs * tier.run_size / refill * discount;
-        needed = needed + utils::rate<utils::units::bytes>(per_second * inflow.interval().count(), inflow.interval());
+        if (log_tiers) {
+            fmt::format_to(std::back_inserter(tiers_log), "{}{} runs of {:.0f} B, {} tiers below, inflow {:.0f} B/s, needed {:.0f} B/s",
+                    tiers_log.empty() ? "" : "; ", tier.runs, tier.run_size, tier.tiers_below, inflow.per_second(), per_second);
+        }
     }
     auto target = needed;
     if (flushing) {
@@ -234,12 +242,15 @@ compaction_rates incremental_backlog_tracker::rates(const compaction_backlog_sou
 
     compaction_rates_logger.debug("{}.{}: flushed {:.0f} B/s over {}s, {} runs in {} pending tiers of {} tiers ({} runs, {} at most in a tier), threshold {}, "
             "point reads {:.1f}/s touching {:.2f} sstables over {}s, read discount {:.2f}, urgency {:.2f}, "
-            "needed by the pending tiers {:.0f} B/s over {}s, target {:.0f} B/s, achieved {:.0f} B/s over {}s",
+            "needed by the pending tiers {:.0f} B/s over {}s, target {:.0f} B/s, achieved {:.0f} B/s over {}s and {:.0f} B/s over {}s, "
+            "merges kept {:.2f} of {:.0f} bytes read over {}s, pending tiers [{}]",
             src.schema()->ks_name(), src.schema()->cf_name(), stats.rates.flushed_bytes.per_second(), stats.rates.flushed_bytes.interval().count(),
             _eligible_runs, _eligible_tiers, _tiers, _runs, _max_runs_in_tier, threshold,
             stats.read_amplification.point_reads.per_second(), sstables_per_read, stats.read_amplification.point_reads.interval().count(), discount, urgency,
             needed.per_second(), needed.interval().count(), target.per_second(),
-            stats.rates.compacted_bytes.per_second(), stats.rates.compacted_bytes.interval().count());
+            stats.rates.compacted_bytes.per_second(), stats.rates.compacted_bytes.interval().count(),
+            stats.rates.compacted_bytes_long.per_second(), stats.rates.compacted_bytes_long.interval().count(),
+            kept, merged.amount(), merged.interval().count(), tiers_log);
     return compaction_rates{
         .target = target,
         .achieved = stats.rates.compacted_bytes,
