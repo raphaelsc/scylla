@@ -165,8 +165,10 @@ compaction_rates incremental_backlog_tracker::rates(const compaction_backlog_sou
     // the write amplification as it stands, each one more rewrite of what is ingested,
     // rather than an estimate of it from the size of the table. A tier below the threshold
     // has nothing to compact and asks for nothing, so a table whose tree is in shape has a
-    // target of 0, and a tier holding more than threshold runs asks for the surplus to be
-    // gone by its next deadline.
+    // target of 0. A tier holding more than threshold runs asks for a repayment_refills'th
+    // of the surplus on top, so that it shrinks by that much every refill:
+    //
+    //     (threshold + (r - threshold) / repayment_refills) * S / (threshold * S / inflow + refill_tax)
     //
     // Every flushed byte reaches the tier whose runs are the size of the flushed sstables,
     // i.e. no smaller than bucket_low times their mean size, as ICS tiers them, so its
@@ -221,7 +223,8 @@ compaction_rates incremental_backlog_tracker::rates(const compaction_backlog_sou
             continue;
         }
         auto refill = threshold * tier.run_size / inflow.per_second() + std::chrono::duration<double>(refill_tax).count();
-        auto per_second = tier.runs * tier.run_size / refill * discount;
+        auto due_runs = threshold + (tier.runs - threshold) / repayment_refills;
+        auto per_second = due_runs * tier.run_size / refill * discount;
         needed = needed + utils::rate<utils::units::bytes>(per_second * inflow.interval().count(), inflow.interval());
     }
     auto target = needed;

@@ -72,6 +72,14 @@ class incremental_backlog_tracker final : public compaction_backlog_tracker::imp
     // be compacted at an arbitrary rate.
     static constexpr std::chrono::minutes min_ingestion_span{10};
 
+    // The refills over which a tier holding more runs than the threshold is asked to
+    // compact the surplus away, a repayment_refills'th of it every refill: steadily, but
+    // not as fast as the tier fills. The tier never asks for less than its inflow, so the
+    // surplus shrinks every refill; asked to clear it within a single refill, a tier of 16
+    // runs at threshold 4 asked for four times its inflow, and a few such tiers more than
+    // compaction could do at any shares.
+    static constexpr double repayment_refills = 4;
+
     // Added to the refill period of every tier, so that a tier refilled within a fraction
     // of a second, e.g. one of tiny runs while tiny sstables are being flushed, asks for no
     // more than the bytes it holds per refill_tax.
@@ -112,10 +120,11 @@ public:
 
     virtual double backlog(const compaction_backlog_source& src, const compaction_backlog_tracker::ongoing_writes& ow, const compaction_backlog_tracker::ongoing_compactions& oc) const override;
     // The target is the sum, over the tiers holding at least min_threshold runs, of what
-    // each needs for its compaction to end by the time the tier has min_threshold new
-    // runs, i.e. the next one is due: runs * run_size over the tier's refill period,
-    // min_threshold * run_size / inflow + refill_tax, times the read discount, insofar as
-    // the reads pay for the runs past the threshold. The target is no lower than the
+    // each needs to compact by the time the tier has min_threshold new runs, i.e. the next
+    // compaction is due: the threshold's worth of runs plus a repayment_refills'th of the
+    // runs past it, times run_size, over the tier's refill period, min_threshold * run_size
+    // / inflow + refill_tax, times the read discount, insofar as the reads pay for the runs
+    // past the threshold. The target is no lower than the
     // ingestion rate while a tier is pending, whatever the reads. A tier below the
     // threshold has nothing to compact and asks for nothing. The tiers stand in for the
     // write amplification: each is one more rewrite of what is ingested.
