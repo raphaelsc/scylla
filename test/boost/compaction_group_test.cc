@@ -314,6 +314,7 @@ SEASTAR_TEST_CASE(compaction_group_rates_test) {
         BOOST_REQUIRE_EQUAL(initial.flushed_bytes.amount(), 0);
         BOOST_REQUIRE_EQUAL(initial.mean_flush_size, 0);
         BOOST_REQUIRE_EQUAL(initial.compacted_bytes.amount(), 0);
+        BOOST_REQUIRE_EQUAL(initial.compacted_bytes_long.amount(), 0);
 
         // Flushes of different sizes, close enough to be compacted together later.
         auto keys = tests::generate_partition_keys(3, s);
@@ -338,11 +339,15 @@ SEASTAR_TEST_CASE(compaction_group_rates_test) {
         BOOST_REQUIRE_EQUAL(after_flushes.compacted_bytes.amount(), 0);
         // All rates cover the same interval, so the controller can compare them.
         BOOST_REQUIRE(after_flushes.compacted_bytes.interval() == after_flushes.flushed_bytes.interval());
+        BOOST_REQUIRE(after_flushes.compacted_bytes_long.interval() == after_flushes.flushed_bytes.interval());
 
         // Regular compaction counts.
         t->enable_auto_compaction();
         t->trigger_compaction();
         BOOST_REQUIRE(eventually_true([&] { return rates().compacted_bytes.per_second() > 0; }));
+        // Both windows still cover everything since the table started.
+        auto compacted = rates();
+        BOOST_REQUIRE_EQUAL(compacted.compacted_bytes_long.amount(), compacted.compacted_bytes.amount());
         BOOST_REQUIRE(std::ranges::any_of(*t->get_sstables(), compaction::has_regular_compaction_origin));
     });
 }

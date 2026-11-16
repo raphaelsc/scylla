@@ -125,6 +125,8 @@ class compaction_group : public compaction::compaction_backlog_source {
     // they complete, so the rate follows compaction in flight rather than its completion,
     // which with tablets and incremental compaction happens every few GB at most.
     utils::moving_average_rate<utils::units::bytes, uint64_t, lowres_db_clock> _compacted_bytes{_achieved_window, _rates_start};
+    // The same over the rate window.
+    utils::moving_average_rate<utils::units::bytes, uint64_t, lowres_db_clock> _compacted_bytes_long{_rate_window, _rates_start};
     // Single-partition reads served from this group's sstables, and the sstables they read.
     // Over the achieved window, like the compacted rate: the controller discounts its target
     // by what the reads touch now, and reads starting or stopping, as a bulk load ends or

@@ -3478,6 +3478,7 @@ public:
     }
     void add_compacted_bytes(uint64_t bytes) noexcept override {
         _cg._compacted_bytes.add(bytes);
+        _cg._compacted_bytes_long.add(bytes);
     }
     bool is_auto_compaction_disabled_by_user() const noexcept override {
         return _t.is_auto_compaction_disabled_by_user();
@@ -4744,6 +4745,7 @@ compaction::compaction_group_stats compaction_group::stats() const {
             .flushed_bytes = flushed_bytes,
             .mean_flush_size = flushed_bytes.amount() > 0 ? std::exp(flushed_bytes_log_size.per(flushed_bytes)) : 0,
             .compacted_bytes = _compacted_bytes.rate(now),
+            .compacted_bytes_long = _compacted_bytes_long.rate(now),
         },
         .read_amplification = {
             .point_reads = _point_read_amplification.reads(now),

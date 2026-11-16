@@ -32,7 +32,7 @@ extern logging::logger compaction_rates_logger;
 // Rates of a compaction group, which the compaction controller compares to match
 // compaction to ingestion. Each covers its window of minutes, or the time since the
 // group was created while it is younger than that; the flushed rates share one
-// window, the compacted rate has a shorter one of its own.
+// window, the compacted rate is kept over a shorter one of its own and over that one.
 struct rate_stats {
     utils::rate<utils::units::bytes> flushed_bytes;
     // Byte-weighted mean size of the flushed sstables, in bytes, or 0 when nothing
@@ -41,6 +41,8 @@ struct rate_stats {
     // Bytes compacted by regular compaction, the one the compaction controller drives,
     // counted from its input sstables. Other kinds run with maintenance shares.
     utils::rate<utils::units::bytes> compacted_bytes;
+    // The same over the flushed rates' window, so that it covers the interval they do.
+    utils::rate<utils::units::bytes> compacted_bytes_long;
 };
 
 // Read amplification of the single-partition reads served from a compaction
@@ -89,18 +91,21 @@ struct compaction_rates {
     utils::rate<utils::units::bytes> target;
     // The bytes regular compaction compacted, from the group's stats.
     utils::rate<utils::units::bytes> achieved;
+    // The same over the window of the rates the target is based on.
+    utils::rate<utils::units::bytes> achieved_long;
 
     // The rates of two groups together, e.g. of all the groups of a shard.
     friend compaction_rates operator+(const compaction_rates& a, const compaction_rates& b) noexcept {
-        return compaction_rates{.target = a.target + b.target, .achieved = a.achieved + b.achieved};
+        return compaction_rates{.target = a.target + b.target, .achieved = a.achieved + b.achieved,
+                .achieved_long = a.achieved_long + b.achieved_long};
     }
 };
 
 // The rates of a group whose strategy has no model for the target: the target is
 // what compaction achieves, which leaves the shares as they are.
 inline compaction_rates achieved_compaction_rates(const compaction_backlog_source& src) {
-    auto achieved = src.stats().rates.compacted_bytes;
-    return compaction_rates{.target = achieved, .achieved = achieved};
+    auto rates = src.stats().rates;
+    return compaction_rates{.target = rates.compacted_bytes, .achieved = rates.compacted_bytes, .achieved_long = rates.compacted_bytes_long};
 }
 
 // Fixed cost, in bytes, that each sstable adds to the backlog on top of its own size.
