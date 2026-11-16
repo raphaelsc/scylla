@@ -5310,13 +5310,13 @@ SEASTAR_TEST_CASE(incremental_backlog_tracker_rates_test) {
         auto beyond_max_threshold = rates_of(make_source(tiers({tier(8, 100 * MB)}), flushing(10 * MB)));
         BOOST_REQUIRE_CLOSE(beyond_max_threshold.target.per_second(), needed(6, 100 * MB, 10 * MB), 1e-6);
 
-        // Three tiers of eight runs ask for the threshold's worth of each plus a quarter of the
-        // surplus one compaction takes, about 3 x 4.5 / 4 times the ingestion rate, insofar as the reads pay for the surplus: a point read touching
+        // Four tiers of eight runs ask for the threshold's worth of each plus a quarter of the
+        // surplus one compaction takes, about 4 x 4.5 / 4 times the ingestion rate, insofar as the reads pay for the surplus: a point read touching
         // threshold sstables, 4, pays for a tier's worth of runs that should have been merged
         // and leaves the target as is; one touching fewer scales it down in proportion, to
         // 1 / threshold at the least, whether it touches one sstable or there are no reads at all.
-        auto deep = tiers({tier(8, 1600 * MB), tier(8, 400 * MB), tier(8, 100 * MB)});
-        const auto deep_needed = needed(6, 1600 * MB, 10 * MB) + needed(6, 400 * MB, 10 * MB) + needed(6, 100 * MB, 10 * MB);
+        auto deep = tiers({tier(8, 6400 * MB), tier(8, 1600 * MB), tier(8, 400 * MB), tier(8, 100 * MB)});
+        const auto deep_needed = needed(6, 6400 * MB, 10 * MB) + needed(6, 1600 * MB, 10 * MB) + needed(6, 400 * MB, 10 * MB) + needed(6, 100 * MB, 10 * MB);
         BOOST_REQUIRE_CLOSE(rates_of(make_source(deep, flushing(10 * MB, 4))).target.per_second(), deep_needed, 1e-6);
         BOOST_REQUIRE_CLOSE(rates_of(make_source(deep, flushing(10 * MB, 2))).target.per_second(), deep_needed / 2, 1e-6);
         BOOST_REQUIRE_CLOSE(rates_of(make_source(deep, flushing(10 * MB, 1))).target.per_second(), deep_needed / 4, 1e-6);
