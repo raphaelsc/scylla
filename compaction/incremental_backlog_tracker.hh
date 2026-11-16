@@ -37,12 +37,14 @@ class incremental_backlog_tracker final : public compaction_backlog_tracker::imp
     mutable size_t _tiers = 0;
     mutable size_t _max_runs_in_tier = 0;
     // A tier with enough runs to compact: the runs its next compaction reads, at most what
-    // one compaction takes, the mean size of its runs, and the rate at which its data was
-    // ingested, from the ingestion metadata of its sstables.
+    // one compaction takes, the mean size of its runs, the rate at which its data was
+    // ingested, from the ingestion metadata of its sstables, and the tiers of runs no
+    // smaller than the flushed sstables below it, each a merge its data went through.
     struct pending_tier {
         size_t runs;
         double run_size;
         utils::rate<utils::units::bytes> ingestion;
+        size_t tiers_below;
     };
     // The tiers with enough runs to compact and the runs their next compactions read:
     // what the target is made of.
@@ -119,7 +121,9 @@ public:
     // write amplification: each is one more rewrite of what is ingested.
     //
     // A tier's inflow is the group's flushed bytes when its runs are the size of the
-    // flushed sstables or larger, which every flushed byte passes through; a tier of
+    // flushed sstables, which every flushed byte passes through; a tier of larger runs
+    // receives what the merges of the tiers below kept of them, the flushed bytes times
+    // what regular compaction wrote over what it read, once per tier below; a tier of
     // smaller runs only receives the flushes of its size, and its inflow is the rate its
     // data was ingested at, from the ingestion metadata of its sstables, no higher than
     // the flushed bytes. When nothing was flushed within the rate window, e.g. after a

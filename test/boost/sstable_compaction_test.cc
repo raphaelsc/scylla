@@ -5329,6 +5329,29 @@ SEASTAR_TEST_CASE(incremental_backlog_tracker_rates_test) {
         // 8 runs of 50 KB over 30 minutes, not the whole flush rate, which would add 6 / 4 of it.
         auto tiny = rates_of(make_source(tiers({tier(5, 100 * MB), tier(8, 50 * KB, {{0, 30}})}), flushing(10 * MB)));
         BOOST_REQUIRE_CLOSE(tiny.target.per_second(), needed(5, 100 * MB, 10 * MB) + needed(6, 50 * KB, 8 * 50 * KB / 1800), 1e-6);
+        // A tier of runs larger than the flushed sstables receives what the merges of the tiers
+        // below kept of the flushes: with merges keeping half of what they read, the tier one
+        // above the flush tier is charged half the flush rate, the one two above a quarter, the
+        // flush tier all of it. Until a merge ends, merges keep everything.
+        auto merging = [&] (double kept) {
+            auto stats = flushing(10 * MB);
+            stats.rates.completed_input_bytes = rate(1000 * MB, 600s);
+            stats.rates.completed_output_bytes = rate(kept * 1000 * MB, 600s);
+            return stats;
+        };
+        auto three_ready = tiers({tier(4, 1600 * MB), tier(4, 400 * MB), tier(4, 100 * MB)});
+        auto deduplicated = rates_of(make_source(three_ready, merging(0.5)));
+        BOOST_REQUIRE_CLOSE(deduplicated.target.per_second(),
+                needed(4, 1600 * MB, 2.5 * MB) + needed(4, 400 * MB, 5 * MB) + needed(4, 100 * MB, 10 * MB), 1e-6);
+        auto unique = rates_of(make_source(three_ready, merging(1)));
+        BOOST_REQUIRE_CLOSE(unique.target.per_second(),
+                needed(4, 1600 * MB, 10 * MB) + needed(4, 400 * MB, 10 * MB) + needed(4, 100 * MB, 10 * MB), 1e-6);
+        auto none_ended = rates_of(make_source(three_ready, flushing(10 * MB)));
+        BOOST_REQUIRE_CLOSE(none_ended.target.per_second(), unique.target.per_second(), 1e-6);
+        // A tier in between, empty for the moment, isn't counted: the tier above it is charged
+        // as if it were one tier above the flush tier.
+        auto gap = rates_of(make_source(tiers({tier(4, 1600 * MB), tier(4, 100 * MB)}), merging(0.5)));
+        BOOST_REQUIRE_CLOSE(gap.target.per_second(), needed(4, 1600 * MB, 5 * MB) + needed(4, 100 * MB, 10 * MB), 1e-6);
         // A tier of runs the size of the flushes gets the whole flush rate, but its refill is
         // taxed with a second: 6 runs of 1 MB refilled every 4 s ask for 6 MB over 5 s, not 4.
         auto taxed = rates_of(make_source(tier(6, 1 * MB), flushing(1 * MB, 100, 1 * MB)));

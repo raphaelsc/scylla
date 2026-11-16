@@ -596,6 +596,8 @@ protected:
     const uint32_t _sstable_level;
     uint64_t _start_size = 0;
     uint64_t _end_size = 0;
+    // The data size of the sstables written, comparable to the input's data size.
+    uint64_t _output_data_size = 0;
     // fully expired files, which are skipped, aren't taken into account.
     uint64_t _compacting_data_file_size = 0;
     api::timestamp_type _compacting_max_timestamp = api::min_timestamp;
@@ -719,6 +721,7 @@ protected:
         writer->writer.consume_end_of_stream();
         writer->sst->open_data().get();
         _end_size += writer->sst->bytes_on_disk();
+        _output_data_size += writer->sst->data_size();
         _new_unused_sstables.push_back(writer->sst);
         _new_partial_sstables.erase(writer->sst);
     }
@@ -1381,6 +1384,7 @@ public:
         // credited it, is credited now, so that the input counts in full.
         if (_type == compaction_type::Compaction) {
             _table_s.add_compacted_bytes(_progress_monitor.credit_up_to(_input_data_size));
+            _table_s.add_completed_compaction(_input_data_size, _output_data_size);
         }
     }
 private:

@@ -58,7 +58,22 @@ incremental_backlog_tracker::calculate_sstables_backlog_contribution(const compa
     if (!all.empty()) {
       auto buckets = incremental_compaction_strategy::get_buckets(all, options);
       tiers = buckets.size();
-      for (auto& bucket : buckets) {
+      auto run_size = [] (const std::vector<sstables::frozen_sstable_run>& bucket) {
+          int64_t bucket_bytes = 0;
+          for (const sstables::frozen_sstable_run& run_ptr : bucket) {
+              bucket_bytes += run_ptr->data_size();
+          }
+          return double(bucket_bytes) / bucket.size();
+      };
+      std::vector<double> run_sizes;
+      for (const auto& bucket : buckets) {
+          run_sizes.push_back(run_size(bucket));
+      }
+      // The tiers whose runs are the size of the flushed sstables or larger, which their data
+      // went through on its way up, a merge at each.
+      auto flush_tier_size = src.stats().rates.mean_flush_size * options.bucket_low;
+      for (size_t i = 0; i < buckets.size(); i++) {
+        auto& bucket = buckets[i];
         max_runs_in_tier = std::max(max_runs_in_tier, bucket.size());
         if (!incremental_compaction_strategy::is_bucket_interesting(bucket, threshold)) {
             continue;
@@ -69,14 +84,13 @@ incremental_backlog_tracker::calculate_sstables_backlog_contribution(const compa
         // the compaction ends.
         auto runs = std::min(bucket.size(), max_threshold);
         eligible_runs += runs;
-        int64_t bucket_bytes = 0;
-        for (const sstables::frozen_sstable_run& run_ptr : bucket) {
-            bucket_bytes += run_ptr->data_size();
-        }
         pending_tiers.push_back(pending_tier{
             .runs = runs,
-            .run_size = double(bucket_bytes) / bucket.size(),
+            .run_size = run_sizes[i],
             .ingestion = compaction::ingestion_rate_from_sstables(bucket, min_ingestion_span),
+            .tiers_below = size_t(std::ranges::count_if(run_sizes, [&] (double size) {
+                return size >= flush_tier_size && size < run_sizes[i];
+            })),
         });
         for (const sstables::frozen_sstable_run& run_ptr : bucket) {
             auto& run = *run_ptr;
@@ -154,9 +168,19 @@ compaction_rates incremental_backlog_tracker::rates(const compaction_backlog_sou
     // target of 0, and a tier holding more than threshold runs asks for the surplus to be
     // gone by its next deadline.
     //
-    // Every flushed byte reaches every tier whose runs are the size of the flushed sstables
-    // or larger, i.e. no smaller than bucket_low times their mean size, as ICS tiers them,
-    // so their inflow is the rate the table flushes at. A tier of runs smaller
+    // Every flushed byte reaches the tier whose runs are the size of the flushed sstables,
+    // i.e. no smaller than bucket_low times their mean size, as ICS tiers them, so its
+    // inflow is the rate the table flushes at. Less reaches the tiers above it: a merge
+    // keeps one version of each row, so overwrites and deletions shrink what moves up. In
+    // round 8 write-heavy, the second and third tiers above the flush tier received 54%
+    // and 21% of the flushed bytes; charging them all of it made the target four times
+    // the flush rate, which no shares reached, while compaction kept up with what there
+    // was to compact. A tier above the flush tier is charged the flushed bytes times what
+    // regular compaction kept of what it read, over the last two hours, once per tier below
+    // it. That's one ratio for all tiers, though the higher ones keep less: in round 8
+    // write-heavy it charged the first tier above 63% instead of 86%, the second 40%
+    // instead of 54% and the third 25% instead of 21%. A tier of the tiers below that is
+    // momentarily empty isn't counted, and the tier is charged more. A tier of runs smaller
     // than the flushed sstables, which tiny flushes build while ICS keeps them apart from
     // the rest (see tiny_sstables_written_recently), receives only the flushes of its size:
     // its inflow is the rate its own data was ingested at, from its sstables, which can't
@@ -178,6 +202,9 @@ compaction_rates incremental_backlog_tracker::rates(const compaction_backlog_sou
     auto urgency = urgency_factor(threshold, discount);
     const auto& flushed = stats.rates.flushed_bytes;
     const bool flushing = flushed.amount() > 0;
+    // What a merge keeps of what it reads; all of it until a regular compaction ended.
+    const auto& merged = stats.rates.completed_input_bytes;
+    const double kept = merged.amount() > 0 ? std::clamp(stats.rates.completed_output_bytes.amount() / merged.amount(), 0.0, 1.0) : 1.0;
     utils::rate<utils::units::bytes> needed;
     for (const auto& tier : _pending_tiers) {
         auto inflow = tier.ingestion;
@@ -185,6 +212,9 @@ compaction_rates incremental_backlog_tracker::rates(const compaction_backlog_sou
             bool receives_flushes = tier.run_size >= stats.rates.mean_flush_size * _options.bucket_low;
             if (receives_flushes || flushed.per_second() < inflow.per_second()) {
                 inflow = flushed;
+            }
+            if (receives_flushes) {
+                inflow = inflow * std::pow(kept, tier.tiers_below);
             }
         }
         if (inflow.per_second() <= 0) {
