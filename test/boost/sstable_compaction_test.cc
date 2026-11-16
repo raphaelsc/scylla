@@ -5354,9 +5354,9 @@ SEASTAR_TEST_CASE(incremental_backlog_tracker_rates_test) {
         auto gap = rates_of(make_source(tiers({tier(4, 1600 * MB), tier(4, 100 * MB)}), merging(0.5)));
         BOOST_REQUIRE_CLOSE(gap.target.per_second(), needed(4, 1600 * MB, 5 * MB) + needed(4, 100 * MB, 10 * MB), 1e-6);
         // A tier of runs the size of the flushes gets the whole flush rate, but its refill is
-        // taxed with a second: 6 runs of 1 MB refilled every 4 s ask for 4.5 MB over 5 s, not 4.
-        auto taxed = rates_of(make_source(tier(6, 1 * MB), flushing(1 * MB, 100, 1 * MB)));
-        BOOST_REQUIRE_CLOSE(taxed.target.per_second(), 4.5 * MB / 5, 1e-6);
+        // taxed with a second: 6 runs of 4 MB refilled every 16 s ask for 4.5 x 4 MB over 17 s, not 16.
+        auto taxed = rates_of(make_source(tier(6, 4 * MB), flushing(1 * MB, 100, 4 * MB)));
+        BOOST_REQUIRE_CLOSE(taxed.target.per_second(), 4.5 * 4 * MB / 17, 1e-6);
 
         // When nothing was flushed lately, e.g. after a restart, the rate the pending tiers' data
         // was ingested at stands in, e.g. 4 runs ingested over 40 minutes.
