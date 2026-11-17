@@ -31,6 +31,11 @@ class incremental_backlog_tracker final : public compaction_backlog_tracker::imp
     mutable int64_t _total_backlog_bytes = 0;
     mutable double _sstables_backlog_contribution = 0.0f;
     mutable std::unordered_set<sstables::run_id> _sstable_runs_contributing_backlog;
+    // The shape of the tree, for the compaction rates: the runs eligible for compaction
+    // and the tiers they fall into, logged with the rates.
+    mutable size_t _runs = 0;
+    mutable size_t _tiers = 0;
+    mutable size_t _max_runs_in_tier = 0;
     // A tier with enough runs to compact: the runs its next compaction reads, at most what
     // one compaction takes, the mean size of its runs, the rate at which its data was
     // ingested, from the ingestion metadata of its sstables, and the tiers of runs no
@@ -41,10 +46,18 @@ class incremental_backlog_tracker final : public compaction_backlog_tracker::imp
         utils::rate<utils::units::bytes> ingestion;
         size_t tiers_below;
     };
-    // The tiers with enough runs to compact: what the target is made of.
+    // The tiers with enough runs to compact and the runs their next compactions read:
+    // what the target is made of.
     mutable size_t _eligible_tiers = 0;
+    mutable size_t _eligible_runs = 0;
     mutable std::vector<pending_tier> _pending_tiers;
 
+    // URGENCY_FACTOR: the runs the eligible tiers hold over the runs they hold at the
+    // threshold, _eligible_runs / (_eligible_tiers * threshold), times the read discount.
+    // 1 when every eligible tier has just reached the threshold and the reads pay for it,
+    // more the further past the threshold the tiers are, and 1 with no tier eligible,
+    // when the target is 0 anyway.
+    double urgency_factor(double threshold, double read_discount) const;
     // The sstables a point read touched, on average, over the threshold, between
     // 1 / threshold and 1: how far the reads pay for the tiers past the threshold. A read
     // touching threshold sstables, or more, pays for a tier's worth of runs that should
@@ -92,7 +105,11 @@ class incremental_backlog_tracker final : public compaction_backlog_tracker::imp
         int64_t total_backlog_bytes;
         float sstables_backlog_contribution;
         std::unordered_set<sstables::run_id> sstable_runs_contributing_backlog;
+        size_t runs;
+        size_t tiers;
+        size_t max_runs_in_tier;
         size_t eligible_tiers;
+        size_t eligible_runs;
         std::vector<pending_tier> pending_tiers;
     };
 
